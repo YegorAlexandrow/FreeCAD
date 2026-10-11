@@ -8,6 +8,9 @@ on:
   push:
     branches:
       - claude/keen-keller-egnr4v
+    paths-ignore:
+      - 'rezets-cad/**'
+      - '.github/workflows/build_windows_preview.yml'
 
 permissions:
   contents: read
