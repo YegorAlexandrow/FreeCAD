@@ -9,6 +9,7 @@ module.exports = async function open(opts = {}) {
     ? r.fulfill({ status: 200, contentType: 'application/wasm', body: fs.readFileSync(process.env.OCCT_WASM || ROOT + '/occt-import-js.wasm') })
     : r.fulfill({ status: 200, contentType: 'text/html', body: fs.readFileSync(ROOT + '/test.html', 'utf8') }));
   if (opts.clearStorage !== false) await ctx.addInitScript(() => { try { localStorage.clear(); } catch {} });
+  if (opts.init) await ctx.addInitScript(opts.init);
   const p = await ctx.newPage(); const logs = [];
   p.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') logs.push(m.type() + ': ' + m.text()); });
   p.on('pageerror', e => logs.push('PAGEERROR: ' + e.message + '\n' + e.stack));
