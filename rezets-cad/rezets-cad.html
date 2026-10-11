@@ -308,6 +308,8 @@ const ICON = {
   interf: '<rect x="3" y="7" width="11" height="11" rx="1"/><rect x="10" y="4" width="11" height="11" rx="1"/><path d="M10 7h4v8h-4z" fill="currentColor" opacity=".35"/>',
   mass: '<path d="M6 9h12l2 11H4z"/><circle cx="12" cy="6" r="2.2"/>',
   bom: '<rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+  sweep: '<path d="M4 18c4 0 5-12 10-12h6"/><rect x="2.5" y="15.5" width="3" height="5" rx=".5"/><rect x="18.5" y="3.5" width="3" height="5" rx=".5"/>',
+  loft: '<rect x="4" y="15" width="16" height="5" rx="1"/><circle cx="12" cy="6" r="3"/><path d="M4 15 9 7.5M20 15l-5-7.5"/>',
   hole: '<path d="M7 4h10M9 4v5h6V4M10.5 9v10M13.5 9v10M10.5 19 12 21l1.5-2"/>',
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
@@ -815,6 +817,35 @@ function extrudeGeometry(loops, z0, z1) {
   const g = new THREE.ExtrudeGeometry(shapes, { depth: z1 - z0, bevelEnabled: false, steps: 1, curveSegments: 1 });
   g.translate(0, 0, z0); return cleanGeo(g);
 }
+// Miter offset of a closed ring; d > 0 grows the material (outer rings are CCW, holes CW).
+function offsetRing(pts, d) {
+  const n = pts.length; const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[(i - 1 + n) % n], p = pts[i], b = pts[(i + 1) % n];
+    let e1x = p[0] - a[0], e1y = p[1] - a[1]; let l = Math.hypot(e1x, e1y) || 1; e1x /= l; e1y /= l;
+    let e2x = b[0] - p[0], e2y = b[1] - p[1]; l = Math.hypot(e2x, e2y) || 1; e2x /= l; e2y /= l;
+    const n1x = e1y, n1y = -e1x, n2x = e2y, n2y = -e2x; const k = 1 + n1x * n2x + n1y * n2y;
+    out.push(k < 1e-6 ? [p[0] + n1x * d, p[1] + n1y * d] : [p[0] + (n1x + n2x) * d / k, p[1] + (n1y + n2y) * d / k]);
+  }
+  return out;
+}
+// Extrusion with drafted walls: the profile is offset by off(z) at each ring height.
+function taperedExtrude(loops, zs, off) {
+  const tris = []; const V = (p, z) => new THREE.Vector3(p[0], p[1], z);
+  for (const l of loops) {
+    const rings = zs.map((z) => ({ z, o: offsetRing(l.pts, off(z)), h: l.holes.map((hh) => offsetRing(hh, off(z))) }));
+    for (let j = 0; j + 1 < rings.length; j++) { const A = rings[j], B = rings[j + 1];
+      for (const [ra, rb] of [[A.o, B.o], ...A.h.map((hh, k) => [hh, B.h[k]])]) for (let i = 0; i < ra.length; i++) { const i2 = (i + 1) % ra.length; tris.push([V(ra[i], A.z), V(ra[i2], A.z), V(rb[i2], B.z)], [V(ra[i], A.z), V(rb[i2], B.z), V(rb[i], B.z)]); } }
+    for (const R of [rings[0], rings[rings.length - 1]]) { const all = R.o.concat(...R.h); const t = THREE.ShapeUtils.triangulateShape(R.o.map((p) => new THREE.Vector2(...p)), R.h.map((hh) => hh.map((p) => new THREE.Vector2(...p)))); for (const [a, b, c] of t) tris.push([V(all[a], R.z), V(all[b], R.z), V(all[c], R.z)]); }
+  }
+  return orientedGeometry(tris);
+}
+// Half-space on the side of a plane where a point lies, as a big box (for "up to face").
+function halfSpaceBox(Q, n, toward, R) {
+  const ns = n.clone().normalize(); if (ns.dot(toward.clone().sub(Q)) < 0) ns.negate();
+  const u = new THREE.Vector3().crossVectors(ns, Math.abs(ns.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const v = new THREE.Vector3().crossVectors(ns, u);
+  const g = new THREE.BoxGeometry(4 * R, 4 * R, 4 * R).translate(0, 0, 2 * R); g.applyMatrix4(new THREE.Matrix4().makeBasis(u, v, ns).setPosition(Q)); return cleanGeo(g);
+}
 // Solid of revolution, built triangle by triangle and then oriented consistently.
 function revolveGeometry(loops, axisP, axisD, angleDeg) {
   const full = Math.abs(angleDeg) >= 359.999; const ang = (full ? 360 : angleDeg) * Math.PI / 180;
@@ -869,7 +900,8 @@ function featureEdges(geo, angleDeg = 28) {
   const normals = []; const map = new Map(); const out = [];
   for (let t = 0; t < nT; t++) {
     const a = V(3 * t), b = V(3 * t + 1), c = V(3 * t + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a));
-    if (n.length() < 1e-12) { normals.push(null); continue; } n.normalize(); normals.push(n);
+    // Needles left by booleans (height of microns) have meaningless normals: they take no part.
+    const L2 = Math.max(a.distanceToSquared(b), b.distanceToSquared(c), c.distanceToSquared(a)); if (n.length() < 1e-12 || n.length() / Math.sqrt(L2) < 5e-5) { normals.push(null); continue; } n.normalize(); normals.push(n);
     const vs = [a, b, c]; const ks = vs.map(kv);
     for (let e = 0; e < 3; e++) { const k1 = ks[e], k2 = ks[(e + 1) % 3]; const key = k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1; const ent = map.get(key); if (ent) ent.t.push(t); else map.set(key, { a: vs[e], b: vs[(e + 1) % 3], t: [t] }); }
   }
@@ -882,7 +914,7 @@ function featureEdges(geo, angleDeg = 28) {
     // Spatial grid over all triangle edges, so each lonely edge only looks at its neighbours.
     geo.computeBoundingBox(); const bb = geo.boundingBox; const cell = Math.max(bb.getSize(new THREE.Vector3()).length() / 96, 1e-3);
     const grid = new Map(); const ck = (x, y, z) => x + ',' + y + ',' + z; const ci = (v) => Math.floor(v / cell);
-    const triEdges = [];
+    const triEdges = []; const bigTris = [];
     for (let t = 0; t < nT; t++) {
       if (!normals[t]) continue; const vs = [V(3 * t), V(3 * t + 1), V(3 * t + 2)];
       for (let e = 0; e < 3; e++) {
@@ -891,6 +923,9 @@ function featureEdges(geo, angleDeg = 28) {
         if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 4096) continue;
         for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) { const k = ck(x, y, z); let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(idx); }
       }
+      // Triangles too: after a boolean the other side of an edge may be one big triangle.
+      const tb = new THREE.Box3().setFromPoints(vs); const X0 = ci(tb.min.x), X1 = ci(tb.max.x), Y0 = ci(tb.min.y), Y1 = ci(tb.max.y), Z0 = ci(tb.min.z), Z1 = ci(tb.max.z);
+      if ((X1 - X0 + 1) * (Y1 - Y0 + 1) * (Z1 - Z0 + 1) > 4096) bigTris.push(t); else for (let x = X0; x <= X1; x++) for (let y = Y0; y <= Y1; y++) for (let z = Z0; z <= Z1; z++) { const k = 't' + ck(x, y, z); let l = grid.get(k); if (!l) grid.set(k, (l = [])); l.push(t); }
     }
     const tmp = new THREE.Vector3(), seg = new THREE.Line3();
     for (const e of lonely) {
@@ -899,6 +934,13 @@ function featureEdges(geo, angleDeg = 28) {
         const [p, r, t] = triEdges[idx]; if (t === e.t[0]) continue;
         seg.set(p, r); seg.closestPointToPoint(m, true, tmp);
         if (tmp.distanceToSquared(m) < 1e-8) { found = true; if (normals[t].dot(own) < cos) { crease = true; break; } }
+      }
+      if (!found) {
+        const tri = new THREE.Triangle();
+        for (const t of [...(grid.get('t' + ck(ci(m.x), ci(m.y), ci(m.z))) || []), ...bigTris]) {
+          if (t === e.t[0]) continue; tri.set(V(3 * t), V(3 * t + 1), V(3 * t + 2)); tri.closestPointToPoint(m, tmp);
+          if (tmp.distanceToSquared(m) < 4e-6) { found = true; if (normals[t].dot(own) < cos) { crease = true; break; } }
+        }
       }
       if (crease || !found) out.push(e.a, e.b);
     }
@@ -969,9 +1011,11 @@ function fitCircle3(a, b, c) {
 }
 // Splits chains into straight runs and circles.
 function classifyChains(chains) {
-  const lines = [], circles = [], verts = [];
+  const lines = [], circles = [], verts = [], curves = [];
   for (const ch of chains) {
     const P = ch.pts.map(V3); const n = P.length;
+    // Smooth curves that are not circles (a cylinder cut by an inclined face): drawn, not split into lines.
+    if (n >= 6) { let maxTurn = 0, total = 0; for (let i = 1; i + 1 < n; i++) { const tr = Math.acos(Math.max(-1, Math.min(1, P[i].clone().sub(P[i - 1]).normalize().dot(P[i + 1].clone().sub(P[i]).normalize())))); maxTurn = Math.max(maxTurn, tr); total += tr; } if (maxTurn < 0.45 && total > 0.3) { curves.push(P); if (P[0].distanceTo(P[n - 1]) > 1e-6) verts.push(P[0], P[n - 1]); continue; } }
     let s0 = 0;
     for (let i = 1; i < n; i++) {
       const last = i === n - 1;
@@ -980,7 +1024,7 @@ function classifyChains(chains) {
     }
   }
   const uniq = []; for (const v of verts) if (!uniq.some((u) => u.distanceToSquared(v) < 1e-8)) uniq.push(v);
-  return { lines, circles, verts: uniq };
+  return { lines, circles, verts: uniq, curves };
 }
 let refCache = { key: null };
 function modelRefs(f) {
@@ -1086,6 +1130,8 @@ function buildTool(f, body, cyls = []) {
   const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров');
   const loops = profileLoops(reg, selectedRegionIds(f, reg)); if (!loops.length) throw new Error('Не выбрано ни одной области');
   const M = planeMatrix(sf.plane); let g;
+  if (f.type === 'loft') { g = loftGeometry(f); g.computeVertexNormals(); return g; }
+  if (f.type === 'sweep') { g = sweepGeometry(f, sf, loops); g.computeVertexNormals(); return g; }
   if (f.type === 'extrude') {
     // A sliver of overlap makes a boss fuse with the face it starts on, and a cut pierce it.
     // It is only added on the side where it ends up inside the body or in empty space.
@@ -1096,15 +1142,32 @@ function buildTool(f, body, cyls = []) {
       const inside = isInside(body, ctr.clone().add(back));
       eps = f.mode === 'cut' ? (inside ? 0 : 0.002) : (inside ? 0.002 : 0);
     }
+    // "Up to face": exact depth for a parallel face, otherwise extrude past it and clip by its plane.
+    let clip = null;
+    if (f.end === 'face') {
+      const T = f.target; if (!T) throw new Error('Выберите грань или плоскость, до которой вытягивать');
+      const ids = selectedRegionIds(f, reg); const r0 = reg.faces.find((x) => ids.has(x.id)) || reg.faces[0]; const C = toWorld(sf.plane, r0.sample[0], r0.sample[1]);
+      const n = new THREE.Vector3(...sf.plane.n), nt = new THREE.Vector3(...T.n).normalize(); const cosA = n.dot(nt); if (Math.abs(cosA) < 1e-6) throw new Error('Грань параллельна направлению вытягивания');
+      const Q = new THREE.Vector3(...T.o); const sAlong = Q.clone().sub(C).dot(nt) / cosA; f = { ...f, dir: sAlong < 0 ? -1 : 1 };
+      if (body) { const inside = isInside(body, C.clone().addScaledVector(n, -f.dir * 0.01)); eps = f.mode === 'cut' ? (inside ? 0 : 0.002) : (inside ? 0.002 : 0); }
+      const off = f.offset || 0;
+      if (Math.abs(Math.abs(cosA) - 1) < 1e-9) { d = Math.abs(sAlong) - off; if (d <= 1e-6) throw new Error('Грань слишком близко к эскизу'); }
+      else { body?.computeBoundingBox(); const sph = body ? body.boundingBox.getBoundingSphere(new THREE.Sphere()) : new THREE.Sphere(C, 100); const Rr = sph.radius + sph.center.distanceTo(C) + Math.abs(sAlong) + 10; d = 2 * Rr;
+        const ns = nt.clone(); if (ns.dot(C.clone().sub(Q)) < 0) ns.negate(); clip = halfSpaceBox(Q.clone().addScaledVector(ns, off), nt, C, Rr); }
+    }
     // "Through all" only needs to clear the body; a huge tool loses precision in the boolean.
     if (f.end === 'through') { if (body) { body.computeBoundingBox(); const sph = body.boundingBox.getBoundingSphere(new THREE.Sphere()); d = 2 * (sph.radius + sph.center.distanceTo(new THREE.Vector3(...sf.plane.o))) + 10; } else d = 1000; }
     let z0, z1;
     if (f.end === 'mid') { z0 = -d / 2; z1 = d / 2; }
     else if (f.dir === -1) { z0 = -d; z1 = eps; } else { z0 = -eps; z1 = d; }
     if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = -d; z1 = d; }
-    g = extrudeGeometry(loops, z0, z1);
+    if (f.draft > 0) {
+      const tn = Math.tan(f.draft * Math.PI / 180) * (f.draftOut ? 1 : -1); const zs = z0 < -1e-3 && z1 > 1e-3 ? [z0, 0, z1] : [z0, z1];
+      g = taperedExtrude(loops, zs, (z) => tn * Math.abs(z));
+    } else g = extrudeGeometry(loops, z0, z1);
     const n = new THREE.Vector3(...sf.plane.n);
-    for (const e of Object.values(sf.sk.ents)) if ((e.t === 'circle' || e.t === 'arc') && !e.constr && !e.ext) { const c = gp(sf.sk, e.c); cyls.push({ p: toWorld(sf.plane, c.x, c.y), dir: n.clone(), r: e.r }); }
+    if (!(f.draft > 0)) for (const e of Object.values(sf.sk.ents)) if ((e.t === 'circle' || e.t === 'arc') && !e.constr && !e.ext) { const c = gp(sf.sk, e.c); cyls.push({ p: toWorld(sf.plane, c.x, c.y), dir: n.clone(), r: e.r }); }
+    if (clip) { g.applyMatrix4(M); g.computeVertexNormals(); return boolean(g, clip, INTERSECTION); }
   } else {
     let ap, ad;
     if (f.axis === 'H' || f.axis === 'V') { ap = [0, 0]; ad = f.axis === 'H' ? [1, 0] : [0, 1]; }
@@ -1372,7 +1435,7 @@ function entState(sk, e) {
 function ptState(id) { const a = S.analysis; if (!a || isRefPt(id) || editSk()?.pts[id]?.fixed) return 'full'; const i = a.sys.idx['p' + id]; return a.free.has(i) || a.free.has(i + 1) ? 'under' : 'full'; }
 
 // ---------------- rendering of sketches ----------------
-function sketchVisible(f) { return f.show === true || (f.show !== false && !S.doc.features.some((g) => g.sketch === f.id)); }
+function sketchVisible(f) { return f.show === true || (f.show !== false && !S.doc.features.some((g) => g.sketch === f.id || g.path === f.id || g.sketches?.includes(f.id))); }
 function drawSketchObjects(f, active) {
   const sk = f.sk; const pl = f.plane; const W = (u, v) => toWorld(pl, u, v);
   const buckets = new Map(); const push = (key, mat, arr) => { if (!buckets.has(key)) buckets.set(key, { mat, arr: [] }); buckets.get(key).arr.push(...arr); };
@@ -1609,7 +1672,7 @@ function regionAt(ev) {
 }
 function partHover(ev) {
   if (S.pm?.pattern) { patternPick(ev, false); return; }
-  if (S.pm?.shell) { const p = partPickAt(ev); showFaceHover(p?.face || null); return; }
+  if (S.pm?.shell || S.pm?.pickTarget) { const p = partPickAt(ev); showFaceHover(p?.face || null); return; }
   if (S.pm?.edgePick) { S.pm.hoverEdge = pickEdge(ev, S.pm.topo); drawEdgeSelection(); return; }
   if (S.measure) { S.measure.hover = measurePick(ev); drawMeasure(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); S.hoverRegion = r ? r.id : null; drawRegions(); return; }
@@ -1620,6 +1683,7 @@ function partHover(ev) {
 function partClick(ev) {
   if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.shell) { shellClick(ev); return; }
+  if (S.pm?.pickTarget) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.target = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.target = planeByKey(p.plane); else return; S.pm.pickTarget = false; renderSide(); schedulePreview(); return; }
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) toggleRegion(r.id); return; }
@@ -2315,14 +2379,15 @@ function edgeTopology(body, cyls) {
     }
   }
   // Seams along cylinder walls are artefacts of the mesh, not edges of the part.
-  const onCyl = (v) => (cyls || []).some((cy) => { const w = v.clone().sub(cy.p); const t = w.dot(cy.dir); return Math.abs(w.addScaledVector(cy.dir, -t).length() - cy.r) < 5e-3; });
-  const cl = classifyChains(chainSegments(segs.filter((sg, i) => !onCircle[i] && !(onCyl(new THREE.Vector3(sg[0], sg[1], sg[2])) && onCyl(new THREE.Vector3(sg[3], sg[4], sg[5])))), 3));
+  const onCylAx = (a, b) => (cyls || []).some((cy) => { const on = (v) => { const w = v.clone().sub(cy.p); const t = w.dot(cy.dir); return Math.abs(w.addScaledVector(cy.dir, -t).length() - cy.r) < 5e-3; }; return on(a) && on(b) && Math.abs(b.clone().sub(a).normalize().dot(cy.dir)) > 0.999; });
+  const cl = classifyChains(chainSegments(segs.filter((sg, i) => !onCircle[i] && !onCylAx(new THREE.Vector3(sg[0], sg[1], sg[2]), new THREE.Vector3(sg[3], sg[4], sg[5]))), 3));
   const onRim = (v) => circles.some((c) => { const w = v.clone().sub(c.c); return Math.abs(w.dot(c.n)) < 1e-2 && Math.abs(w.length() - c.r) < 1e-2; });
   cl.lines = cl.lines.filter(([a, b]) => !(onRim(a) && onRim(b)));
   const verts = cl.verts.filter((v) => !onRim(v)); for (const c of circles) if (!verts.some((v) => v.distanceToSquared(c.c) < 1e-8)) verts.push(c.c);
   // What gets drawn: rim segments as they are, straight edges as clean runs.
   const display = []; segs.forEach((sg, i) => { if (onCircle[i]) display.push(...sg); });
   for (const [a, b] of cl.lines) display.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  for (const P of cl.curves) for (let i = 0; i + 1 < P.length; i++) display.push(P[i].x, P[i].y, P[i].z, P[i + 1].x, P[i + 1].y, P[i + 1].z);
   const val = { lines: cl.lines, circles, verts, display }; topoCache.set(body, val); return val;
 }
 function bodyTopo() { return edgeTopology(S.body, S.cyls); }
@@ -2528,6 +2593,123 @@ function openEdgePM(f, isNew) {
   if (!base.body) { toast('Перед этим элементом нет тела', 'warn'); return; }
   openPM({ kind: 'feature', feature: f, isNew, edgePick: true, topo: edgeTopology(base.body, base.cyls) });
   drawEdgeSelection();
+}
+
+// ============================================================================================
+// Sweep and loft. Sweep moves the profile along a path with parallel-transported frames and
+// mitres the section at sharp corners, so straight runs are exact. Loft joins closed profiles of
+// several sketches, resampled so that every corner of every profile is kept.
+// ============================================================================================
+// Ordered points of the open (or closed) chain of curves in a path sketch, in world coordinates.
+function pathPoints(sf) {
+  const sk = sf.sk; const ents = Object.values(sk.ents).filter((e) => !e.constr && !e.ext && (e.t === 'line' || e.t === 'arc'));
+  if (!ents.length) throw new Error('В эскизе траектории нет линий или дуг');
+  const ends = (e) => [e.p1, e.p2]; const deg = new Map(); for (const e of ents) for (const p of ends(e)) deg.set(p, (deg.get(p) || 0) + 1);
+  if ([...deg.values()].some((d) => d > 2)) throw new Error('Траектория должна быть одной цепочкой без ответвлений');
+  let start = ents.find((e) => deg.get(e.p1) === 1 || deg.get(e.p2) === 1) || ents[0]; let from = deg.get(start.p1) === 1 ? start.p1 : deg.get(start.p2) === 1 ? start.p2 : start.p1;
+  const used = new Set(); const pts = [gp(sk, from)]; let e = start;
+  while (e && !used.has(e.id)) {
+    used.add(e.id); const fwd = e.p1 === from; const to = fwd ? e.p2 : e.p1;
+    if (e.t === 'arc') { const { a0, sw } = arcSpan(sk, e); const c = gp(sk, e.c); const N = Math.max(4, Math.ceil(sw / (2 * Math.acos(Math.max(-1, 1 - 0.002 / Math.max(e.r, 1e-6)))))); for (let i = 1; i <= N; i++) { const t = fwd ? a0 + sw * i / N : a0 + sw * (1 - i / N); pts.push(i === N ? gp(sk, to) : { x: c.x + e.r * Math.cos(t), y: c.y + e.r * Math.sin(t) }); } }
+    else pts.push(gp(sk, to));
+    from = to; e = ents.find((x) => !used.has(x.id) && (x.p1 === to || x.p2 === to));
+  }
+  if (used.size !== ents.length) throw new Error('Траектория должна быть одной связной цепочкой');
+  const closed = pts.length > 2 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 1e-9;
+  const W = pts.map((p) => toWorld(sf.plane, p.x, p.y)); if (closed) W.pop();
+  return { W, closed };
+}
+const rotBetween = (a, b) => new THREE.Quaternion().setFromUnitVectors(a.clone().normalize(), b.clone().normalize());
+function sweepGeometry(f, sf, loops) {
+  const pf = featById(f.path); if (!pf) throw new Error('Выберите эскиз траектории'); if (pf.id === sf.id) throw new Error('Профиль и траектория должны быть в разных эскизах');
+  const { W, closed } = pathPoints(pf); const n = W.length; if (n < 2) throw new Error('Траектория слишком короткая');
+  // The path starts at the end nearest the profile.
+  if (!closed) { const pc = loops[0].pts.reduce((acc, q) => [acc[0] + q[0] / loops[0].pts.length, acc[1] + q[1] / loops[0].pts.length], [0, 0]); const C = toWorld(sf.plane, pc[0], pc[1]); if (C.distanceTo(W[n - 1]) < C.distanceTo(W[0])) W.reverse(); }
+  const tan = (i) => { const a = W[i], b = W[(i + 1) % n]; return b.clone().sub(a).normalize(); };
+  const segs = closed ? n : n - 1; const T = []; for (let i = 0; i < segs; i++) T.push(tan(i));
+  // Rotation of the start frame to the frame of segment i, by parallel transport.
+  const Q = [new THREE.Quaternion()]; for (let i = 1; i < segs; i++) Q.push(rotBetween(T[i - 1], T[i]).multiply(Q[i - 1].clone()));
+  const P0 = W[0]; const M = planeMatrix(sf.plane);
+  const ring3 = (ring) => ring.map(([x, y]) => new THREE.Vector3(x, y, 0).applyMatrix4(M).sub(P0));
+  // Section at station k: the profile carried by the incoming segment, projected along it onto the mitre plane.
+  const section = (base, k) => {
+    if (!closed && k === 0) return base.map((v) => v.clone().applyQuaternion(Q[0]).add(W[0]));
+    if (!closed && k === n - 1) return base.map((v) => v.clone().applyQuaternion(Q[segs - 1]).add(W[n - 1]));
+    const iin = (k - 1 + segs) % segs, iout = k % segs; const tin = T[iin], tout = T[iout]; const nm = tin.clone().add(tout); if (nm.lengthSq() < 1e-12) throw new Error('Траектория разворачивается назад');
+    nm.normalize(); const q = closed && k === 0 ? Q[segs - 1] : Q[iin];
+    return base.map((v) => { const p = v.clone().applyQuaternion(q).add(W[k]); const t = nm.dot(W[k].clone().sub(p)) / nm.dot(tin); return p.addScaledVector(tin, t); });
+  };
+  if (closed) { const back = rotBetween(T[segs - 1], T[0]).multiply(Q[segs - 1].clone()); if (Math.abs(Math.abs(back.w) - 1) > 1e-6) throw new Error('Замкнутая траектория должна возвращать профиль без поворота (плоская траектория)'); }
+  const tris = [];
+  for (const l of loops) {
+    const rings = [l.pts, ...l.holes].map(ring3); const stations = rings.map((rg) => Array.from({ length: n }, (_, k) => section(rg, k)));
+    for (const st of stations) for (let k = 0; k < (closed ? n : n - 1); k++) { const A = st[k], B = st[(k + 1) % n]; for (let i = 0; i < A.length; i++) { const i2 = (i + 1) % A.length; tris.push([A[i], A[i2], B[i2]], [A[i], B[i2], B[i]]); } }
+    if (!closed) for (const k of [0, n - 1]) { const all = stations.map((st) => st[k]).flat(); const t = THREE.ShapeUtils.triangulateShape(l.pts.map((p) => new THREE.Vector2(...p)), l.holes.map((hh) => hh.map((p) => new THREE.Vector2(...p)))); for (const [a, b, c] of t) tris.push([all[a], all[b], all[c]]); }
+  }
+  return orientedGeometry(tris);
+}
+// Points of a closed loop resampled at given arc-length fractions.
+function resampleLoop(P, ts) {
+  const L = [0]; for (let i = 0; i < P.length; i++) L.push(L[i] + P[i].distanceTo(P[(i + 1) % P.length])); const tot = L[L.length - 1];
+  return ts.map((t) => { const s = t * tot; let i = 0; while (i < P.length - 1 && L[i + 1] < s) i++; const u = (s - L[i]) / ((L[i + 1] - L[i]) || 1); return P[i].clone().lerp(P[(i + 1) % P.length], Math.min(1, Math.max(0, u))); });
+}
+function loftGeometry(f) {
+  const sks = (f.sketches || []).map(featById).filter(Boolean); if (sks.length < 2) throw new Error('Нужно хотя бы два эскиза с замкнутым контуром');
+  const loops = sks.map((sf) => { const reg = sketchRegions(sf); const ls = profileLoops(reg, selectedRegionIds({ regions: null }, reg)); if (ls.length !== 1 || ls[0].holes.length) throw new Error(`В «${sf.name}» должен быть один замкнутый контур без отверстий`); return ls[0].pts.map(([x, y]) => toWorld(sf.plane, x, y)); });
+  // Same winding and nearest start for every profile.
+  const ctr = (P) => P.reduce((a, b) => a.add(b), new THREE.Vector3()).divideScalar(P.length);
+  const nrm = (P) => { const n = new THREE.Vector3(); for (let i = 0; i < P.length; i++) { const a = P[i], b = P[(i + 1) % P.length]; n.x += (a.y - b.y) * (a.z + b.z); n.y += (a.z - b.z) * (a.x + b.x); n.z += (a.x - b.x) * (a.y + b.y); } return n.normalize(); };
+  const C0 = ctr(loops[0]), N0 = nrm(loops[0]); const ref = loops[0][0].clone().sub(C0).normalize();
+  for (let k = 1; k < loops.length; k++) {
+    let P = loops[k]; if (nrm(P).dot(N0) < 0) P = P.slice().reverse(); const C = ctr(P);
+    let best = 0, bd = -Infinity; P.forEach((p, i) => { const d = p.clone().sub(C).normalize().dot(ref); if (d > bd) { bd = d; best = i; } }); loops[k] = [...P.slice(best), ...P.slice(0, best)];
+  }
+  // Corner parameters of all profiles plus a uniform set, so no corner is cut.
+  const params = new Set(); for (let i = 0; i < 64; i++) params.add(+(i / 64).toFixed(9));
+  for (const P of loops) { const L = [0]; for (let i = 0; i < P.length; i++) L.push(L[i] + P[i].distanceTo(P[(i + 1) % P.length])); const tot = L[L.length - 1];
+    for (let i = 0; i < P.length; i++) { const a = P[(i - 1 + P.length) % P.length], b = P[i], c = P[(i + 1) % P.length]; if (b.clone().sub(a).normalize().dot(c.clone().sub(b).normalize()) < 0.9995) params.add(+(L[i] / tot).toFixed(9)); } }
+  const ts = [...params].sort((a, b) => a - b); const R = loops.map((P) => resampleLoop(P, ts));
+  // Sections: straight between two profiles, a smooth Catmull-Rom curve through three or more.
+  const sec = []; const K = R.length;
+  // Intermediate sections spread the twist of the ruled surface, so the mesh stays smooth.
+  if (K === 2) { const steps = 16; for (let j = 0; j <= steps; j++) sec.push(R[0].map((p0, i) => p0.clone().lerp(R[1][i], j / steps))); }
+  else for (let k = 0; k < K - 1; k++) { const steps = 16; for (let s = 0; s < steps; s++) { const u = s / steps; sec.push(R[k].map((_, i) => { const p0 = R[Math.max(0, k - 1)][i], p1 = R[k][i], p2 = R[k + 1][i], p3 = R[Math.min(K - 1, k + 2)][i]; const u2 = u * u, u3 = u2 * u;
+    return new THREE.Vector3().addScaledVector(p0, -0.5 * u3 + u2 - 0.5 * u).addScaledVector(p1, 1.5 * u3 - 2.5 * u2 + 1).addScaledVector(p2, -1.5 * u3 + 2 * u2 + 0.5 * u).addScaledVector(p3, 0.5 * u3 - 0.5 * u2); })); } } if (K > 2) sec.push(R[K - 1]);
+  const tris = []; const m = ts.length;
+  for (let k = 0; k + 1 < sec.length; k++) for (let i = 0; i < m; i++) { const i2 = (i + 1) % m; tris.push([sec[k][i], sec[k][i2], sec[k + 1][i2]], [sec[k][i], sec[k + 1][i2], sec[k + 1][i]]); }
+  for (const [S2, sf] of [[sec[0], sks[0]], [sec[sec.length - 1], sks[sks.length - 1]]]) {
+    const M = planeMatrix(sf.plane).invert(); const P2 = S2.map((p) => { const v = p.clone().applyMatrix4(M); return new THREE.Vector2(v.x, v.y); });
+    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(P2, [])) tris.push([S2[a], S2[b], S2[c]]);
+  }
+  return orientedGeometry(tris);
+}
+const closedSketches = (upto) => S.doc.features.slice(0, upto).filter((f) => f.type === 'sketch' && sketchRegions(f).faces.length);
+const openSketches = (upto) => S.doc.features.slice(0, upto).filter((f) => f.type === 'sketch' && !sketchRegions(f).faces.length && Object.values(f.sk.ents).some((e) => !e.constr && !e.ext && (e.t === 'line' || e.t === 'arc')));
+function cmdSweep(mode = 'add') {
+  if (S.editing) exitSketch(); if (S.measure) closeMeasure();
+  const at = rollbackIndex(); const prof = closedSketches(at).reverse().find((f) => !S.doc.features.some((g) => g.sketch === f.id)); const path = openSketches(at).reverse()[0];
+  if (!prof || !path) { toast('Нужны два эскиза: замкнутый профиль и незамкнутая траектория (линии и дуги)', 'warn'); return; }
+  openPM({ kind: 'feature', feature: { id: fid(), type: 'sweep', name: nextName(mode === 'cut' ? 'ВырезПоТраектории' : 'ПоТраектории'), sketch: prof.id, path: path.id, mode, regions: null }, isNew: true, regionsOf: prof.id });
+}
+function cmdLoft(mode = 'add') {
+  if (S.editing) exitSketch(); if (S.measure) closeMeasure();
+  const at = rollbackIndex(); const free = closedSketches(at).filter((f) => !S.doc.features.some((g) => g.sketch === f.id || g.sketches?.includes(f.id)));
+  if (free.length < 2) { toast('Нужно хотя бы два эскиза с замкнутым контуром на разных плоскостях', 'warn'); return; }
+  const ids = free.slice(-2).map((f) => f.id);
+  openPM({ kind: 'feature', feature: { id: fid(), type: 'loft', name: nextName(mode === 'cut' ? 'ВырезПоСечениям' : 'ПоСечениям'), sketch: ids[0], sketches: ids, mode }, isNew: true });
+}
+function renderSweepLoftPM() {
+  const pm = S.pm; const f = pm.feature; const err = S.errors[f.id]; const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id);
+  const body = h('div', { class: 'pm' }, pmHeader(f.type === 'sweep' ? 'По траектории' : 'По сечениям', f.type === 'sweep' ? ICON.sweep : ICON.loft));
+  body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Операция'), seg([['add', 'Добавить'], ['cut', 'Вырезать']], f.mode, (v) => { f.mode = v; renderSide(); schedulePreview(); })));
+  const pick = (label, id, list, val, set) => { const sel = h('select', { id }, list.map((x) => h('option', { value: x.id, selected: x.id === val }, x.name))); sel.onchange = () => { set(sel.value); renderSide(); schedulePreview(); }; return h('label', { class: 'field' }, h('span', {}, label), sel); };
+  if (f.type === 'sweep') body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Эскизы'), pick('Профиль', 'pmProf', closedSketches(idx), f.sketch, (v) => { f.sketch = v; f.regions = null; pm.regionsOf = v; drawRegions(); }), pick('Траектория', 'pmPath', openSketches(idx), f.path, (v) => { f.path = v; }),
+    h('div', { class: 'note' }, 'Профиль лучше рисовать в плоскости, перпендикулярной началу траектории, и в её начальной точке.')));
+  else { const g = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Сечения: ${f.sketches.length}`));
+    for (const sf of closedSketches(idx)) g.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.sketches.includes(sf.id), onchange: (e) => { f.sketches = e.target.checked ? S.doc.features.filter((x) => x.id === sf.id || f.sketches.includes(x.id)).map((x) => x.id) : f.sketches.filter((x) => x !== sf.id); f.sketch = f.sketches[0]; renderSide(); schedulePreview(); } }), sf.name));
+    g.append(h('div', { class: 'note' }, 'Сечения соединяются в порядке дерева. Через три и больше проходит плавная поверхность.')); body.append(g); }
+  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  side.append(body);
 }
 
 // ============================================================================================
@@ -3532,6 +3714,8 @@ function renderTools() {
       toolBtn('Вырез', ICON.cut, () => cmdFeature('extrude', 'cut'), { title: 'Вытянутый вырез (X)', kbd: 'X' }),
       toolBtn('Повернуть', ICON.revolve, () => cmdFeature('revolve', 'add'), { title: 'Повёрнутая бобышка' }),
       toolBtn('Вырез пов.', ICON.revolve, () => cmdFeature('revolve', 'cut'), { title: 'Повёрнутый вырез' }),
+      toolBtn('Траектория', ICON.sweep, () => cmdSweep('add'), { title: 'По траектории: профиль вдоль линии (вырез — в настройках)' }),
+      toolBtn('Сечения', ICON.loft, () => cmdLoft('add'), { title: 'По сечениям между замкнутыми эскизами (вырез — в настройках)' }),
       h('div', { class: 'sep' }),
       toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { title: 'Скруглить рёбра' }),
       toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { title: 'Фаска на рёбрах' }),
@@ -3601,8 +3785,8 @@ function renderTree() {
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
   const featRow = (f, i, child) => {
     const off = i >= rb || f.suppressed; const err = S.errors[f.id];
-    const icon = f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
-    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : fmt(f.depth) + ' мм') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
+    const icon = f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
+    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
@@ -3627,7 +3811,7 @@ function startRollDrag(ev) {
   window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
 }
 function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? null : i; rebuild(); if (!live) pushUndo(); }
-function editFeature(f) { if (!f) return; if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
+function editFeature(f) { if (!f) return; if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; } }
@@ -3667,6 +3851,7 @@ function renderPM() {
   if (pm.kind === 'mass') { renderMassPM(); return; }
   if (pm.pattern) { renderPatternPM(); return; }
   if (pm.feature?.type === 'hole') { renderHolePM(); return; }
+  if (pm.feature?.type === 'sweep' || pm.feature?.type === 'loft') { renderSweepLoftPM(); return; }
   if (pm.shell) { renderShellPM(); return; }
   if (pm.feature?.type === 'plane') {
     const f = pm.feature; const b = f.base; const baseName = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
@@ -3693,10 +3878,15 @@ function renderPM() {
   body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Операция'), seg([['add', 'Добавить'], ['cut', 'Вырезать']], f.mode, (v) => { f.mode = v; if (isExt && v === 'cut' && f.end === 'blind' && !pm.touchedEnd) f.end = 'through'; if (isExt) f.dir = v === 'cut' ? guessCutDir(sf, reg, f) : S.body ? guessAddDir(sf, reg, f) : 1; refresh(); })));
   if (isExt) {
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Направление 1'),
-      seg([['blind', 'На глубину'], ['mid', 'Симметрично'], ['through', 'Насквозь']], f.end, (v) => { f.end = v; pm.touchedEnd = true; refresh(); }),
-      f.end !== 'through' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
-      f.end !== 'mid' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление') : null,
-      f.end === 'through' && f.mode === 'cut' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.both, onchange: (e) => { f.both = e.target.checked; schedulePreview(); } }), 'В обе стороны') : null));
+      seg([['blind', 'На глубину'], ['mid', 'Симметр.'], ['through', 'Насквозь'], ['face', 'До грани']], f.end, (v) => { f.end = v; pm.touchedEnd = true; pm.pickTarget = v === 'face' && !f.target; refresh(); }),
+      f.end === 'face' ? h('button', { class: 'rel pickbox' + (pm.pickTarget ? ' on' : ''), onclick: () => { pm.pickTarget = true; renderSide(); } }, h('b', {}, '▱'), f.target ? (f.target.label || 'Грань') : 'щёлкните грань или плоскость') : null,
+      f.end === 'face' ? numField('Не доходя', 'pmOffset', f.offset || 0, (v) => { f.offset = v; schedulePreview(); }) : null,
+      f.end === 'blind' || f.end === 'mid' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
+      f.end !== 'mid' && f.end !== 'face' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление') : null,
+      f.end === 'through' && f.mode === 'cut' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.both, onchange: (e) => { f.both = e.target.checked; schedulePreview(); } }), 'В обе стороны') : null),
+      h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.draft > 0, onchange: (e) => { f.draft = e.target.checked ? 3 : 0; refresh(); } }), 'Уклон'),
+        f.draft > 0 ? numField('Угол уклона', 'pmDraft', f.draft, (v) => { f.draft = Math.min(45, v); schedulePreview(); }, '°') : null,
+        f.draft > 0 ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.draftOut, onchange: (e) => { f.draftOut = e.target.checked; schedulePreview(); } }), 'Уклон наружу') : null));
   } else {
     const axes = [['V', 'Вертикальная ось эскиза'], ['H', 'Горизонтальная ось эскиза'], ...Object.values(sf.sk.ents).filter((e) => e.t === 'line').map((e) => [e.id, (e.constr ? 'Осевая линия ' : 'Линия ') + e.id])];
     const selAx = h('select', { id: 'pmAxis' }, axes.map(([v, l]) => h('option', { value: v, selected: v === f.axis }, l)));
@@ -4049,5 +4239,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
