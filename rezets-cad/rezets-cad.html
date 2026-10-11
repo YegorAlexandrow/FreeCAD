@@ -4283,8 +4283,9 @@ function editMateValue(m, row) {
     if (done) return; done = true;
     const v = ok ? evalExpr(inp.value) : null;
     if (v != null && isFinite(v) && Math.abs(v - m.v) > 1e-12) {
-      const before = snapPoses(asm); const old = m.v; m.v = v;
-      if (!asmSolve(asm)) { m.v = old; restorePoses(asm, before); toast('Такое значение недостижимо', 'err'); } else pushUndo();
+      // A negative distance means the other side of the face.
+      const before = snapPoses(asm); const old = m.v, oldSide = m.side; if (v < 0 && m.type === 'distance') { m.v = -v; m.side = -(m.side || 1); } else m.v = Math.abs(v);
+      if (!asmSolve(asm)) { m.v = old; m.side = oldSide; restorePoses(asm, before); toast('Такое значение недостижимо', 'err'); } else pushUndo();
     }
     asmRefresh(true);
   };
@@ -4440,7 +4441,7 @@ function renderAsmPM() {
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
-      pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { pm.v = v; previewMate(); }, pm.type === 'angle' ? '°' : 'мм') : null,
+      pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
       canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { if (sideFlip(a, b, pm.type)) pm.side = -(pm.side || 1); else pm.flip = !pm.flip; previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, sideFlip(a, b, pm.type) ? 'с другой стороны грани' : a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
   }
   if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result))));
@@ -4669,9 +4670,11 @@ const FIELD_KEYS = { pmDepth: 'depth', pmRadius: 'r', pmDist: 'd', pmAngle: 'ang
 const numField = (label, id, val, onset, unit = 'мм') => {
   const obj = S.mode === 'part' && S.pm?.feature && FIELD_KEYS[id] ? S.pm.feature : null; const key = FIELD_KEYS[id]; const ex = obj?.exprs?.[key];
   const inp = h('input', { type: 'text', id, value: ex ?? fmt(val, 4), inputmode: 'decimal', title: ex ? `${ex} = ${fmt(val, 4)}` : '' });
-  const apply = () => { const str = inp.value; const v = evalExpr(str); if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0)) {
+  // onset may re-render the panel, and removing the focused input fires 'change' again with the old text.
+  let busy = false; const apply = () => { if (busy) return; busy = true; try { apply0(); } finally { busy = false; } };
+  const apply0 = () => { const str = inp.value; const v = evalExpr(str); if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal')) {
     if (obj) { if (hasIdent(str)) obj.exprs = { ...obj.exprs, [key]: str.trim() }; else if (obj.exprs) { delete obj.exprs[key]; if (!Object.keys(obj.exprs).length) delete obj.exprs; } }
-    onset(v); inp.value = obj?.exprs?.[key] ?? fmt(v, 4); } else { inp.value = ex ?? fmt(val, 4); toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
+    const shown = onset(v); inp.value = obj?.exprs?.[key] ?? fmt(shown ?? v, 4); } else { inp.value = ex ?? fmt(val, 4); toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
   inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } });
   return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
 };
