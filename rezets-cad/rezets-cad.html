@@ -2256,6 +2256,7 @@ function closePM(silent) {
 function okPM() {
   const pm = S.pm; if (!pm) return;
   if (pm.kind === 'mate') { if (pm.picks.length) okMate(); else closePM(); return; }
+  if (pm.kind === 'cpat') { okCompPattern(); return; }
   if (pm.kind === 'feature') {
     const f = pm.feature; if (Array.isArray(f.regions) && !f.regions.length) { toast('Выберите хотя бы одну область эскиза', 'warn'); return; }
     if (pm.edgePick && !f.edges.length) { toast('Щёлкните хотя бы одно ребро', 'warn'); return; }
@@ -2553,7 +2554,7 @@ function cmdMass() {
 }
 function asmMass() {
   const rows = []; let mass = 0; const com = new THREE.Vector3();
-  for (const c of S.doc.comps) {
+  for (const c of allComps(S.doc)) {
     const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const ent = docEntry(c.doc); const mat = matOf(ent.data);
     const mp = massProps(inf.geo, new THREE.Matrix4().fromArray(c.T)); const m = mp.vol * MATERIALS[mat][1] / 1000;
     rows.push({ c, ent, mat, vol: mp.vol, mass: m }); mass += m; com.addScaledVector(mp.com, m);
@@ -2586,13 +2587,13 @@ function renderMassPM() {
 // Bill of materials: one row per part, with quantity and mass.
 function bomRows() {
   const map = new Map();
-  for (const c of S.doc.comps) { const ent = docEntry(c.doc); if (!ent) continue; const r = map.get(c.doc) || { ent, qty: 0 }; r.qty++; map.set(c.doc, r); }
+  for (const c of allComps(S.doc)) { const ent = docEntry(c.doc); if (!ent) continue; const r = map.get(c.doc) || { ent, qty: 0 }; r.qty++; map.set(c.doc, r); }
   return [...map.values()].map((r, i) => { const inf = docInfo(r.ent.id); const mat = matOf(r.ent.data); const vol = inf?.geo ? massProps(inf.geo).vol : 0; return { n: i + 1, name: r.ent.name, qty: r.qty, mat: MATERIALS[mat][0], mass: vol * MATERIALS[mat][1] / 1000, kind: r.ent.kind }; });
 }
 function cmdBom() {
   const rows = bomRows(); if (!rows.length) { toast('Сборка пустая', 'warn'); return; }
   const csv = ['№;Наименование;Кол-во;Материал;Масса шт, г;Масса всего, г', ...rows.map((r) => [r.n, r.name, r.qty, r.mat, r.mass.toFixed(2), (r.mass * r.qty).toFixed(2)].join(';'))].join('\n');
-  showModal('Спецификация', `${rows.length} ${plural(rows.length, 'позиция', 'позиции', 'позиций')}, ${S.doc.comps.length} ${plural(S.doc.comps.length, 'компонент', 'компонента', 'компонентов')}. Текст можно вставить в таблицу (разделитель «;»).`, csv, [['Копировать', copyText], ['Закрыть', closeModal]]);
+  const nc = allComps(S.doc).length; showModal('Спецификация', `${rows.length} ${plural(rows.length, 'позиция', 'позиции', 'позиций')}, ${nc} ${plural(nc, 'компонент', 'компонента', 'компонентов')}. Текст можно вставить в таблицу (разделитель «;»).`, csv, [['Копировать', copyText], ['Закрыть', closeModal]]);
 }
 
 // ============================================================================================
@@ -3176,12 +3177,12 @@ function asmLeave() { asmGroup.clear(); for (const k of ['body', 'sketch', 'regi
 function asmRefresh(reanalyze) {
   const asm = S.doc; if (reanalyze) { for (const c of asm.comps) { const inf = docInfo(c.doc); if (inf?.ent) c.name = c.name || inf.ent.name; } S.asmAnalysis = asmAnalyze(asm); }
   asmGroup.clear();
-  asm.comps.forEach((c, i) => {
-    const inf = docInfo(c.doc); if (!inf || inf.empty) return;
-    const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.fromArray(c.T); g.userData.comp = c.id;
-    const sel = S.asmSel === c.id; const hov = S.asmHover?.comp === c.id && !S.pm;
+  allComps(asm).forEach((c) => {
+    const inf = docInfo(c.doc); if (!inf || inf.empty) return; const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id));
+    const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.fromArray(c.T); g.userData.comp = c.virtual ? null : c.id;
+    const sel = S.asmSel === c.id || (S.pm?.kind === 'cpat' && S.pm.pat.seeds.includes(c.id)); const hov = S.asmHover?.comp === c.id && !S.pm;
     const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(COMP_COLORS[i % COMP_COLORS.length]), metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
-    const mesh = new THREE.Mesh(shadedGeo(inf.geo), mat); mesh.userData.comp = c.id; g.add(mesh);
+    const mesh = new THREE.Mesh(shadedGeo(inf.geo), mat); mesh.userData.comp = c.virtual ? null : c.id; g.add(mesh);
     g.add(segLines(inf.edges, lineMat(colors.edge, 1.3)));
     asmGroup.add(g);
   });
@@ -3235,6 +3236,7 @@ function drawMatePicks() {
     const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.45, depthTest: false, side: THREE.DoubleSide })); mesh.renderOrder = 15; groups.measure.add(mesh);
     if (ent.kind === 'axis') { const w = worldEnt({ kind: 'axis', p: ent.p.toArray(), d: ent.d.toArray() }, poseOf(c)); const L = 60; const l = segLines([...w.p.clone().addScaledVector(w.d, -L).toArray(), ...w.p.clone().addScaledVector(w.d, L).toArray()], lineMat(col, 1.5, { dashed: true, depthTest: false })); l.renderOrder = 16; groups.measure.add(l); }
   };
+  if (S.pm?.kind === 'cpat') { const ref = S.pm.pat.ref; if (ref.comp) show(ref, colors['geo-sel']); else { const A = cpatAxis(asm, ref); const L = 1000; const l = segLines([...A.p.clone().addScaledVector(A.d, -L).toArray(), ...A.p.clone().addScaledVector(A.d, L).toArray()], lineMat(colors['geo-sel'], 1.5, { dashed: true, depthTest: false })); l.renderOrder = 16; groups.measure.add(l); } }
   const pm = S.pm; if (pm?.kind === 'mate') { pm.picks.forEach((r) => show(r, colors['geo-sel'])); if (pm.hover && !pm.picks.some((r) => r.comp === pm.hover.comp && r.e === pm.hover.e)) show(pm.hover, colors['geo-hover']); }
   requestRender();
 }
@@ -3301,6 +3303,12 @@ function renderAsmTree() {
     tree.append(r);
   }
   if (!asm.comps.length) tree.append(h('div', { class: 'empty-tree' }, 'Сборка пустая. Нажмите «Вставить компонент».'));
+  for (const pt of asm.patterns || []) {
+    const r = h('div', { class: 'row', tabindex: '0', role: 'treeitem', title: pt.name }, svg(pt.type === 'lin' ? ICON.lpattern : ICON.cpattern), h('span', { class: 'nm' }, pt.name), h('span', { class: 'meta' }, `${pt.n} шт`));
+    const edit = () => { openPM({ kind: 'cpat', pat: clone(pt), isNew: false, pickFor: 'ref' }); asmRefresh(); };
+    r.ondblclick = edit; r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', edit], ['Удалить', () => { asm.patterns = asm.patterns.filter((x) => x !== pt); asmRefresh(true); pushUndo(); }]]); };
+    tree.append(r);
+  }
   tree.append(h('div', { class: 'sec-h' }, h('span', {}, 'Сопряжения'), h('span', { class: 'meta' }, String(asm.mates.length))));
   for (const m of asm.mates) {
     const na = asm.comps.find((c) => c.id === m.a.comp)?.name, nb = asm.comps.find((c) => c.id === m.b.comp)?.name;
@@ -3328,9 +3336,61 @@ function editMateValue(m, row) {
   };
   inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') finish(true); if (e.key === 'Escape') finish(false); }; inp.onblur = () => finish(true);
 }
+// ---------------- component patterns ----------------
+// Copies of seed components placed by a linear or circular pattern. The direction is an edge or
+// axis of a component (so it moves with it) or a global axis. Copies follow their seeds.
+function cpatAxis(asm, spec) {
+  if (spec?.axis) return { p: new THREE.Vector3(), d: V3(GLOBAL_AXES[spec.axis]) };
+  const c = asm.comps.find((x) => x.id === spec?.comp); if (!c) return null; const w = worldEnt(spec, poseOf(c)); return { p: w.p, d: w.d.normalize() };
+}
+function cpatInstances(asm, pat) {
+  const A = cpatAxis(asm, pat.ref); if (!A) return []; const out = []; const n = Math.max(1, pat.n | 0);
+  for (let k = 1; k < n; k++) {
+    let M;
+    if (pat.type === 'lin') { const t = A.d.clone().multiplyScalar((pat.flip ? -1 : 1) * pat.d * k); M = new THREE.Matrix4().makeTranslation(t.x, t.y, t.z); }
+    else { const total = Math.min(360, pat.angle || 360); const step = (total >= 360 - 1e-9 ? 360 / n : total / Math.max(1, n - 1)) * Math.PI / 180 * (pat.flip ? -1 : 1);
+      M = new THREE.Matrix4().makeTranslation(A.p.x, A.p.y, A.p.z).multiply(new THREE.Matrix4().makeRotationAxis(A.d, step * k)).multiply(new THREE.Matrix4().makeTranslation(-A.p.x, -A.p.y, -A.p.z)); }
+    for (const sid of pat.seeds) { const c = asm.comps.find((x) => x.id === sid); if (!c) continue; out.push({ id: `${pat.id}:${sid}:${k}`, doc: c.doc, name: `${c.name}·${k + 1}`, T: M.clone().multiply(new THREE.Matrix4().fromArray(c.T)).toArray(), virtual: true, seed: sid, pat: pat.id }); }
+  }
+  return out;
+}
+// Components plus pattern copies (and the pattern being edited).
+function allComps(asm) {
+  const pats = [...(asm.patterns || []).filter((p) => !(S.pm?.kind === 'cpat' && S.pm.pat.id === p.id))]; if (S.pm?.kind === 'cpat') pats.push(S.pm.pat);
+  return [...asm.comps, ...pats.flatMap((p) => cpatInstances(asm, p))];
+}
+function cmdCompPattern(type) {
+  if (!S.doc.comps.length) { toast('Сборка пустая', 'warn'); return; }
+  const asm = S.doc; const pat = { id: 'p' + asm.nid, name: (type === 'lin' ? 'ЛинейныйМассив' : 'КруговойМассив') + ((asm.patterns || []).filter((p) => p.type === type).length + 1), type, seeds: S.asmSel ? [S.asmSel] : [], ref: { axis: type === 'lin' ? 'x' : 'y' }, n: 3, d: 30, angle: 360, flip: false };
+  openPM({ kind: 'cpat', pat, isNew: true, pickFor: pat.seeds.length ? 'ref' : 'seeds' }); asmRefresh();
+}
+function cpatClick(ev) {
+  const pm = S.pm; const pat = pm.pat;
+  if (pm.pickFor === 'ref') { const e = asmEdgePick(ev); if (e && e.kind === 'axis') { pat.ref = e; asmRefresh(); return; } const p = asmPick(ev); if (p?.ent?.kind === 'axis') { pat.ref = { comp: p.comp, ...p.ent }; asmRefresh(); } return; }
+  const p = asmPick(ev); if (!p) return; const i = pat.seeds.indexOf(p.comp); if (i >= 0) pat.seeds.splice(i, 1); else pat.seeds.push(p.comp); asmRefresh();
+}
+function okCompPattern() {
+  const pm = S.pm; const asm = S.doc; if (!pm.pat.seeds.length) { toast('Выберите компоненты для массива', 'warn'); return; }
+  asm.patterns = asm.patterns || []; const i = asm.patterns.findIndex((p) => p.id === pm.pat.id); if (i >= 0) asm.patterns[i] = pm.pat; else { asm.nid++; asm.patterns.push(pm.pat); }
+  S.pm = null; asmRefresh(true); renderCorner(); pushUndo();
+}
+function renderCompPatternPM() {
+  const pm = S.pm; const pat = pm.pat; const asm = S.doc; const cname = (id) => asm.comps.find((c) => c.id === id)?.name || '?';
+  const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(pat.type === 'lin' ? ICON.lpattern : ICON.cpattern), h('span', {}, pat.type === 'lin' ? 'Линейный массив компонентов' : 'Круговой массив компонентов'),
+    h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okCompPattern }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
+  box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'seeds' ? ' on' : ''), onclick: () => { pm.pickFor = 'seeds'; renderSide(); } }, h('b', {}, '▣'), pat.seeds.length ? pat.seeds.map(cname).join(', ') : 'щёлкните компоненты')));
+  const refName = pat.ref.axis ? AXIS_NAMES[pat.ref.axis] : `${pickName(pat.ref)} · ${cname(pat.ref.comp)}`;
+  box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, pat.type === 'lin' ? 'Направление' : 'Ось'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'ref' ? ' on' : ''), onclick: () => { pm.pickFor = 'ref'; renderSide(); } }, h('b', {}, '↗'), refName),
+    h('div', { class: 'chips' }, Object.keys(GLOBAL_AXES).map((k) => h('button', { class: 'chip', onclick: () => { pat.ref = { axis: k }; asmRefresh(); } }, k.toUpperCase()))),
+    pm.pickFor === 'ref' ? h('div', { class: 'note' }, 'Щёлкните ребро или цилиндрическую грань компонента') : null));
+  box.append(h('div', { class: 'grp' }, pat.type === 'lin' ? numField('Шаг', 'pmStep', pat.d, (v) => { pat.d = v; asmRefresh(); }) : numField('Угол', 'pmAngle', pat.angle, (v) => { pat.angle = Math.min(360, v); asmRefresh(); }, '°'),
+    numField('Количество', 'pmCount', pat.n, (v) => { pat.n = Math.max(2, Math.round(v)); asmRefresh(); }, 'шт'),
+    h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!pat.flip, onchange: (e) => { pat.flip = e.target.checked; asmRefresh(); } }), 'Обратное направление')));
+  side.append(box);
+}
 // Interference: the common volume of every pair of components whose boxes overlap.
 function asmInterference(asm) {
-  const items = asm.comps.map((c) => { const inf = docInfo(c.doc); if (!inf || inf.empty) return null; const g = inf.geo.clone(); g.applyMatrix4(new THREE.Matrix4().fromArray(c.T)); g.computeBoundingBox(); return { c, g }; }).filter(Boolean);
+  const items = allComps(asm).map((c) => { const inf = docInfo(c.doc); if (!inf || inf.empty) return null; const g = inf.geo.clone(); g.applyMatrix4(new THREE.Matrix4().fromArray(c.T)); g.computeBoundingBox(); return { c, g }; }).filter(Boolean);
   const out = [];
   for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
     const A = items[i], B = items[j]; const ba = A.g.boundingBox.clone().expandByScalar(-1e-4); if (!ba.intersectsBox(B.g.boundingBox)) continue;
@@ -3354,11 +3414,13 @@ function drawInterference() {
 function pickName(r) { if (r.kind === 'plane') return 'Грань'; if (r.kind === 'point') return 'Вершина'; if (r.edge?.t === 'line') return 'Ребро'; if (r.edge) return 'Круглое ребро ⌀' + fmt(2 * r.r); return 'Ось цилиндра ⌀' + fmt(2 * r.r); }
 function asmDeleteComp(c) {
   const asm = S.doc; asm.comps = asm.comps.filter((x) => x !== c); asm.mates = asm.mates.filter((m) => m.a.comp !== c.id && m.b.comp !== c.id);
+  for (const pt of asm.patterns || []) { pt.seeds = pt.seeds.filter((x) => x !== c.id); if (pt.ref.comp === c.id) pt.ref = { axis: 'x' }; } asm.patterns = (asm.patterns || []).filter((pt) => pt.seeds.length);
   if (S.asmSel === c.id) S.asmSel = null; asmRefresh(true); pushUndo();
 }
 function renderAsmPM() {
   const pm = S.pm; side.textContent = '';
   if (pm.kind === 'mass') { renderMassPM(); return; }
+  if (pm.kind === 'cpat') { renderCompPatternPM(); return; }
   if (pm.kind === 'interf') {
     const cname = (id) => S.doc.comps.find((c) => c.id === id)?.name || '?';
     const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.interf), h('span', {}, 'Проверка пересечений'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
@@ -3425,6 +3487,7 @@ function asmUp(ev, d) {
   const D = S.asmDrag; S.asmDrag = null;
   if (D && !D.fixed && d?.moved) { asmRefresh(true); pushUndo(); return; }
   if (D?.fixed && d?.moved) toast('Компонент зафиксирован. Освободите его в контекстном меню, чтобы двигать', 'info');
+  if (d && !d.moved && S.pm?.kind === 'cpat') { cpatClick(ev); return; }
   if (d && !d.moved && S.pm?.kind === 'mate') {
     const ep = asmEdgePick(ev); const p = ep ? null : asmPick(ev); if (!ep && !p?.ent) return; const pm = S.pm; const ref = ep || { comp: p.comp, ...p.ent };
     if (pm.picks.length >= 2) { pm.picks = []; pm.flip = null; pm.v = null; }
@@ -3449,6 +3512,9 @@ function renderTools() {
     toolsEl.append(
       toolBtn('Вставить', ICON.insert, cmdInsert, { pressed: S.pm?.kind === 'insert', title: 'Вставить деталь в сборку (I)', kbd: 'I' }),
       toolBtn('Сопряжение', ICON.mate, () => (S.pm?.kind === 'mate' ? closePM() : cmdMate()), { pressed: S.pm?.kind === 'mate', title: 'Сопряжение двух граней или осей (M)', kbd: 'M' }),
+      toolBtn('Массив', ICON.lpattern, () => cmdCompPattern('lin'), { title: 'Линейный массив компонентов' }),
+      toolBtn('Круговой', ICON.cpattern, () => cmdCompPattern('circ'), { title: 'Круговой массив компонентов' }),
+      h('div', { class: 'sep' }),
       toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Масса и центр масс сборки' }),
       toolBtn('Спецификация', ICON.bom, cmdBom, { title: 'Список деталей с количеством и массой' }),
       toolBtn('Пересечения', ICON.interf, () => (S.pm?.kind === 'interf' ? closePM() : cmdInterference()), { pressed: S.pm?.kind === 'interf', title: 'Проверка пересечений компонентов' }),
@@ -3684,7 +3750,7 @@ function renderSketchPanel() {
 }
 function renderCorner() {
   const c = $('corner'); c.textContent = '';
-  if (S.pm?.kind === 'mate') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
+  if (S.pm?.kind === 'mate' || S.pm?.kind === 'cpat') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm?.kind === 'insert' || S.pm?.kind === 'interf' || S.pm?.kind === 'mass') c.append(h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm && S.pm.kind === 'feature') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.editing) c.append(h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)));
@@ -3983,5 +4049,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
