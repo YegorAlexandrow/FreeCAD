@@ -4121,6 +4121,8 @@ function drawMatePicks() {
     if (ent.kind === 'axis') { const w = worldEnt({ kind: 'axis', p: ent.p.toArray(), d: ent.d.toArray() }, poseOf(c)); const L = 60; const l = segLines([...w.p.clone().addScaledVector(w.d, -L).toArray(), ...w.p.clone().addScaledVector(w.d, L).toArray()], lineMat(col, 1.5, { dashed: true, depthTest: false })); l.renderOrder = 16; groups.measure.add(l); }
   };
   if (S.pm?.kind === 'cpat') { const ref = S.pm.pat.ref; if (ref.comp) show(ref, colors['geo-sel']); else { const A = cpatAxis(asm, ref); const L = 1000; const l = segLines([...A.p.clone().addScaledVector(A.d, -L).toArray(), ...A.p.clone().addScaledVector(A.d, L).toArray()], lineMat(colors['geo-sel'], 1.5, { dashed: true, depthTest: false })); l.renderOrder = 16; groups.measure.add(l); } }
+  // A mate picked or hovered in the tree shows what it joins: first element in one colour, second in another.
+  if (!S.pm) for (const id of new Set([S.mateSel, S.mateHover])) { const g = id && asm.mates.find((x) => x.id === id); if (g) { show(g.a, colors['geo-sel']); show(g.b, colors['geo-hover']); } }
   const pm = S.pm; if (pm?.kind === 'mate' && pm.result?.status === 'conflict') for (const id of pm.result.group) { const g = asm.mates.find((x) => x.id === id); if (g) { show(g.a, colors['geo-bad']); show(g.b, colors['geo-bad']); } }
   if (pm?.kind === 'mate') { pm.picks.forEach((r) => show(r, colors['geo-sel'])); if (pm.hover && !pm.picks.some((r) => r.comp === pm.hover.comp && r.e === pm.hover.e)) show(pm.hover, colors['geo-hover']); }
   requestRender();
@@ -4210,7 +4212,7 @@ function editMate(m) {
 }
 // Turns a mate over: the moving part is flipped onto the other solution, then everything is re-solved.
 function reverseMate(m) {
-  const asm = S.doc; const before = snapPoses(asm); const side = sideFlip(m.a, m.b, m.type);
+  if (S.pm) closePM(); const asm = S.doc; const before = snapPoses(asm); const side = sideFlip(m.a, m.b, m.type);
   const turn = () => { if (side) m.side = -(m.side || 1); else { m.flip = !m.flip; if (m.type === 'angle') m.side = m.flip ? -1 : 1; } };
   turn(); if (!side) preAlign(asm, m); if (!asmSolve(asm)) { turn(); restorePoses(asm, before); toast('Развернуть не получается: мешают другие сопряжения', 'err'); }
   else pushUndo();
@@ -4263,9 +4265,11 @@ function renderAsmTree() {
   for (const m of asm.mates) {
     const na = asm.comps.find((c) => c.id === m.a.comp)?.name, nb = asm.comps.find((c) => c.id === m.b.comp)?.name;
     const bad = an?.redundant.has(m.id);
-    const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : ''), tabindex: '0', role: 'treeitem', title: `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
+    const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : '') + (S.mateSel === m.id ? ' sel' : ''), tabindex: '0', role: 'treeitem', title: `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
     r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
     r.ondblclick = (e) => (e.target.classList.contains('meta') ? editMateValue(m, r) : editMate(m));
+    r.onclick = () => { S.mateSel = S.mateSel === m.id ? null : m.id; renderSide(); drawMatePicks(); };
+    r.onmouseenter = () => { S.mateHover = m.id; drawMatePicks(); }; r.onmouseleave = () => { S.mateHover = null; drawMatePicks(); };
     tree.append(r);
   }
   side.append(tree);
@@ -5056,7 +5060,7 @@ window.addEventListener('keydown', (e) => {
     if (S.measure) return closeMeasure();
     if (S.pm) return closePM();
     if (S.mode === 'drw') { S.drwTool = null; renderTools(); setHint(''); return; }
-    if (S.mode === 'asm') { S.asmSel = null; asmRefresh(); return; }
+    if (S.mode === 'asm') { S.asmSel = null; S.mateSel = null; asmRefresh(); return; }
     S.selectedTree = null; buildPlanes(); renderTree(); requestRender(); return;
   }
   if (e.key === 'Enter' && S.pm) { okPM(); return; }
