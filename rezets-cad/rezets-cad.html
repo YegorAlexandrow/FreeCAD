@@ -4119,7 +4119,8 @@ function drawMatePicks() {
     if (ent.kind === 'axis') { const w = worldEnt({ kind: 'axis', p: ent.p.toArray(), d: ent.d.toArray() }, poseOf(c)); const L = 60; const l = segLines([...w.p.clone().addScaledVector(w.d, -L).toArray(), ...w.p.clone().addScaledVector(w.d, L).toArray()], lineMat(col, 1.5, { dashed: true, depthTest: false })); l.renderOrder = 16; groups.measure.add(l); }
   };
   if (S.pm?.kind === 'cpat') { const ref = S.pm.pat.ref; if (ref.comp) show(ref, colors['geo-sel']); else { const A = cpatAxis(asm, ref); const L = 1000; const l = segLines([...A.p.clone().addScaledVector(A.d, -L).toArray(), ...A.p.clone().addScaledVector(A.d, L).toArray()], lineMat(colors['geo-sel'], 1.5, { dashed: true, depthTest: false })); l.renderOrder = 16; groups.measure.add(l); } }
-  const pm = S.pm; if (pm?.kind === 'mate') { pm.picks.forEach((r) => show(r, colors['geo-sel'])); if (pm.hover && !pm.picks.some((r) => r.comp === pm.hover.comp && r.e === pm.hover.e)) show(pm.hover, colors['geo-hover']); }
+  const pm = S.pm; if (pm?.kind === 'mate' && pm.result?.status === 'conflict') for (const id of pm.result.group) { const g = asm.mates.find((x) => x.id === id); if (g) { show(g.a, colors['geo-bad']); show(g.b, colors['geo-bad']); } }
+  if (pm?.kind === 'mate') { pm.picks.forEach((r) => show(r, colors['geo-sel'])); if (pm.hover && !pm.picks.some((r) => r.comp === pm.hover.comp && r.e === pm.hover.e)) show(pm.hover, colors['geo-hover']); }
   requestRender();
 }
 // ---------------- commands ----------------
@@ -4185,7 +4186,7 @@ function previewMate() {
   // Distance keeps the side the parts are on now.
   if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = Math.abs(raw); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
   if (pm.type === 'angle') { if (pm.v == null) pm.v = Math.round(Math.acos(Math.min(1, Math.abs(A.d.dot(B.d)))) * 180 / Math.PI); m.v = pm.v; m.side = pm.flip ? -1 : 1; }
-  pm.result = tryAddMate(asm, m); if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else pm.mate = null;
+  pm.result = tryAddMate(asm, m); if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; if (pm.result.status === 'conflict') pm.result.why = explainConflict(asm, m, pm.result.group); }
   asmRefresh(true);
 }
 function okMate() {
@@ -4213,9 +4214,25 @@ function reverseMate(m) {
   asmRefresh(true);
 }
 const canReverse = (a, b, type) => a && b && a.kind === b.kind && a.kind !== 'point' && ['coincident', 'parallel', 'distance', 'angle', 'concentric'].includes(type);
+// Why a direction mate cannot hold: an earlier mate between the same parts already leaves only a
+// turn about one axis, and a turn keeps the angle each picked face makes with that axis.
+function explainConflict(asm, m, group) {
+  const gs = group.map((id) => asm.mates.find((x) => x.id === id)).filter(Boolean); const cname = (id) => asm.comps.find((c) => c.id === id)?.name;
+  const wantsParallel = (m.a.kind === 'plane' && m.b.kind === 'plane' && ['parallel', 'coincident', 'distance'].includes(m.type)) || (m.a.kind === 'axis' && m.b.kind === 'axis' && ['parallel', 'coincident', 'concentric'].includes(m.type));
+  const lock = (g, comp) => { if (!['concentric', 'coincident', 'parallel'].includes(g.type) || g.a.kind !== g.b.kind || g.a.kind === 'point') return null; const r = g.a.comp === comp ? g.a : g.b.comp === comp ? g.b : null; return r && V3(r.d).normalize(); };
+  const ang = (d, u) => Math.acos(Math.min(1, Math.abs(V3(d).normalize().dot(u)))) * 180 / Math.PI;
+  if (wantsParallel) for (const g of gs) {
+    const ua = lock(g, m.a.comp), ub = lock(g, m.b.comp); if (!ua || !ub) continue;
+    const ta = ang(m.a.d, ua), tb = ang(m.b.d, ub); if (Math.abs(ta - tb) < 0.5) continue;
+    const ax = g.a.kind === 'axis' ? 'оси' : 'нормали'; const mov = asm.comps.find((c) => c.id === m.a.comp)?.fixed ? m.b.comp : m.a.comp;
+    return `Сопряжение «${g.name}» уже ${g.a.kind === 'axis' ? 'совместило оси' : 'выровняло грани'}, и ${cname(mov)} может только вращаться вокруг ${g.a.kind === 'axis' ? 'этой оси' : 'нормали к ним'}. ${pickName(m.a)} на ${cname(m.a.comp)} стоит к ${ax} под ${fmt(ta)}°, ${pickName(m.b).toLowerCase()} на ${cname(m.b.comp)} под ${fmt(tb)}°: вращением их не выровнять. Выберите элементы с одинаковым углом к ${ax} или погасите «${g.name}»`;
+  }
+  return null;
+}
 function mateMessage(r) {
-  const names = r.group.map((id) => S.doc.mates.find((m) => m.id === id)?.name).filter(Boolean);
-  return r.status === 'redundant' ? `Это сопряжение ничего не добавляет: положение уже задано${names.length ? ' (' + names.join(', ') + ')' : ''}` : `Сопряжение противоречит${names.length ? ': ' + names.join(', ') : ' существующим'}`;
+  if (r.why) return r.why;
+  const names = r.group.map((id) => S.doc.mates.find((m) => m.id === id)?.name).filter(Boolean); const q = names.map((n) => `«${n}»`).join(', ');
+  return r.status === 'redundant' ? `Это сопряжение ничего не добавляет: положение уже задано${names.length ? ' (' + q + ')' : ''}` : names.length ? `Вместе с ${q} это сопряжение требует невозможного положения (элементы ${names.length > 1 ? 'тех сопряжений' : 'того сопряжения'} подсвечены красным). Погасите одно из них или выберите другие элементы` : 'Сопряжение противоречит существующим';
 }
 function renderAsmTree() {
   const asm = S.doc; const an = S.asmAnalysis; side.textContent = '';
@@ -5079,5 +5096,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
