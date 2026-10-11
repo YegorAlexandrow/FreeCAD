@@ -160,6 +160,11 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
 .kv span { color: var(--fg-2); }
 .kv b { font-family: var(--font-num); font-weight: 500; text-align: right; }
+.var-row { display: grid; grid-template-columns: 70px 10px 1fr 52px 20px; gap: 4px; align-items: center; margin-bottom: 4px; }
+.var-row input { min-width: 0; font: inherit; font-family: var(--font-num); padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg); }
+.var-row .x { background: none; border: none; color: var(--fg-2); cursor: pointer; padding: 0; }
+.var-row .x:hover { color: var(--bad); }
+.var-v { font-family: var(--font-num); color: var(--fg-2); text-align: right; font-size: 12px; } .var-v.bad { color: var(--bad); }
 .pickbox { width: 100%; text-align: left; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
 .pickbox.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .glyph { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 3px; display: grid; place-items: center; font-size: 11px; font-weight: 600; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--vp-bot) 70%, var(--geo-constr) 30%); border: 1px solid var(--geo-constr); cursor: pointer; user-select: none; }
@@ -310,6 +315,7 @@ const ICON = {
   bom: '<rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   sweep: '<path d="M4 18c4 0 5-12 10-12h6"/><rect x="2.5" y="15.5" width="3" height="5" rx=".5"/><rect x="18.5" y="3.5" width="3" height="5" rx=".5"/>',
   loft: '<rect x="4" y="15" width="16" height="5" rx="1"/><circle cx="12" cy="6" r="3"/><path d="M4 15 9 7.5M20 15l-5-7.5"/>',
+  vars: '<path d="M17 5H7l6 7-6 7h10"/>',
   hole: '<path d="M7 4h10M9 4v5h6V4M10.5 9v10M13.5 9v10M10.5 19 12 21l1.5-2"/>',
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
@@ -336,11 +342,22 @@ const ICON = {
 const fmt = (v, d = 2) => { const s = (Math.round(v * 10 ** d) / 10 ** d).toFixed(d); return s.replace(/\.?0+$/, '') || '0'; };
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-const evalExpr = (str) => {
-  const s = String(str).replace(',', '.').trim();
-  if (!/^[0-9+\-*/().\s]+$/.test(s)) return NaN;
-  try { const v = Function('"use strict";return (' + s + ')')(); return Number.isFinite(v) ? v : NaN; } catch { return NaN; }
-};
+// Arithmetic with the part's variables and a few functions (angles in degrees).
+const EXPR_FN = { sqrt: 'Math.sqrt', abs: 'Math.abs', min: 'Math.min', max: 'Math.max', round: 'Math.round', pi: 'Math.PI', sin: '__sin', cos: '__cos', tan: '__tan' };
+const IDENT_RE = /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*/g;
+const hasIdent = (s) => /[A-Za-zА-Яа-яЁё_]/.test(String(s));
+function evalWith(str, vals) {
+  let bad = false; let s = String(str).trim(); if (!s) return NaN;
+  s = s.replace(/(\d),(\d)/g, '$1.$2').replace(IDENT_RE, (w) => { if (w in vals) return '(' + vals[w] + ')'; if (w in EXPR_FN) return EXPR_FN[w]; bad = true; return w; });
+  if (bad) return NaN; const chk = s.replace(/Math\.[a-zA-Z]+|__sin|__cos|__tan/g, ''); if (!/^[0-9+\-*/().,\seE]*$/.test(chk)) return NaN;
+  try { const d = Math.PI / 180; const v = Function('__sin', '__cos', '__tan', '"use strict";return (' + s + ')')((x) => Math.sin(x * d), (x) => Math.cos(x * d), (x) => Math.tan(x * d)); return Number.isFinite(v) ? v : NaN; } catch { return NaN; }
+}
+function varValues(doc) {
+  const out = {}; const list = doc?.vars || [];
+  for (let pass = 0; pass <= list.length; pass++) for (const v of list) { if (v.name in out) continue; const x = evalWith(v.expr, out); if (Number.isFinite(x)) out[v.name] = x; }
+  return out;
+}
+const evalExpr = (str) => evalWith(str, varValues(S.doc));
 
 // ============================================================================================
 // Sketch data model and constraint solver
@@ -1491,6 +1508,7 @@ function drawSketchObjects(f, active) {
 const dotTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 32; const x = c.getContext('2d'); x.fillStyle = '#fff'; x.beginPath(); x.arc(16, 16, 14, 0, Math.PI * 2); x.fill(); const t = new THREE.CanvasTexture(c); return t; })();
 function dimText(sk, c) {
   const v = c.driven ? measure(sk, c) : c.v;
+  if (c.expr && !c.driven) return 'Σ' + (c.t === 'diam' ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v));
   const s = c.t === 'diam' ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v);
   return c.driven ? '(' + s + ')' : s;
 }
@@ -1591,7 +1609,7 @@ function glyphAnchor(sk, c) {
 function openDimEditor(c) {
   const sk = editSk(); if (!sk) return;
   const g = dimGeometry(sk, c); const s = sScreen(g.label.x, g.label.y);
-  const inp = h('input', { type: 'text', id: 'dimInput', value: fmt(c.driven ? measure(sk, c) : c.v, 4), 'aria-label': 'Значение размера' });
+  const inp = h('input', { type: 'text', id: 'dimInput', value: c.expr && !c.driven ? c.expr : fmt(c.driven ? measure(sk, c) : c.v, 4), 'aria-label': 'Значение размера' });
   const drv = h('label', { class: 'chk', title: 'Справочный размер не управляет геометрией' }, h('input', { type: 'checkbox', checked: !!c.driven }), 'спр.');
   const btn = h('button', { onclick: () => apply() }, 'OK');
   const el = h('div', { class: 'dimedit', style: `left:${s.x}px;top:${s.y}px` }, inp, drv, btn);
@@ -1604,8 +1622,8 @@ function openDimEditor(c) {
     }
     if (!Number.isFinite(v) || v <= 0 && c.t !== 'angle') { toast('Введите положительное число, например 25 или 50/2', 'warn'); refreshSketch(); return; }
     if (c.driven) { refreshSketch(); return; }
-    const old = c.v; const before = snapshotGeo(sk); c.v = v;
-    if (!solveSketch(sk)) { c.v = old; restoreGeo(sk, before); toast(`Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
+    const old = c.v, oldExpr = c.expr; const before = snapshotGeo(sk); c.v = v; if (hasIdent(inp.value)) c.expr = inp.value.trim(); else delete c.expr;
+    if (!solveSketch(sk)) { c.v = old; if (oldExpr) c.expr = oldExpr; else delete c.expr; restoreGeo(sk, before); toast(`Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
     commitSketch(false, fresh);
   };
   inp.addEventListener('blur', () => setTimeout(() => { if (S.dimEdit?.el === el && !el.contains(document.activeElement)) apply(); }, 0));
@@ -2593,6 +2611,50 @@ function openEdgePM(f, isNew) {
   if (!base.body) { toast('Перед этим элементом нет тела', 'warn'); return; }
   openPM({ kind: 'feature', feature: f, isNew, edgePick: true, topo: edgeTopology(base.body, base.cyls) });
   drawEdgeSelection();
+}
+
+// ============================================================================================
+// Variables (like SolidWorks equations): dimensions and feature parameters may be expressions.
+// ============================================================================================
+const VAR_NAME = /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*$/;
+// Re-evaluates every expression of the part and re-solves its sketches. Returns error texts.
+function applyVars(doc = S.doc) {
+  const vals = varValues(doc); const errs = [];
+  for (const f of doc.features) {
+    if (f.exprs) for (const [k, ex] of Object.entries(f.exprs)) { const v = evalWith(ex, vals); if (Number.isFinite(v)) f[k] = k === 'n' || k === 'n2' ? Math.max(k === 'n2' ? 1 : 2, Math.round(v)) : v; else errs.push(`${f.name}: ${ex}`); }
+    if (f.type === 'sketch') {
+      let changed = false; const before = snapshotGeo(f.sk); const old = [];
+      for (const c of Object.values(f.sk.cons)) if (c.expr) { const v = evalWith(c.expr, vals); if (Number.isFinite(v) && v > 0) { if (v !== c.v) { old.push([c, c.v]); c.v = v; changed = true; } } else errs.push(`${f.name}: ${c.expr}`); }
+      if (changed && !solveSketch(f.sk)) { for (const [c, v] of old) c.v = v; restoreGeo(f.sk, before); errs.push(`${f.name}: значения недостижимы`); }
+    }
+  }
+  return errs;
+}
+function cmdVars() { if (S.editing) exitSketch(); if (S.measure) closeMeasure(); S.doc.vars = S.doc.vars || []; openPM({ kind: 'vars' }); }
+function varsChanged() {
+  const errs = applyVars(); S.cache.clear(); rebuild(); renderSide(); pushUndo();
+  if (errs.length) toast('Не вычислено: ' + errs.slice(0, 3).join('; '), 'err');
+}
+function renderVarsPM() {
+  const doc = S.doc; const vals = varValues(doc); const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, h('b', { style: 'width:18px;text-align:center' }, 'Σ'), h('span', {}, 'Переменные'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'Готово (Enter)', onclick: () => closePM() }, svg(ICON.exit)))));
+  const grp = h('div', { class: 'grp' });
+  doc.vars.forEach((v, i) => {
+    const nm = h('input', { type: 'text', value: v.name, class: 'var-n', 'aria-label': 'Имя' }); const ex = h('input', { type: 'text', value: v.expr, class: 'var-e', 'aria-label': 'Значение или выражение' });
+    const val = Number.isFinite(vals[v.name]) ? fmt(vals[v.name], 4) : '?';
+    nm.onchange = () => { const n = nm.value.trim(); if (!VAR_NAME.test(n) || n in EXPR_FN || doc.vars.some((x, j) => j !== i && x.name === n)) { toast('Имя: буквы, цифры и _, начинается с буквы, без повторов', 'warn'); nm.value = v.name; return; }
+      const oldName = v.name; v.name = n; renameVarUses(doc, oldName, n); varsChanged(); };
+    ex.onchange = () => { v.expr = ex.value.trim(); varsChanged(); };
+    for (const el of [nm, ex]) el.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') el.blur(); });
+    grp.append(h('div', { class: 'var-row' }, nm, h('span', {}, '='), ex, h('span', { class: 'var-v' + (val === '?' ? ' bad' : '') }, val), h('button', { class: 'x', title: 'Удалить', onclick: () => { doc.vars.splice(i, 1); varsChanged(); } }, '✕')));
+  });
+  grp.append(h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { let k = 1; while (doc.vars.some((x) => x.name === 'p' + k)) k++; doc.vars.push({ name: 'p' + k, expr: '10' }); renderSide(); setTimeout(() => { const all = side.querySelectorAll('.var-n'); all[all.length - 1]?.focus(); all[all.length - 1]?.select(); }, 0); } }, '+ Переменная')));
+  box.append(grp, h('div', { class: 'grp' }, h('div', { class: 'note' }, 'В любой размер и поле можно ввести выражение: wall*2, (L - 2*wall)/3. Доступны sqrt, sin, cos, tan (в градусах), min, max, pi. Размеры с выражением помечены Σ.')));
+  side.append(box);
+}
+function renameVarUses(doc, a, b) {
+  const re = new RegExp('(^|[^A-Za-zА-Яа-яЁё_0-9])' + a + '(?![A-Za-zА-Яа-яЁё_0-9])', 'g'); const sub = (s) => s.replace(re, (m, p1) => p1 + b);
+  for (const v of doc.vars) v.expr = sub(v.expr);
+  for (const f of doc.features) { if (f.exprs) for (const k in f.exprs) f.exprs[k] = sub(f.exprs[k]); if (f.type === 'sketch') for (const c of Object.values(f.sk.cons)) if (c.expr) c.expr = sub(c.expr); }
 }
 
 // ============================================================================================
@@ -3780,6 +3842,7 @@ function renderTree() {
     if (opts.menu) r.addEventListener('contextmenu', (e) => { e.preventDefault(); S.selectedTree = key; renderTree(); openMenu(e.clientX, e.clientY, opts.menu); });
     return r;
   };
+  const nv = (S.doc.vars || []).length; const vr = row('vars', ICON.vars, 'Переменные', { meta: nv ? String(nv) : '', title: 'Переменные детали: размеры и параметры через выражения', onOpen: cmdVars }); vr.addEventListener('click', cmdVars); tree.append(vr);
   tree.append(row('origin', ICON.origin, 'Исходная точка', { cls: '' }));
   for (const [k, p] of Object.entries(PLANES)) tree.append(row('plane:' + k, ICON.plane, p.label, { onOpen: () => startSketch({ ...p }), title: `Плоскость «${p.label}». Двойной щелчок: эскиз на ней`, menu: [['Эскиз на плоскости', () => startSketch({ ...p })]] }));
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
@@ -3833,9 +3896,14 @@ function pmHeader(title, icon, withButtons = true) {
   return head;
 }
 const seg = (opts, val, onpick) => h('div', { class: 'seg', role: 'group' }, opts.map(([v, l]) => h('button', { 'aria-pressed': String(v === val), onclick: () => onpick(v) }, l)));
+// Fields of the feature being edited keep an expression when it uses variables.
+const FIELD_KEYS = { pmDepth: 'depth', pmRadius: 'r', pmDist: 'd', pmAngle: 'angle', pmDraft: 'draft', pmOffset: 'offset', pmThick: 't', pmStep: 'd', pmStep2: 'd2', pmCount: 'n', pmCount2: 'n2', pmDia: 'dia', pmCbD: 'cbD', pmCbH: 'cbH', pmCsD: 'csD', pmCsA: 'csA' };
 const numField = (label, id, val, onset, unit = 'мм') => {
-  const inp = h('input', { type: 'text', id, value: fmt(val, 4), inputmode: 'decimal' });
-  const apply = () => { const v = evalExpr(inp.value); if (Number.isFinite(v) && v > 0) { onset(v); inp.value = fmt(v, 4); } else { inp.value = fmt(val, 4); toast('Введите положительное число', 'warn'); } };
+  const obj = S.mode === 'part' && S.pm?.feature && FIELD_KEYS[id] ? S.pm.feature : null; const key = FIELD_KEYS[id]; const ex = obj?.exprs?.[key];
+  const inp = h('input', { type: 'text', id, value: ex ?? fmt(val, 4), inputmode: 'decimal', title: ex ? `${ex} = ${fmt(val, 4)}` : '' });
+  const apply = () => { const str = inp.value; const v = evalExpr(str); if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0)) {
+    if (obj) { if (hasIdent(str)) obj.exprs = { ...obj.exprs, [key]: str.trim() }; else if (obj.exprs) { delete obj.exprs[key]; if (!Object.keys(obj.exprs).length) delete obj.exprs; } }
+    onset(v); inp.value = obj?.exprs?.[key] ?? fmt(v, 4); } else { inp.value = ex ?? fmt(val, 4); toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
   inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } });
   return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
 };
@@ -3849,6 +3917,7 @@ function renderPM() {
     return;
   }
   if (pm.kind === 'mass') { renderMassPM(); return; }
+  if (pm.kind === 'vars') { renderVarsPM(); return; }
   if (pm.pattern) { renderPatternPM(); return; }
   if (pm.feature?.type === 'hole') { renderHolePM(); return; }
   if (pm.feature?.type === 'sweep' || pm.feature?.type === 'loft') { renderSweepLoftPM(); return; }
@@ -3941,6 +4010,7 @@ function renderSketchPanel() {
 function renderCorner() {
   const c = $('corner'); c.textContent = '';
   if (S.pm?.kind === 'mate' || S.pm?.kind === 'cpat') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
+  else if (S.pm?.kind === 'vars') c.append(h('button', { class: 'ok', title: 'Готово', onclick: () => closePM() }, svg(ICON.exit)));
   else if (S.pm?.kind === 'insert' || S.pm?.kind === 'interf' || S.pm?.kind === 'mass') c.append(h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm && S.pm.kind === 'feature') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.editing) c.append(h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)));
@@ -4239,5 +4309,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
