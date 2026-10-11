@@ -182,6 +182,9 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #corner .ok { color: var(--good); } #corner .cancel { color: var(--bad); }
 #viewbar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); display: flex; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); max-width: calc(100% - 120px); overflow-x: auto; }
 #viewbar button { border: none; background: none; padding: 4px 8px; border-radius: 5px; cursor: pointer; color: var(--fg-2); font-size: 12px; white-space: nowrap; }
+#drawing { position: absolute; inset: 0; overflow: auto; background: color-mix(in srgb, var(--vp-bot) 70%, #777 30%); display: grid; place-items: center; padding: 18px; }
+#drawing .sheet { width: min(100%, calc((100vh - 220px) * 1.414)); background: #fff; box-shadow: 0 4px 18px rgb(0 0 0 / .25); line-height: 0; }
+#drawing .sheet svg { display: block; }
 #viewbar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 #sectionBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); font-size: 12px; max-width: calc(100% - 24px); }
 #sectionBar input[type=range] { width: 160px; } #sectionBar .num { width: 64px; font-family: var(--font-num); }
@@ -252,6 +255,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
       <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button>
     </div>
     <div id="sectionBar" hidden></div>
+    <div id="drawing" hidden></div>
     <div id="corner"></div>
     <div id="toasts"></div>
     <div id="loading">Загрузка геометрического ядра…</div>
@@ -322,6 +326,7 @@ const ICON = {
   loft: '<rect x="4" y="15" width="16" height="5" rx="1"/><circle cx="12" cy="6" r="3"/><path d="M4 15 9 7.5M20 15l-5-7.5"/>',
   vars: '<path d="M17 5H7l6 7-6 7h10"/>',
   explode: '<rect x="9" y="9" width="6" height="6" rx="1"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><path d="M10.5 4.5 12 3l1.5 1.5M10.5 19.5 12 21l1.5-1.5M4.5 10.5 3 12l1.5 1.5M19.5 10.5 21 12l-1.5 1.5"/>',
+  drw: '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="M13 14h8M13 14v6M6 8h5v4H6z"/>',
   hole: '<path d="M7 4h10M9 4v5h6V4M10.5 9v10M13.5 9v10M10.5 19 12 21l1.5-2"/>',
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
@@ -2918,6 +2923,202 @@ function renderSweepLoftPM() {
 }
 
 // ============================================================================================
+// Drawings: orthographic views of a part or an assembly on a sheet (first-angle projection as
+// in ГОСТ 2.305: top view below the front view, view from the left to its right), visible and
+// hidden lines, silhouettes of curved faces, title block, dimensions, SVG and print.
+// ============================================================================================
+const SHEETS = { A4: [297, 210], A3: [420, 297], A2: [594, 420] };
+const STD_SCALES = [10, 5, 4, 2.5, 2, 1, 1 / 2, 1 / 2.5, 1 / 4, 1 / 5, 1 / 10, 1 / 20, 1 / 50];
+const scaleText = (s) => (s >= 1 ? `${fmt(s)}:1` : `1:${fmt(1 / s)}`);
+const DRW_VIEWS = {
+  front: { label: 'Главный вид', R: [1, 0, 0], U: [0, 1, 0], D: [0, 0, 1] },
+  top: { label: 'Вид сверху', R: [1, 0, 0], U: [0, 0, -1], D: [0, 1, 0] },
+  left: { label: 'Вид слева', R: [0, 0, 1], U: [0, 1, 0], D: [-1, 0, 0] },
+  iso: { label: 'Изометрия', R: [0.7071, 0, -0.7071], U: [-0.4082, 0.8165, -0.4082], D: [0.5774, 0.5774, 0.5774] },
+};
+const newDrawing = (src) => ({ src, sheet: 'A4', scale: null, iso: true, hidden: true, dims: [], auto: true, author: '' });
+// Geometry the drawing shows: the part body, or every component of an assembly in place.
+function drawingSources(srcId) {
+  const ent = docEntry(srcId); if (!ent) return [];
+  if (ent.kind === 'asm') { const prev = S.doc; const out = []; try { S.doc = ent.data; for (const c of allComps(ent.data)) { const inf = docInfo(c.doc); if (inf?.geo) out.push({ geo: inf.geo, cyls: inf.cyls, M: new THREE.Matrix4().fromArray(c.T) }); } } finally { S.doc = prev; } return out; }
+  const inf = docInfo(srcId); return inf?.geo ? [{ geo: inf.geo, cyls: inf.cyls, M: new THREE.Matrix4() }] : [];
+}
+// Mesh edges with both neighbouring normals, for silhouettes.
+const adjCache = new WeakMap();
+function meshAdjacency(geo) {
+  if (adjCache.has(geo)) return adjCache.get(geo);
+  const pos = geo.getAttribute('position'); const q = 1e-4; const kv = (v) => `${Math.round(v.x / q)},${Math.round(v.y / q)},${Math.round(v.z / q)}`; const map = new Map(); const out = [];
+  for (let t = 0; t < pos.count / 3; t++) {
+    const v = [0, 1, 2].map((k) => new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k)); const n = new THREE.Vector3().crossVectors(v[1].clone().sub(v[0]), v[2].clone().sub(v[0])); if (n.lengthSq() < 1e-18) continue; n.normalize();
+    for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const ka = kv(a), kb = kv(b); const key = ka < kb ? ka + '|' + kb : kb + '|' + ka; const x = map.get(key); if (x) { if (!x.n2) x.n2 = n; } else map.set(key, { a, b, n1: n, n2: null }); }
+  }
+  for (const x of map.values()) if (x.n2 && x.n1.dot(x.n2) > Math.cos(28 * Math.PI / 180)) out.push(x);
+  adjCache.set(geo, out); return out;
+}
+// Projects all sources into a view: visible and hidden 2D segments, circles seen face-on, vertices.
+function projectView(sources, key) {
+  const V = DRW_VIEWS[key]; const R = V3(V.R), U = V3(V.U), D = V3(V.D);
+  const tris = []; let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity, size = 1;
+  const P = (p) => [p.dot(R), p.dot(U), p.dot(D)];
+  for (const s of sources) { const pos = s.geo.getAttribute('position'); const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i += 3) { const t = []; for (let k = 0; k < 3; k++) { v.fromBufferAttribute(pos, i + k).applyMatrix4(s.M); const p = P(v); t.push(p); umin = Math.min(umin, p[0]); umax = Math.max(umax, p[0]); vmin = Math.min(vmin, p[1]); vmax = Math.max(vmax, p[1]); } tris.push(t); } }
+  if (!tris.length) return null; size = Math.max(umax - umin, vmax - vmin, 1e-6);
+  const G = 96; const cw = (umax - umin) / G || 1, ch = (vmax - vmin) / G || 1; const grid = Array.from({ length: G * G }, () => []);
+  const ci = (u) => Math.max(0, Math.min(G - 1, Math.floor((u - umin) / cw))), cj = (v) => Math.max(0, Math.min(G - 1, Math.floor((v - vmin) / ch)));
+  tris.forEach((t, i) => { const i0 = ci(Math.min(t[0][0], t[1][0], t[2][0])), i1 = ci(Math.max(t[0][0], t[1][0], t[2][0])), j0 = cj(Math.min(t[0][1], t[1][1], t[2][1])), j1 = cj(Math.max(t[0][1], t[1][1], t[2][1])); for (let a = i0; a <= i1; a++) for (let b = j0; b <= j1; b++) grid[b * G + a].push(i); });
+  const tol = size * 3e-4;
+  const occluded = (u, v, d) => {
+    for (const i of grid[cj(v) * G + ci(u)]) { const [A, B, C] = tris[i]; const den = (B[1] - C[1]) * (A[0] - C[0]) + (C[0] - B[0]) * (A[1] - C[1]); if (Math.abs(den) < 1e-14) continue;
+      const l1 = ((B[1] - C[1]) * (u - C[0]) + (C[0] - B[0]) * (v - C[1])) / den, l2 = ((C[1] - A[1]) * (u - C[0]) + (A[0] - C[0]) * (v - C[1])) / den, l3 = 1 - l1 - l2; const e = -1e-7;
+      if (l1 < e || l2 < e || l3 < e) continue; if (l1 * A[2] + l2 * B[2] + l3 * C[2] > d + tol) return true; }
+    return false;
+  };
+  const vis = [], hid = []; const step = size / 160;
+  const addSeg = (a, b) => { const pa = P(a), pb = P(b); const L = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]); if (L < 1e-9) return; const n = Math.max(1, Math.ceil(L / step)); let runStart = 0, runVis = null;
+    const at = (t) => [pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t, pa[2] + (pb[2] - pa[2]) * t];
+    for (let k = 0; k < n; k++) { const m = at((k + 0.5) / n); const isVis = !occluded(m[0], m[1], m[2]); if (runVis === null) runVis = isVis; else if (isVis !== runVis) { const s0 = at(runStart / n), s1 = at(k / n); (runVis ? vis : hid).push([s0[0], s0[1], s1[0], s1[1]]); runStart = k; runVis = isVis; } }
+    const s0 = at(runStart / n), s1 = at(1); (runVis ? vis : hid).push([s0[0], s0[1], s1[0], s1[1]]); };
+  const circles = [], verts = [];
+  for (const s of sources) {
+    const T = edgeTopology(s.geo, s.cyls); const d = T.display; const a = new THREE.Vector3(), b = new THREE.Vector3();
+    for (let i = 0; i < d.length; i += 6) { a.set(d[i], d[i + 1], d[i + 2]).applyMatrix4(s.M); b.set(d[i + 3], d[i + 4], d[i + 5]).applyMatrix4(s.M); addSeg(a, b); }
+    const nM = new THREE.Matrix3().getNormalMatrix(s.M);
+    for (const x of meshAdjacency(s.geo)) { const n1 = x.n1.clone().applyMatrix3(nM), n2 = x.n2.clone().applyMatrix3(nM); const d1 = n1.dot(D), d2 = n2.dot(D); if (d1 * d2 < 0 && Math.max(Math.abs(d1), Math.abs(d2)) > 1e-3) addSeg(x.a.clone().applyMatrix4(s.M), x.b.clone().applyMatrix4(s.M)); }
+    for (const c of T.circles) { const cc = c.c.clone().applyMatrix4(s.M); const n = c.n.clone().applyMatrix3(nM).normalize(); if (Math.abs(n.dot(D)) > 0.9999) { const p = P(cc); if (!occluded(p[0] + c.r * 0.7071, p[1] + c.r * 0.7071, p[2]) || !occluded(p[0] - c.r, p[1], p[2])) circles.push({ u: p[0], v: p[1], r: c.r, w: cc.toArray(), n: n.toArray() }); } }
+    for (const v of T.verts) { const w = v.clone().applyMatrix4(s.M); const p = P(w); verts.push({ u: p[0], v: p[1], w: w.toArray(), hidden: occluded(p[0], p[1], p[2]) }); }
+  }
+  // Silhouette pieces come in many short segments: join collinear neighbours.
+  const merge = (segs) => { const out = []; const key = (x, y) => `${Math.round(x * 1e4)},${Math.round(y * 1e4)}`; const byEnd = new Map();
+    for (const s2 of segs) { const k = key(s2[0], s2[1]); const prev = byEnd.get(k); if (prev) { const dx1 = prev[2] - prev[0], dy1 = prev[3] - prev[1], dx2 = s2[2] - s2[0], dy2 = s2[3] - s2[1]; if (Math.abs(dx1 * dy2 - dy1 * dx2) < 1e-9 * Math.hypot(dx1, dy1) * Math.hypot(dx2, dy2) + 1e-12 && dx1 * dx2 + dy1 * dy2 > 0) { byEnd.delete(k); prev[2] = s2[2]; prev[3] = s2[3]; byEnd.set(key(prev[2], prev[3]), prev); continue; } }
+      out.push(s2); byEnd.set(key(s2[2], s2[3]), s2); } return out; };
+  const dedupC = []; for (const c of circles) if (!dedupC.some((x) => Math.hypot(x.u - c.u, x.v - c.v) < 1e-4 && Math.abs(x.r - c.r) < 1e-4)) dedupC.push(c);
+  return { key, vis: merge(vis), hid: merge(hid), circles: dedupC, verts, box: { umin, umax, vmin, vmax }, R: V.R, U: V.U, D: V.D };
+}
+// Sheet layout: front view top-left, view from the left to its right, top view below, isometric
+// top-right when it fits. The scale is the largest standard one that fits.
+function layoutDrawing(drw) {
+  const src = drawingSources(drw.src); if (!src.length) return { error: 'В источнике нет тела' };
+  const views = {}; for (const k of ['front', 'top', 'left', ...(drw.iso ? ['iso'] : [])]) views[k] = projectView(src, k);
+  const [W, H] = SHEETS[drw.sheet] || SHEETS.A4; const fx0 = 20, fy0 = 5, fx1 = W - 5, fy1 = H - 5; const gap = 18;
+  const w = (k) => views[k].box.umax - views[k].box.umin, hgt = (k) => views[k].box.vmax - views[k].box.vmin;
+  const availW = fx1 - fx0 - 3 * gap, availH = fy1 - fy0 - 3 * gap - 10;
+  // With the isometric view the three views share the width with it when it does not fit above the title block.
+  let fit = Math.min(availW / (w('front') + w('left') + (views.iso ? w('iso') : 0) + (views.iso ? gap : 0) / 1), availH / (hgt('front') + hgt('top')));
+  if (views.iso) fit = Math.max(fit, Math.min(availW / (w('front') + w('left')), availH / (hgt('front') + hgt('top'))) * 0.7);
+  const scale = drw.scale || STD_SCALES.find((s) => s <= fit) || STD_SCALES[STD_SCALES.length - 1];
+  const x0 = fx0 + gap, y0 = fy0 + gap + 6; const pos = {};
+  pos.front = { x: x0, y: y0 }; pos.left = { x: x0 + w('front') * scale + gap, y: y0 }; pos.top = { x: x0, y: y0 + hgt('front') * scale + gap };
+  if (views.iso) { const xi = pos.left.x + w('left') * scale + gap; const isoW = w('iso') * scale, isoH = hgt('iso') * scale; if (xi + isoW <= fx1 - 4 && y0 + isoH <= fy1 - 55 - 8) pos.iso = { x: xi, y: y0 }; else { const yi = pos.top.y; const xi2 = pos.top.x + w('top') * scale + gap; if (xi2 + isoW <= fx1 - 4 && yi + isoH <= fy1 - 55 - 8) pos.iso = { x: xi2, y: yi }; else delete views.iso; } }
+  return { views, pos, scale, W, H, frame: [fx0, fy0, fx1, fy1] };
+}
+// Paper coordinates of a model point in a view.
+function toPaper(L, key, w) { const v = L.views[key]; const p = V3(w); const u = p.dot(V3(v.R)), vv = p.dot(V3(v.U)); return [L.pos[key].x + (u - v.box.umin) * L.scale, L.pos[key].y + (v.box.vmax - vv) * L.scale]; }
+function autoDims(L) {
+  const out = []; const v = L.views;
+  const box = (k) => { const b = v[k].box; const X0 = L.pos[k].x, Y0 = L.pos[k].y, X1 = X0 + (b.umax - b.umin) * L.scale, Y1 = Y0 + (b.vmax - b.vmin) * L.scale; return { X0, Y0, X1, Y1, w: b.umax - b.umin, h: b.vmax - b.vmin }; };
+  const f = box('front'), t = box('top'), l = box('left');
+  out.push({ kind: 'h', x1: f.X0, x2: f.X1, y: f.Y0, at: f.Y0 - 8, val: f.w }, { kind: 'v', y1: f.Y0, y2: f.Y1, x: f.X0, at: f.X0 - 8, val: f.h }, { kind: 'v', y1: t.Y0, y2: t.Y1, x: t.X0, at: t.X0 - 8, val: t.h });
+  void l;
+  for (const k of ['front', 'top', 'left']) { const seen = new Set(); for (const c of v[k].circles) { const key = c.r.toFixed(3); if (seen.has(key) || seen.size >= 6) continue; seen.add(key); const [cx, cy] = toPaper(L, k, c.w); out.push({ kind: 'dia', cx, cy, r: c.r * L.scale, val: 2 * c.r }); } }
+  return out;
+}
+function dimSvg(d) {
+  const t = (x, y, s, rot = 0) => `<text x="${x.toFixed(2)}" y="${y.toFixed(2)}" font-size="3.5" text-anchor="middle" font-family="ISOCPEUR, Arial, sans-serif" fill="#000"${rot ? ` transform="rotate(${rot} ${x.toFixed(2)} ${y.toFixed(2)})"` : ''}>${s}</text>`;
+  const arrow = (x, y, dx, dy) => { const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L; const a = 2.5, b = 0.6; return `<path d="M${x} ${y} L${x - dx * a - dy * b} ${y - dy * a + dx * b} L${x - dx * a + dy * b} ${y - dy * a - dx * b} Z" fill="#000"/>`; };
+  const ln = (x1, y1, x2, y2) => `<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="#000" stroke-width="0.25"/>`;
+  const val = fmt(d.val, 2);
+  if (d.kind === 'h') { const s = Math.sign(d.at - d.y) || -1; return ln(d.x1, d.y, d.x1, d.at + s * 2) + ln(d.x2, d.y2 ?? d.y, d.x2, d.at + s * 2) + ln(d.x1, d.at, d.x2, d.at) + arrow(d.x1, d.at, d.x1 - d.x2, 0) + arrow(d.x2, d.at, d.x2 - d.x1, 0) + t((d.x1 + d.x2) / 2, d.at - 1, val); }
+  if (d.kind === 'v') { const s = Math.sign(d.at - d.x) || -1; return ln(d.x, d.y1, d.at + s * 2, d.y1) + ln(d.x2 ?? d.x, d.y2, d.at + s * 2, d.y2) + ln(d.at, d.y1, d.at, d.y2) + arrow(d.at, d.y1, 0, d.y1 - d.y2) + arrow(d.at, d.y2, 0, d.y2 - d.y1) + t(d.at - 1, (d.y1 + d.y2) / 2, val, -90); }
+  if (d.kind === 'dia') { const a = -Math.PI / 4; const ex = d.cx + d.r * Math.cos(a), ey = d.cy + d.r * Math.sin(a), sx = d.cx - d.r * Math.cos(a), sy = d.cy - d.r * Math.sin(a); const lx = ex + 6, ly = ey - 6;
+    return ln(sx, sy, ex, ey) + arrow(ex, ey, Math.cos(a), Math.sin(a)) + arrow(sx, sy, -Math.cos(a), -Math.sin(a)) + ln(ex, ey, lx, ly) + ln(lx, ly, lx + 9, ly) + `<text x="${(lx + 0.5).toFixed(2)}" y="${(ly - 0.8).toFixed(2)}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif">⌀${val}</text>`; }
+  return '';
+}
+// The sheet as SVG text, in millimetres.
+function drawingSvg(drw, L) {
+  const [W, H] = [L.W, L.H]; const [fx0, fy0, fx1, fy1] = L.frame; const parts = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}">`, `<rect width="${W}" height="${H}" fill="#fff"/>`);
+  parts.push(`<rect x="${fx0}" y="${fy0}" width="${fx1 - fx0}" height="${fy1 - fy0}" fill="none" stroke="#000" stroke-width="0.7"/>`);
+  for (const [k, v] of Object.entries(L.views)) {
+    if (!L.pos[k]) continue; const map = (u, vv) => [L.pos[k].x + (u - v.box.umin) * L.scale, L.pos[k].y + (v.box.vmax - vv) * L.scale];
+    const path = (segs) => segs.map((s) => { const a = map(s[0], s[1]), b = map(s[2], s[3]); return `M${a[0].toFixed(3)} ${a[1].toFixed(3)}L${b[0].toFixed(3)} ${b[1].toFixed(3)}`; }).join('');
+    if (drw.hidden && k !== 'iso' && v.hid.length) parts.push(`<path d="${path(v.hid)}" fill="none" stroke="#000" stroke-width="0.25" stroke-dasharray="2 1"/>`);
+    parts.push(`<path d="${path(v.vis)}" fill="none" stroke="#000" stroke-width="0.5" stroke-linecap="round"/>`);
+    if (k !== 'front') { const [x, y] = [L.pos[k].x, L.pos[k].y - 3]; parts.push(`<text x="${x}" y="${y}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif" fill="#000">${DRW_VIEWS[k].label}</text>`); }
+  }
+  const dims = [...(drw.auto ? autoDims(L) : []), ...(drw.dims || []).map((d) => userDimPaper(L, d)).filter(Boolean)];
+  for (const d of dims) parts.push(dimSvg(d));
+  // Title block (simplified ГОСТ 2.104 form 1): 185 x 55 at the bottom right.
+  const tx = fx1 - 185, ty = fy1 - 55; const ent = docEntry(drw.src); const st = (x, y, s, size = 3.5, w = '') => `<text x="${x}" y="${y}" font-size="${size}" font-family="ISOCPEUR, Arial, sans-serif"${w}>${s}</text>`;
+  let mass = ''; if (ent?.kind !== 'asm') { const inf = docInfo(drw.src); if (inf?.geo) { const mat = matOf(ent.data); mass = fmt(massProps(inf.geo).vol * MATERIALS[mat][1] / 1000 / 1000, 3); } }
+  parts.push(`<g stroke="#000" fill="none"><rect x="${tx}" y="${ty}" width="185" height="55" stroke-width="0.7"/><line x1="${tx + 65}" y1="${ty}" x2="${tx + 65}" y2="${fy1}" stroke-width="0.7"/><line x1="${tx + 65}" y1="${ty + 15}" x2="${fx1}" y2="${ty + 15}" stroke-width="0.7"/><line x1="${tx + 65}" y1="${ty + 40}" x2="${fx1}" y2="${ty + 40}" stroke-width="0.7"/><line x1="${tx + 135}" y1="${ty + 15}" x2="${tx + 135}" y2="${fy1}" stroke-width="0.7"/><line x1="${tx + 135}" y1="${ty + 25}" x2="${fx1}" y2="${ty + 25}" stroke-width="0.35"/><line x1="${tx + 152}" y1="${ty + 15}" x2="${tx + 152}" y2="${ty + 25}" stroke-width="0.35"/><line x1="${tx + 167}" y1="${ty + 15}" x2="${tx + 167}" y2="${ty + 25}" stroke-width="0.35"/>${[11, 22, 33, 44].map((d) => `<line x1="${tx}" y1="${ty + d}" x2="${tx + 65}" y2="${ty + d}" stroke-width="0.35"/>`).join('')}</g>`);
+  parts.push(st(tx + 100, ty + 30, escXml(ent?.name || ''), 7, ' text-anchor="middle"'), st(tx + 100, ty + 50, escXml(ent?.kind === 'asm' ? 'Сборочный чертёж' : MATERIALS[matOf(ent?.data)][0]), 3.5, ' text-anchor="middle"'),
+    st(tx + 137, ty + 19, 'Лит.', 2.5), st(tx + 154, ty + 19, 'Масса', 2.5), st(tx + 169, ty + 19, 'Масштаб', 2.5), st(tx + 159.5, ty + 24, mass, 3, ' text-anchor="middle"'), st(tx + 176, ty + 24, scaleText(L.scale), 3, ' text-anchor="middle"'),
+    st(tx + 137, ty + 30, 'Лист 1', 2.5), st(tx + 160, ty + 30, 'Листов 1', 2.5), st(tx + 2, ty + 8, 'Разраб.', 2.5), st(tx + 20, ty + 8, escXml(drw.author || ''), 2.5), st(tx + 2, ty + 19, 'Пров.', 2.5), st(tx + 2, ty + 52, 'Утв.', 2.5),
+    st(tx + 160, ty + 50, 'Резец CAD', 3, ' text-anchor="middle" fill="#666"'));
+  parts.push('</svg>'); return parts.join('');
+}
+const escXml = (s) => String(s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
+// User dimensions keep model points, so they follow the model.
+function userDimPaper(L, d) {
+  if (!L.pos[d.view]) return null;
+  if (d.kind === 'dia') { const [cx, cy] = toPaper(L, d.view, d.c); return { kind: 'dia', cx, cy, r: d.r * L.scale, val: 2 * d.r }; }
+  const [x1, y1] = toPaper(L, d.view, d.a), [x2, y2] = toPaper(L, d.view, d.b); const v = L.views[d.view]; const A = V3(d.a), B = V3(d.b);
+  if (d.kind === 'h') return { kind: 'h', x1, x2, y: y1, y2, at: L.pos[d.view].y + d.off * L.scale, val: Math.abs(B.clone().sub(A).dot(V3(v.R))) };
+  return { kind: 'v', y1, y2, x: x1, x2, at: L.pos[d.view].x + d.off * L.scale, val: Math.abs(B.clone().sub(A).dot(V3(v.U))) };
+}
+// ---------------- drawing document UI ----------------
+let drwLayout = null;
+function drwEnter() { canvas.style.display = 'none'; $('viewbar').hidden = true; $('sectionBar').hidden = true; $('drawing').hidden = false; asmLeave(); groups.body.visible = false; setTab('feat'); renderTools(); drwRefresh(); }
+function drwLeave() { canvas.style.display = ''; $('viewbar').hidden = false; $('drawing').hidden = true; groups.body.visible = true; drwLayout = null; }
+function drwRefresh() {
+  const drw = S.doc; const box = $('drawing'); box.textContent = '';
+  if (!docEntry(drw.src)) { box.append(h('div', { class: 'empty-tree' }, 'Источник чертежа удалён. Выберите деталь или сборку слева.')); renderSide(); return; }
+  drwLayout = layoutDrawing(drw); if (drwLayout.error) { box.append(h('div', { class: 'empty-tree' }, drwLayout.error)); renderSide(); return; }
+  const wrap = h('div', { class: 'sheet' }); wrap.innerHTML = drawingSvg(drw, drwLayout); box.append(wrap);
+  const svgEl = wrap.firstChild; svgEl.removeAttribute('width'); svgEl.removeAttribute('height'); svgEl.style.width = '100%'; svgEl.style.height = '100%';
+  svgEl.addEventListener('pointerdown', drwClick); svgEl.addEventListener('pointermove', drwHover);
+  renderSide(); setHint(S.drwTool ? drwToolHint() : 'Чертёж обновляется вместе с моделью. «Размер»: щёлкните две вершины или окружность в виде');
+}
+function drwPaperPoint(ev) { const svgEl = $('drawing').querySelector('svg'); const pt = svgEl.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; const p = pt.matrixTransform(svgEl.getScreenCTM().inverse()); return [p.x, p.y]; }
+function drwNearest(ev) {
+  const L = drwLayout; if (!L) return null; const [x, y] = drwPaperPoint(ev); let best = null;
+  for (const [k, v] of Object.entries(L.views)) { if (k === 'iso' || !L.pos[k]) continue;
+    for (const p of v.verts) { const [px, py] = toPaper(L, k, p.w); const d = Math.hypot(px - x, py - y); if (d < 2.5 && (!best || d < best.d)) best = { d, view: k, kind: 'pt', w: p.w, px, py }; }
+    if (!best) for (const c of v.circles) { const [cx, cy] = toPaper(L, k, c.w); const d = Math.abs(Math.hypot(cx - x, cy - y) - c.r * L.scale); if (d < 1.5 && (!best || d < best.d)) best = { d, view: k, kind: 'circle', c: c.w, r: c.r, px: cx, py: cy }; } }
+  return best;
+}
+function drwHover(ev) {
+  if (!S.drwTool) return; const n = drwNearest(ev); const svgEl = $('drawing').querySelector('svg'); svgEl.querySelector('#drwHover')?.remove(); if (!n) return;
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); g.id = 'drwHover'; g.setAttribute('cx', n.px); g.setAttribute('cy', n.py); g.setAttribute('r', n.kind === 'pt' ? 1.2 : n.r * drwLayout.scale); g.setAttribute('fill', 'none'); g.setAttribute('stroke', '#f39c12'); g.setAttribute('stroke-width', '0.5'); svgEl.append(g);
+}
+function drwToolHint() { const p = S.drwTool.picks; return !p.length ? 'Размер: щёлкните вершину или окружность' : p.length === 1 ? 'Щёлкните вторую вершину того же вида' : 'Щёлкните, где поставить размер'; }
+function drwClick(ev) {
+  if (!S.drwTool) return; const T = S.drwTool; const drw = S.doc;
+  if (T.picks.length === 2) { const [a, b] = T.picks; const [x, y] = drwPaperPoint(ev); const L = drwLayout; const v = L.views[a.view]; const ymin = Math.min(a.py, b.py), ymax = Math.max(a.py, b.py);
+    const horiz = y < ymin || y > ymax; const off = horiz ? (y - L.pos[a.view].y) / L.scale : (x - L.pos[a.view].x) / L.scale; void v;
+    drw.dims.push({ kind: horiz ? 'h' : 'v', view: a.view, a: a.w, b: b.w, off }); S.drwTool = { picks: [] }; pushUndo(); drwRefresh(); return; }
+  const n = drwNearest(ev); if (!n) return;
+  if (n.kind === 'circle' && !T.picks.length) { drw.dims.push({ kind: 'dia', view: n.view, c: n.c, r: n.r }); pushUndo(); drwRefresh(); return; }
+  if (n.kind !== 'pt') return; if (T.picks.length === 1 && T.picks[0].view !== n.view) { toast('Обе точки должны быть в одном виде', 'warn'); return; }
+  T.picks.push(n); setHint(drwToolHint());
+}
+function renderDrawingPanel() {
+  const drw = S.doc; side.textContent = ''; const srcs = S.project.docs.filter((d) => d.kind === 'part' || d.kind === 'import' || d.kind === 'asm');
+  const sel = h('select', { id: 'drwSrc' }, srcs.map((d) => h('option', { value: d.id, selected: d.id === drw.src }, d.name))); sel.onchange = () => { drw.src = sel.value; drw.dims = []; pushUndo(); drwRefresh(); };
+  const sheet = h('select', { id: 'drwSheet' }, Object.keys(SHEETS).map((k) => h('option', { value: k, selected: k === drw.sheet }, k))); sheet.onchange = () => { drw.sheet = sheet.value; pushUndo(); drwRefresh(); };
+  const sc = h('select', { id: 'drwScale' }, [h('option', { value: '', selected: !drw.scale }, 'Авто' + (drwLayout?.scale ? ` (${scaleText(drwLayout.scale)})` : '')), ...STD_SCALES.map((s) => h('option', { value: String(s), selected: drw.scale === s }, scaleText(s)))]); sc.onchange = () => { drw.scale = sc.value ? +sc.value : null; pushUndo(); drwRefresh(); };
+  const chk = (label, key) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!drw[key], onchange: (e) => { drw[key] = e.target.checked; pushUndo(); drwRefresh(); } }), label);
+  const author = h('input', { type: 'text', value: drw.author || '', id: 'drwAuthor' }); author.onchange = () => { drw.author = author.value; pushUndo(); drwRefresh(); }; author.addEventListener('keydown', (e) => e.stopPropagation());
+  side.append(h('div', { class: 'sec-h' }, h('span', {}, activeEntry().name), h('span', { class: 'meta' }, 'чертёж')),
+    h('div', { class: 'grp' }, h('label', { class: 'field' }, h('span', {}, 'Модель'), sel), h('label', { class: 'field' }, h('span', {}, 'Формат'), sheet), h('label', { class: 'field' }, h('span', {}, 'Масштаб'), sc), h('label', { class: 'field' }, h('span', {}, 'Разработал'), author)),
+    h('div', { class: 'grp' }, chk('Изометрия', 'iso'), chk('Невидимые линии', 'hidden'), chk('Габаритные размеры и диаметры', 'auto'),
+      h('div', { class: 'note' }, `Своих размеров: ${drw.dims.length}`), drw.dims.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { drw.dims.pop(); pushUndo(); drwRefresh(); } }, 'Убрать последний'), h('button', { class: 'chip', onclick: () => { drw.dims = []; pushUndo(); drwRefresh(); } }, 'Убрать все')) : null));
+}
+function drwSvgText() { return drwLayout && !drwLayout.error ? drawingSvg(S.doc, drwLayout) : ''; }
+function drwPrint() { const s = drwSvgText(); if (!s) return; const [W, H] = [drwLayout.W, drwLayout.H]; const st = h('style', { id: 'printSheet' }, `@page { size: ${W}mm ${H}mm; margin: 0 } @media print { body > *:not(#printArea) { display: none !important } #printArea { display: block !important } #printArea svg { width: ${W}mm; height: ${H}mm } }`);
+  const area = h('div', { id: 'printArea', style: 'display:none' }); area.innerHTML = s; document.body.append(st, area); const done = () => { st.remove(); area.remove(); window.removeEventListener('afterprint', done); }; window.addEventListener('afterprint', done); try { window.print(); } catch { done(); toast('Печать недоступна', 'warn'); } }
+
+// ============================================================================================
 // Mass properties and bill of materials. Densities in g/cm³.
 // ============================================================================================
 const MATERIALS = { pla: ['PLA', 1.24], petg: ['PETG', 1.27], abs: ['ABS', 1.04], nylon: ['Нейлон PA12', 1.01], steel: ['Сталь', 7.85], stainless: ['Нерж. сталь', 8.0], alu: ['Алюминий', 2.70], brass: ['Латунь', 8.5], copper: ['Медь', 8.96], wood: ['Сосна', 0.5] };
@@ -3939,7 +4140,7 @@ function toolBtn(label, icon, onclick, opts = {}) {
 }
 function renderTools() {
   toolsEl.textContent = '';
-  $('tabSketch').hidden = S.mode === 'asm' || S.mode === 'import'; $('tabFeat').textContent = S.mode === 'asm' ? 'Сборка' : 'Элементы';
+  $('tabSketch').hidden = S.mode === 'asm' || S.mode === 'import' || S.mode === 'drw'; $('tabFeat').textContent = S.mode === 'asm' ? 'Сборка' : S.mode === 'drw' ? 'Чертёж' : 'Элементы';
   if (S.mode === 'asm') {
     toolsEl.append(
       toolBtn('Вставить', ICON.insert, cmdInsert, { pressed: S.pm?.kind === 'insert', title: 'Вставить деталь в сборку (I)', kbd: 'I' }),
@@ -3954,6 +4155,13 @@ function renderTools() {
       h('div', { class: 'sep' }),
       toolBtn('Открыть деталь', ICON.part, () => { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) switchDoc(c.doc); else toast('Выберите компонент', 'info'); }, { disabled: !S.asmSel, title: 'Открыть выбранный компонент для редактирования' }),
     );
+    return;
+  }
+  if (S.mode === 'drw') {
+    toolsEl.append(toolBtn('Размер', ICON.dim, () => { S.drwTool = S.drwTool ? null : { picks: [] }; renderTools(); setHint(S.drwTool ? drwToolHint() : ''); }, { pressed: !!S.drwTool, title: 'Размер между вершинами или диаметр окружности (D)', kbd: 'D' }),
+      toolBtn('Обновить', ICON.revolve, drwRefresh, { title: 'Перестроить виды по модели' }), h('div', { class: 'sep' }),
+      toolBtn('SVG…', ICON.bom, () => showModal('Чертёж SVG', 'Скопируйте текст в файл .svg — он откроется в браузере, Inkscape или CorelDRAW в натуральную величину.', drwSvgText(), [['Копировать', copyText], ['Закрыть', closeModal]]), { title: 'Экспорт чертежа в SVG' }),
+      toolBtn('Печать', ICON.drw, drwPrint, { title: 'Печать листа в масштабе 1:1' }));
     return;
   }
   if (S.mode === 'import') { toolsEl.append(toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить (M)', kbd: 'M' }), toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Материал, масса, центр масс' })); return; }
@@ -4014,10 +4222,12 @@ $('tabFeat').onclick = () => setTab('feat'); $('tabSketch').onclick = () => setT
 
 const side = $('side');
 function renderSide() {
+  if (S.mode === 'drw') { renderDrawingPanel(); return; }
   if (S.mode === 'asm') { if (S.pm) renderAsmPM(); else renderAsmTree(); return; }
   if (S.measure) renderMeasure(); else if (S.pm) renderPM(); else if (S.editing) renderSketchPanel(); else if (S.mode === 'import') renderImportPanel(); else renderTree();
 }
 function renderTree() {
+  if (S.mode === 'drw') { renderDrawingPanel(); return; }
   if (S.mode === 'asm') { if (!S.pm) renderAsmTree(); return; }
   if (S.mode === 'import') { if (!S.pm && !S.measure) renderImportPanel(); return; }
   if (S.pm || S.editing || S.measure) return;
@@ -4249,8 +4459,8 @@ function toast(text, kind = 'info', actions = []) {
 // ============================================================================================
 // Project: several documents (parts, imported STEP parts, assemblies) in tabs
 // ============================================================================================
-const KIND_ICON = { part: 'part', import: 'step', asm: 'asm' };
-const KIND_NAME = { part: 'Деталь', import: 'Импорт', asm: 'Сборка' };
+const KIND_ICON = { part: 'part', import: 'step', asm: 'asm', drw: 'drw' };
+const KIND_NAME = { part: 'Деталь', import: 'Импорт', asm: 'Сборка', drw: 'Чертёж' };
 function newProject(docs) {
   const p = { name: 'Проект', docs: [], active: null, nid: 1 };
   for (const d of docs) p.docs.push({ id: 'd' + p.nid++, kind: d.kind, name: d.name, data: d.data });
@@ -4295,7 +4505,8 @@ function switchDoc(id) {
 function enterDoc() {
   const ent = activeEntry(); S.sel.clear(); S.selectedTree = null; S.pm = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
-  S.mode = ent.kind; S.doc = ent.data;
+  S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
+  if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); return; }
   if (ent.kind === 'part') { for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk); asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); if (!lastSaved) pushUndo(); }
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
@@ -4339,6 +4550,7 @@ $('bAdd').onclick = (e) => {
   openMenu(r.left, r.bottom + 4, [
     ['Новая деталь', () => { addDoc('part', 'Деталь', newDoc()); toast('Новая деталь: выберите плоскость и нажмите «Эскиз»', 'info'); }],
     ['Новая сборка', () => { addDoc('asm', 'Сборка', newAsm()); }],
+    ['Новый чертёж', () => { const cur = activeEntry(); const src = cur && cur.kind !== 'drw' ? cur : S.project.docs.find((d) => d.kind !== 'drw'); if (!src) { toast('Нет модели для чертежа', 'warn'); return; } addDoc('drw', src.name + ' — чертёж', newDrawing(src.id)); }],
     ['Импорт STEP…', () => $('stepIn').click()],
     null,
     ['Пример детали', () => addDoc('part', 'Кронштейн', sampleDoc())],
@@ -4373,6 +4585,7 @@ function pushUndo(merge) {
   saveProjectSoon();
 }
 function restore(s) {
+  if (S.mode === 'drw') { const o = JSON.parse(s); activeEntry().data = S.doc = o.doc; lastSaved = s; drwRefresh(); saveProjectSoon(); return; }
   if (S.mode === 'asm') { const o = JSON.parse(s); activeEntry().data = S.doc = o.doc; lastSaved = s; asmRefresh(true); saveProjectSoon(); return; }
   const o = JSON.parse(s); S.doc = o.doc; activeEntry().data = S.doc; S.editing = o.editing && featById(o.editing) ? o.editing : null; S.sel.clear(); S.draw = null; S.skOp = null; S.conflict = new Set(); S.pm = null; groups.regions.clear();
   if (S.editing) { S.refs = modelRefs(editF()); analyze(); setTab('sketch'); } else { S.refs = null; S.analysis = null; if (S.tool !== 'select') { S.tool = 'select'; canvas.style.cursor = 'default'; } }
@@ -4473,6 +4686,7 @@ window.addEventListener('keydown', (e) => {
     if (S.editing) { if (S.draw || S.dimPick) { S.dimPick = null; S.dimPreview = null; endDrawing(); refreshSketch(); } else if (S.tool !== 'select') setTool('select'); else { S.sel.clear(); S.conflict = new Set(); refreshSketch(); } return; }
     if (S.measure) return closeMeasure();
     if (S.pm) return closePM();
+    if (S.mode === 'drw') { S.drwTool = null; renderTools(); setHint(''); return; }
     if (S.mode === 'asm') { S.asmSel = null; asmRefresh(); return; }
     S.selectedTree = null; buildPlanes(); renderTree(); requestRender(); return;
   }
@@ -4486,6 +4700,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (S.mode === 'import') { if (k === 'f') return fitView(); if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); return; }
+  if (S.mode === 'drw') { if (k === 'd') { S.drwTool = S.drwTool ? null : { picks: [] }; renderTools(); setHint(S.drwTool ? drwToolHint() : ''); } return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.editing) { e.preventDefault(); deleteSelection(); return; }
   if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:')) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
   if (k === 'f') return fitView();
@@ -4506,5 +4721,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
