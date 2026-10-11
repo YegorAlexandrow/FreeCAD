@@ -157,6 +157,8 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .dimlbl.sel { color: var(--geo-sel); outline: 1px solid var(--geo-sel); }
 .dimlbl.bad { color: var(--geo-bad); outline: 1px solid var(--geo-bad); }
 #overlay.tooling .glyph, #overlay.tooling .dimlbl { pointer-events: none; }
+.pickbox { width: 100%; text-align: left; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.pickbox.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .glyph { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 3px; display: grid; place-items: center; font-size: 11px; font-weight: 600; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--vp-bot) 70%, var(--geo-constr) 30%); border: 1px solid var(--geo-constr); cursor: pointer; user-select: none; }
 .glyph.sel { border-color: var(--geo-sel); color: var(--geo-sel); }
 .glyph.bad { border-color: var(--geo-bad); color: var(--geo-bad); }
@@ -299,6 +301,8 @@ const ICON = {
   dim: '<path d="M4 8v8M20 8v8M4 12h16"/><path d="M7 10l-3 2 3 2M17 10l3 2-3 2"/>',
   constr: '<path d="M5 19 19 5" stroke-dasharray="3 2.5"/>',
   del: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/>',
+  lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
+  cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
   trim: '<path d="M4 12h5M15 12h5" /><path d="M9 12h6" stroke-dasharray="1.5 2"/><path d="M12 4v4M12 16v4"/><path d="M9.5 9.5 14.5 14.5"/>',
   sfillet: '<path d="M5 20V12a7 7 0 0 1 7-7h8"/><path d="M5 5h3M5 5v3" stroke-dasharray="1.5 2"/>',
   offset: '<path d="M4 18V8l6-4h10"/><path d="M8 20V10l4-2.5h8" stroke-dasharray="2.5 2"/>',
@@ -1041,6 +1045,7 @@ function computeBody(features) {
     let err = null;
     try {
       if (f.type === 'fillet' || f.type === 'chamfer') { body = applyEdgeFeature(f, body); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
       else body = body ? boolean(body, tool, ADDITION) : tool;
@@ -1593,6 +1598,7 @@ function regionAt(ev) {
   return best;
 }
 function partHover(ev) {
+  if (S.pm?.pattern) { patternPick(ev, false); return; }
   if (S.pm?.edgePick) { S.pm.hoverEdge = pickEdge(ev, S.pm.topo); drawEdgeSelection(); return; }
   if (S.measure) { S.measure.hover = measurePick(ev); drawMeasure(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); S.hoverRegion = r ? r.id : null; drawRegions(); return; }
@@ -1601,6 +1607,7 @@ function partHover(ev) {
   const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); }
 }
 function partClick(ev) {
+  if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) toggleRegion(r.id); return; }
@@ -2239,6 +2246,7 @@ function okPM() {
   if (pm.kind === 'feature') {
     const f = pm.feature; if (Array.isArray(f.regions) && !f.regions.length) { toast('Выберите хотя бы одну область эскиза', 'warn'); return; }
     if (pm.edgePick && !f.edges.length) { toast('Щёлкните хотя бы одно ребро', 'warn'); return; }
+    if (pm.pattern && f.type !== 'mirror' && !f.feats.length) { toast('Отметьте элементы, которые нужно копировать', 'warn'); return; }
     if (pm.isNew) { const at = rollbackIndex(); S.doc.features.splice(at, 0, f); if (S.doc.rollback != null) S.doc.rollback++; }
     else { const i = S.doc.features.findIndex((x) => x.id === f.id); S.doc.features[i] = f; }
     S.pm = null; groups.regions.clear(); groups.measure.clear(); rebuild(); renderSide(); renderCorner(); setHint(); pushUndo();
@@ -2506,6 +2514,165 @@ function openEdgePM(f, isNew) {
   if (!base.body) { toast('Перед этим элементом нет тела', 'warn'); return; }
   openPM({ kind: 'feature', feature: f, isNew, edgePick: true, topo: edgeTopology(base.body, base.cyls) });
   drawEdgeSelection();
+}
+
+// ============================================================================================
+// Patterns and mirror: the tools of the seed features are rebuilt and placed again by rigid
+// transforms, so every copy is as exact as the original. Mirror without seeds mirrors the body.
+// ============================================================================================
+const PATTERN_TYPES = new Set(['lpattern', 'cpattern', 'mirror']);
+const GLOBAL_AXES = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+const AXIS_NAMES = { x: 'Ось X', y: 'Ось Y', z: 'Ось Z' };
+function axisOf(spec) {
+  if (!spec) return null;
+  if (spec.axis) return { p: new THREE.Vector3(), d: V3(GLOBAL_AXES[spec.axis]) };
+  const e = spec.edge; if (!e) return null;
+  if (e.t === 'line') { const a = V3(e.a), b = V3(e.b); return { p: a, d: b.sub(a).normalize() }; }
+  return { p: V3(e.c), d: V3(e.n).normalize() };
+}
+function patternMatrices(f, features) {
+  const out = [];
+  if (f.type === 'lpattern') {
+    const A = axisOf(f.dir); if (!A) throw new Error('Выберите направление');
+    const u = A.d.clone().multiplyScalar(f.flip ? -1 : 1); const B = f.dir2 ? axisOf(f.dir2) : null; const w = B ? B.d.clone().multiplyScalar(f.flip2 ? -1 : 1) : null;
+    for (let j = 0; j < (B ? Math.max(1, f.n2 | 0) : 1); j++) for (let i = 0; i < Math.max(1, f.n | 0); i++) {
+      if (!i && !j) continue; const t = u.clone().multiplyScalar(i * f.d); if (w) t.addScaledVector(w, j * f.d2); out.push(new THREE.Matrix4().makeTranslation(t.x, t.y, t.z));
+    }
+  } else if (f.type === 'cpattern') {
+    const A = axisOf(f.axis); if (!A) throw new Error('Выберите ось');
+    const n = Math.max(1, f.n | 0); const total = Math.min(360, f.angle || 360); const step = (total >= 360 - 1e-9 ? 360 / n : total / Math.max(1, n - 1)) * Math.PI / 180 * (f.flip ? -1 : 1);
+    for (let k = 1; k < n; k++) { const R = new THREE.Matrix4().makeRotationAxis(A.d, step * k); out.push(new THREE.Matrix4().makeTranslation(A.p.x, A.p.y, A.p.z).multiply(R).multiply(new THREE.Matrix4().makeTranslation(-A.p.x, -A.p.y, -A.p.z))); }
+  } else {
+    const pl = mirrorPlane(f, features); const n = V3(pl.n).normalize(); const o = V3(pl.o); const d = n.dot(o);
+    const M = new THREE.Matrix4().set(1 - 2 * n.x * n.x, -2 * n.x * n.y, -2 * n.x * n.z, 2 * d * n.x, -2 * n.y * n.x, 1 - 2 * n.y * n.y, -2 * n.y * n.z, 2 * d * n.y, -2 * n.z * n.x, -2 * n.z * n.y, 1 - 2 * n.z * n.z, 2 * d * n.z, 0, 0, 0, 1);
+    out.push(M);
+  }
+  return out;
+}
+function mirrorPlane(f, features) { const b = f.plane || { std: 'right' }; if (b.std) return PLANES[b.std]; if (b.face) return b.face; const g = features.find((x) => x.id === b.plane); return g ? refPlane(g, features) : PLANES.right; }
+// Places a tool; a reflection also reverses the triangles so the solid stays outward facing.
+function placeTool(g, M) {
+  const t = (g.index ? g.toNonIndexed() : g.clone()); t.applyMatrix4(M);
+  if (M.determinant() < 0) { const pos = t.getAttribute('position'); for (let i = 0; i < pos.count; i += 3) { const x = pos.getX(i + 1), y = pos.getY(i + 1), z = pos.getZ(i + 1); pos.setXYZ(i + 1, pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2)); pos.setXYZ(i + 2, x, y, z); } }
+  t.deleteAttribute('normal'); t.computeVertexNormals(); return t;
+}
+const placeCyl = (c, M) => ({ p: c.p.clone().applyMatrix4(M), dir: c.dir.clone().transformDirection(M), r: c.r });
+function applyPattern(f, body, cyls, features) {
+  if (!body) throw new Error('Сначала создайте тело');
+  const mats = patternMatrices(f, features); const added = [];
+  if (f.type === 'mirror' && !(f.feats || []).length) {
+    const M = mats[0]; const pl = mirrorPlane(f, features); const n = V3(pl.n).normalize(); const d0 = n.dot(V3(pl.o));
+    const pos = body.getAttribute('position'); let lo = Infinity, hi = -Infinity; const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) { const t = v.fromBufferAttribute(pos, i).dot(n) - d0; lo = Math.min(lo, t); hi = Math.max(hi, t); }
+    // A body on both sides of the plane overlaps its mirror image; that union is only done when it
+    // is the body itself (already symmetric). Coplanar overlaps are not reliable in the mesh boolean.
+    if (lo < -1e-6 && hi > 1e-6) {
+      if (isSymmetric(body, cyls, M)) return { body, cyls: [] };
+      throw new Error('Тело пересекает плоскость отражения. Отразите элементы, а не всё тело, или выберите плоскость на границе тела');
+    }
+    let out = boolean(body, placeTool(body, M), ADDITION); for (const c of cyls) added.push(placeCyl(c, M));
+    if (!out.getAttribute('position').count) throw new Error('Результат пустой');
+    return { body: out, cyls: added };
+  }
+  const seeds = (f.feats || []).map((id) => features.find((x) => x.id === id)).filter((x) => x && !x.suppressed);
+  if (!seeds.length) throw new Error('Выберите элементы для копирования');
+  let out = body;
+  for (const sd of seeds) {
+    if (sd.type !== 'extrude' && sd.type !== 'revolve') throw new Error(`«${sd.name}»: копировать можно вытягивания и вращения`);
+    const own = []; const tool = buildTool(sd, out, own);
+    for (const M of mats) { out = boolean(out, placeTool(tool, M), sd.mode === 'cut' ? SUBTRACTION : ADDITION); for (const c of own) added.push(placeCyl(c, M)); }
+  }
+  if (!out.getAttribute('position').count) throw new Error('Результат пустой');
+  return { body: out, cyls: added };
+}
+// Whether a body equals its image under M: same planar faces with the same areas, same cylinders.
+// Triangulations after booleans are not symmetric, so vertices cannot be compared directly.
+function isSymmetric(body, cyls, M) {
+  const faces = (g, T) => { const pos = g.getAttribute('position'); const map = new Map(); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); let total = 0;
+    for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); if (T) { a.applyMatrix4(T); b.applyMatrix4(T); c.applyMatrix4(T); }
+      const nn = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)); const ar = nn.length() / 2; if (ar < 1e-12) continue; nn.normalize(); if (T && T.determinant() < 0) nn.negate(); total += ar;
+      const k = `${Math.round(nn.x * 1e4)},${Math.round(nn.y * 1e4)},${Math.round(nn.z * 1e4)},${Math.round(nn.dot(a) * 1e3)}`; map.set(k, (map.get(k) || 0) + ar); }
+    return { map, total }; };
+  const A = faces(body), B = faces(body, M); const big = (m, t) => [...m].filter(([, ar]) => ar > t * 1e-3);
+  const bigA = big(A.map, A.total); if (big(B.map, B.total).length !== bigA.length) return false;
+  for (const [k, ar] of bigA) { const br = B.map.get(k) || 0; if (Math.abs(br - ar) > 1e-4 * Math.max(ar, 1)) return false; }
+  const key = (c) => [c.p, c.dir, c.r]; void key;
+  for (const c of cyls) { const m = placeCyl(c, M); if (!cyls.some((x) => Math.abs(x.r - m.r) < 1e-6 && Math.abs(Math.abs(x.dir.dot(m.dir)) - 1) < 1e-9 && x.p.clone().sub(m.p).cross(x.dir).length() < 1e-6)) return false; }
+  return true;
+}
+function cmdPattern(type) {
+  if (S.editing) exitSketch(); if (S.measure) closeMeasure();
+  if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
+  const last = [...S.doc.features.slice(0, rollbackIndex())].reverse().find((x) => (x.type === 'extrude' || x.type === 'revolve') && !x.suppressed);
+  const sel = S.selectedTree?.startsWith('feat:') ? featById(S.selectedTree.slice(5)) : null; const seed = sel && (sel.type === 'extrude' || sel.type === 'revolve') ? sel : type === 'mirror' ? null : last;
+  const f = type === 'lpattern' ? { id: fid(), type, name: nextName('ЛинейныйМассив'), feats: seed ? [seed.id] : [], dir: { axis: 'x' }, n: 3, d: 20, flip: false, dir2: null, n2: 2, d2: 20, flip2: false }
+    : type === 'cpattern' ? { id: fid(), type, name: nextName('КруговойМассив'), feats: seed ? [seed.id] : [], axis: { axis: 'y' }, n: 4, angle: 360, flip: false }
+      : { id: fid(), type, name: nextName('Зеркало'), feats: seed ? [seed.id] : [], plane: S.selectedTree === 'face' && S.pickedFace ? { face: clone(S.pickedFace) } : S.selectedTree?.startsWith('plane:') ? { std: S.selectedTree.slice(6) } : { std: 'right' } };
+  openPatternPM(f, true);
+}
+function openPatternPM(f, isNew) {
+  const idx = isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id); const base = computeBody(S.doc.features.slice(0, idx));
+  openPM({ kind: 'feature', feature: f, isNew, pattern: true, topo: base.body ? edgeTopology(base.body, base.cyls) : { lines: [], circles: [] }, pickFor: f.type === 'mirror' ? 'plane' : f.type === 'lpattern' ? 'dir' : 'axis' });
+  drawPatternRefs();
+}
+function axisLabel(spec) { if (!spec) return '—'; if (spec.axis) return AXIS_NAMES[spec.axis]; return spec.edge.t === 'line' ? 'Прямое ребро' : 'Ось окружности ⌀' + fmt(2 * spec.edge.r); }
+function drawPatternRefs() {
+  groups.measure.clear(); const pm = S.pm; if (!pm?.pattern) { requestRender(); return; }
+  const f = pm.feature; const show = (spec, col) => { const A = axisOf(spec); if (!A) return; const L = 1000; const l = segLines([...A.p.clone().addScaledVector(A.d, -L).toArray(), ...A.p.clone().addScaledVector(A.d, L).toArray()], lineMat(col, 1.6, { dashed: true, dashSize: 6, gapSize: 4, depthTest: false })); l.renderOrder = 20; groups.measure.add(l);
+    if (spec.edge) { const segs = edgeSegs(spec.edge); const l2 = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(col, 3, { depthTest: false })); l2.renderOrder = 21; groups.measure.add(l2); } };
+  if (f.type === 'lpattern') { show(f.dir, colors['geo-sel']); if (f.dir2) show(f.dir2, colors['geo-ext']); }
+  if (f.type === 'cpattern') show(f.axis, colors['geo-sel']);
+  if (pm.hoverEdge) { const segs = edgeSegs(pm.hoverEdge); const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(colors['geo-hover'], 3, { depthTest: false })); l.renderOrder = 22; groups.measure.add(l); }
+  requestRender();
+}
+function patternPick(ev, click) {
+  const pm = S.pm; const f = pm.feature;
+  if (pm.pickFor === 'plane') {
+    const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); } return; }
+    if (p?.plane) f.plane = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; else if (p?.face) f.plane = { face: planeFromFace(p.face, p.point) }; else return;
+    renderSide(); schedulePreview(); return;
+  }
+  let e = pickEdge(ev, pm.topo); if (e && pm.pickFor === 'dir' || pm.pickFor === 'dir2') { if (e && e.t !== 'line') e = null; }
+  if (!click) { if (JSON.stringify(e) !== JSON.stringify(pm.hoverEdge)) { pm.hoverEdge = e; drawPatternRefs(); } return; }
+  if (!e) return; const spec = { edge: e };
+  if (pm.pickFor === 'dir') f.dir = spec; else if (pm.pickFor === 'dir2') f.dir2 = spec; else f.axis = spec;
+  pm.hoverEdge = null; renderSide(); drawPatternRefs(); schedulePreview();
+}
+function renderPatternPM() {
+  const pm = S.pm; const f = pm.feature; const err = S.errors[f.id];
+  const title = { lpattern: 'Линейный массив', cpattern: 'Круговой массив', mirror: 'Зеркальное отражение' }[f.type];
+  const body = h('div', { class: 'pm' }, pmHeader(title, ICON[f.type]));
+  const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id);
+  const cands = S.doc.features.slice(0, idx).filter((x) => (x.type === 'extrude' || x.type === 'revolve') && !x.suppressed);
+  const seeds = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Копировать элементы'));
+  if (f.type === 'mirror') seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !f.feats.length, onchange: (e) => { if (e.target.checked) f.feats = []; renderSide(); schedulePreview(); } }), 'Всё тело'));
+  for (const c of cands) seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.feats.includes(c.id), onchange: (e) => { f.feats = e.target.checked ? [...f.feats, c.id] : f.feats.filter((x) => x !== c.id); renderSide(); schedulePreview(); } }), c.name));
+  body.append(seeds);
+  const pickRow = (label, key, spec, set) => h('div', { class: 'grp' + (pm.pickFor === key ? ' active' : '') }, h('div', { class: 'lbl' }, label),
+    h('button', { class: 'rel pickbox' + (pm.pickFor === key ? ' on' : ''), onclick: () => { pm.pickFor = key; renderSide(); } }, h('b', {}, '↗'), axisLabel(spec)),
+    h('div', { class: 'chips' }, Object.keys(GLOBAL_AXES).map((k) => h('button', { class: 'chip', onclick: () => { set({ axis: k }); pm.pickFor = key; renderSide(); drawPatternRefs(); schedulePreview(); } }, k.toUpperCase()))),
+    pm.pickFor === key ? h('div', { class: 'note' }, key === 'axis' ? 'Щёлкните круглое или прямое ребро в окне' : 'Щёлкните прямое ребро в окне') : null);
+  if (f.type === 'lpattern') {
+    body.append(pickRow('Направление 1', 'dir', f.dir, (v) => { f.dir = v; }));
+    body.append(h('div', { class: 'grp' }, numField('Шаг', 'pmStep', f.d, (v) => { f.d = v; schedulePreview(); }), numField('Количество', 'pmCount', f.n, (v) => { f.n = Math.max(2, Math.round(v)); schedulePreview(); }, 'шт'),
+      h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; schedulePreview(); } }), 'Обратное направление')));
+    const on2 = !!f.dir2;
+    body.append(h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: on2, onchange: (e) => { f.dir2 = e.target.checked ? { axis: f.dir?.axis === 'z' ? 'x' : 'z' } : null; pm.pickFor = e.target.checked ? 'dir2' : 'dir'; renderSide(); drawPatternRefs(); schedulePreview(); } }), 'Направление 2')));
+    if (on2) { body.append(pickRow('Направление 2', 'dir2', f.dir2, (v) => { f.dir2 = v; }));
+      body.append(h('div', { class: 'grp' }, numField('Шаг', 'pmStep2', f.d2, (v) => { f.d2 = v; schedulePreview(); }), numField('Количество', 'pmCount2', f.n2, (v) => { f.n2 = Math.max(1, Math.round(v)); schedulePreview(); }, 'шт'),
+        h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip2, onchange: (e) => { f.flip2 = e.target.checked; schedulePreview(); } }), 'Обратное направление'))); }
+  } else if (f.type === 'cpattern') {
+    body.append(pickRow('Ось', 'axis', f.axis, (v) => { f.axis = v; }));
+    body.append(h('div', { class: 'grp' }, numField('Количество', 'pmCount', f.n, (v) => { f.n = Math.max(2, Math.round(v)); schedulePreview(); }, 'шт'), numField('Угол', 'pmAngle', f.angle, (v) => { f.angle = Math.min(360, v); schedulePreview(); }, '°'),
+      h('div', { class: 'note' }, f.angle >= 360 ? 'Копии равномерно по кругу' : 'Копии равномерно в пределах угла'),
+      h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; schedulePreview(); } }), 'Обратное направление')));
+  } else {
+    const b = f.plane; const name = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
+    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('div', { class: 'rel' }, h('b', {}, '▱'), name), h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне'),
+      h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.plane = { std: k }; renderSide(); schedulePreview(); } }, p.label)))));
+  }
+  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  side.append(body);
 }
 
 // ============================================================================================
@@ -2971,6 +3138,10 @@ function renderTools() {
       toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { title: 'Скруглить рёбра' }),
       toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { title: 'Фаска на рёбрах' }),
       h('div', { class: 'sep' }),
+      toolBtn('Массив', ICON.lpattern, () => cmdPattern('lpattern'), { title: 'Линейный массив элементов' }),
+      toolBtn('Круговой', ICON.cpattern, () => cmdPattern('cpattern'), { title: 'Круговой массив элементов' }),
+      toolBtn('Зеркало', ICON.mirror, () => cmdPattern('mirror'), { title: 'Зеркальное отражение элементов или всего тела' }),
+      h('div', { class: 'sep' }),
       h('div', { class: 'sep' }),
       toolBtn('Плоскость', ICON.plane, cmdPlane, { title: 'Справочная плоскость со смещением от плоскости или грани' }),
       toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить расстояние, диаметр, угол (M)', kbd: 'M' }),
@@ -3029,8 +3200,8 @@ function renderTree() {
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
   const featRow = (f, i, child) => {
     const off = i >= rb || f.suppressed; const err = S.errors[f.id];
-    const icon = f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
-    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : fmt(f.depth) + ' мм') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : '';
+    const icon = PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
+    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : fmt(f.depth) + ' мм') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
@@ -3055,10 +3226,11 @@ function startRollDrag(ev) {
   window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
 }
 function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? null : i; rebuild(); if (!live) pushUndo(); }
-function editFeature(f) { if (!f) return; if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
+function editFeature(f) { if (!f) return; if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; } }
+  for (const g of S.doc.features) if (Array.isArray(g.feats)) g.feats = g.feats.filter((x) => x !== f.id);
   const dependents = S.doc.features.filter((g) => g.sketch === f.id);
   S.doc.features = S.doc.features.filter((g) => g !== f && !dependents.includes(g));
   if (f.sketch) { const sf = featById(f.sketch); if (sf) sf.show = undefined; }
@@ -3091,6 +3263,7 @@ function renderPM() {
       h('div', { class: 'grp' }, h('button', { class: 'ghost-btn', onclick: () => closePM() }, 'Отмена'))));
     return;
   }
+  if (pm.pattern) { renderPatternPM(); return; }
   if (pm.feature?.type === 'plane') {
     const f = pm.feature; const b = f.base; const baseName = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
     side.append(h('div', { class: 'pm' }, pmHeader('Плоскость', ICON.plane),
@@ -3472,5 +3645,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, refPlane, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
