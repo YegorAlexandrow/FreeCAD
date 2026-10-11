@@ -2513,6 +2513,7 @@ function edgeTopology(body, cyls) {
 }
 function bodyTopo() { return edgeTopology(S.body, S.cyls); }
 function measurePick(ev) {
+  if (S.mode === 'asm') return asmMeasurePick(ev);
   if (!S.body) return null; const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; const T = bodyTopo();
   let best = null; const take = (o, pd) => { if (!best || pd < best.pd) best = { ...o, pd }; };
   for (const v of T.verts) { const s2 = toScreen(v); const d = Math.hypot(s2.x - mx, s2.y - my); if (d < 10) take({ kind: 'pt', p: v.clone() }, d - 3); }
@@ -2526,6 +2527,30 @@ function measurePick(ev) {
   const hit = rayFromEvent(ev).intersectObject(bodyMeshObj)[0];
   if (hit) { const face = faceForTriangle(hit.faceIndex); if (face) return { kind: 'face', n: face.n.clone(), d: face.d, area: face.area, p: hit.point.clone(), face }; return { kind: 'surf', p: hit.point.clone() }; }
   return null;
+}
+// The tape in an assembly: the same picks as for mates, taken to world coordinates.
+function asmMeasurePick(ev) {
+  const asm = S.doc; const W = (c) => displayT(asm, c); const comp = (id) => asm.comps.find((x) => x.id === id);
+  const e = asmEdgePick(ev);
+  if (e) {
+    const M = W(comp(e.comp)); const R = new THREE.Matrix3().setFromMatrix4(M); const P = (v) => V3(v).applyMatrix4(M), D = (v) => V3(v).applyMatrix3(R).normalize();
+    if (e.kind === 'point') return { kind: 'pt', p: P(e.p) };
+    if (e.edge?.t === 'circle') { const c = P(e.edge.c); return { kind: 'circle', c, r: e.edge.r, n: D(e.edge.n), p: c.clone() }; }
+    if (e.edge?.t === 'line') { const a = P(e.edge.a), b = P(e.edge.b); return { kind: 'edge', a, b, p: a.clone().lerp(b, 0.5) }; }
+  }
+  const h = asmPick(ev); if (!h) return null; const c = comp(h.comp); const M = W(c); const R = new THREE.Matrix3().setFromMatrix4(M);
+  const ent = h.ent; if (!ent) return { kind: 'surf', p: h.point };
+  const inf = docInfo(c.doc); const E = inf.ents[ent.e]; const ref = { comp: c.id, e: ent.e };
+  if (ent.kind === 'axis') { const c0 = V3(ent.p).applyMatrix4(M), n = V3(ent.d).applyMatrix3(R).normalize(); const t = h.point.clone().sub(c0).dot(n); const cc = c0.addScaledVector(n, t); return { kind: 'circle', c: cc, r: ent.r, n, p: h.point, ref }; }
+  if (E.area == null) { const pos = inf.geo.getAttribute('position'); const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(); let s = 0; for (const t of E.tris) { A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); s += B.sub(A).cross(C.sub(A)).length() / 2; } E.area = s; }
+  const n = V3(ent.d).applyMatrix3(R).normalize(); return { kind: 'face', n, d: n.dot(h.point), area: E.area, p: h.point, ref };
+}
+function asmRefMesh(ref, col) {
+  const c = S.doc.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); const ent = inf?.ents[ref.e]; if (!ent) return;
+  const M = displayT(S.doc, c); const pos = inf.geo.getAttribute('position'); const arr = []; const v = new THREE.Vector3();
+  for (const t of ent.tris) for (let k = 0; k < 3; k++) { v.fromBufferAttribute(pos, 3 * t + k).applyMatrix4(M); arr.push(v.x, v.y, v.z); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.4, depthTest: false, side: THREE.DoubleSide })); mesh.renderOrder = 15; groups.measure.add(mesh);
 }
 const MEASURE_NAMES = { pt: 'Вершина', circle: 'Окружность', edge: 'Ребро', face: 'Плоская грань', surf: 'Поверхность' };
 function measureResult(a, b) {
@@ -2571,7 +2596,7 @@ function drawMeasure() {
     if (segs.length) { const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(col, 3, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l); }
     const pts = x.kind === 'pt' ? [x.p] : x.kind === 'circle' ? [x.c] : [];
     if (pts.length) { const g = new THREE.BufferGeometry().setFromPoints(pts); const m = new THREE.Points(g, new THREE.PointsMaterial({ color: col, size: 9, sizeAttenuation: false, map: dotTex, alphaTest: 0.5, depthTest: false, transparent: true })); m.renderOrder = 21; groups.measure.add(m); }
-    if (x.kind === 'face') showFaceHover(x.face);
+    if (x.ref) asmRefMesh(x.ref, col); else if (x.kind === 'face') showFaceHover(x.face);
   };
   groups.hover.clear();
   M.picks.forEach((x) => add(x, colors['geo-sel'])); if (M.hover && !M.picks.includes(M.hover)) add(M.hover, colors['geo-hover']);
@@ -2580,7 +2605,8 @@ function drawMeasure() {
 }
 function cmdMeasure() {
   if (S.editing) exitSketch(); if (S.pm) closePM(true);
-  if (!S.body) { toast('Нечего измерять: сначала создайте тело', 'warn'); return; }
+  if (S.mode === 'asm') { if (S.pm) closePM(); if (!S.doc.comps.length) { toast('Нечего измерять: вставьте компоненты', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; asmRefresh(true); } }
+  else if (!S.body) { toast('Нечего измерять: сначала создайте тело', 'warn'); return; }
   S.measure = { picks: [], hover: null, result: null }; canvas.style.cursor = 'crosshair'; renderSide(); renderCorner(); renderTools(); setHint('Рулетка: щёлкните вершину, ребро, окружность или грань, затем второй объект');
 }
 function closeMeasure() { S.measure = null; groups.measure.clear(); groups.hover.clear(); canvas.style.cursor = 'default'; renderSide(); renderCorner(); renderTools(); setHint(); requestRender(); }
@@ -4104,6 +4130,7 @@ function asmPick(ev) {
   return { comp: c.id, point: hit.point.clone(), ent: ent && { kind: ent.kind, p: ent.p.toArray(), d: (ent.n || ent.d).toArray(), r: ent.r, e } };
 }
 function drawMatePicks() {
+  if (S.measure) { drawMeasure(); return; }
   groups.measure.clear(); const asm = S.doc; if (S.mode !== 'asm') return;
   const show = (ref, col) => {
     const c = asm.comps.find((x) => x.id === ref.comp); if (!c) return; const inf = docInfo(c.doc);
@@ -4171,7 +4198,7 @@ function drawContext() {
   bar.replaceChildren(h('span', {}, 'Редактирование ', h('b', {}, S.ctx.compName), ' в сборке ', h('b', {}, S.ctx.asmName)), h('button', { onclick: () => switchDoc(S.ctx.asm) }, 'Вернуться в сборку'));
   requestRender();
 }
-function cmdMate() { if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; toast('Разнесённый вид выключен на время сопряжений', 'info'); } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
+function cmdMate() { if (S.measure) closeMeasure(); if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; toast('Разнесённый вид выключен на время сопряжений', 'info'); } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
 function mateOptions(a, b) {
   if (!a || !b) return [];
   if (a.kind === 'point' || b.kind === 'point') { const o = a.kind === 'point' ? b : a; return ['coincident', 'distance']; }
@@ -4518,6 +4545,7 @@ function renderTools() {
       h('div', { class: 'sep' }),
       toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Масса и центр масс сборки' }),
       toolBtn('Спецификация', ICON.bom, cmdBom, { title: 'Список деталей с количеством и массой' }),
+      toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить расстояние, диаметр, угол между компонентами' }),
       toolBtn('Пересечения', ICON.interf, () => (S.pm?.kind === 'interf' ? closePM() : cmdInterference()), { pressed: S.pm?.kind === 'interf', title: 'Проверка пересечений компонентов' }),
       h('div', { class: 'sep' }),
       toolBtn('Править в сборке', ICON.part, () => (S.asmSel ? editInContext(S.asmSel) : toast('Выберите компонент', 'info')), { disabled: !S.asmSel, title: 'Редактировать выбранную деталь на месте, среди остальных компонентов' }),
@@ -4591,12 +4619,12 @@ $('tabFeat').onclick = () => setTab('feat'); $('tabSketch').onclick = () => setT
 const side = $('side');
 function renderSide() {
   if (S.mode === 'drw') { renderDrawingPanel(); return; }
-  if (S.mode === 'asm') { if (S.pm) renderAsmPM(); else renderAsmTree(); return; }
+  if (S.mode === 'asm') { if (S.measure) renderMeasure(); else if (S.pm) renderAsmPM(); else renderAsmTree(); return; }
   if (S.measure) renderMeasure(); else if (S.pm) renderPM(); else if (S.editing) renderSketchPanel(); else if (S.mode === 'import') renderImportPanel(); else renderTree();
 }
 function renderTree() {
   if (S.mode === 'drw') { renderDrawingPanel(); return; }
-  if (S.mode === 'asm') { if (!S.pm) renderAsmTree(); return; }
+  if (S.mode === 'asm') { if (!S.pm && !S.measure) renderAsmTree(); return; }
   if (S.mode === 'import') { if (!S.pm && !S.measure) renderImportPanel(); return; }
   if (S.pm || S.editing || S.measure) return;
   side.textContent = '';
