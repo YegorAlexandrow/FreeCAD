@@ -156,6 +156,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .dimlbl.driven { color: var(--fg-2); }
 .dimlbl.sel { color: var(--geo-sel); outline: 1px solid var(--geo-sel); }
 .dimlbl.bad { color: var(--geo-bad); outline: 1px solid var(--geo-bad); }
+#overlay.tooling .glyph, #overlay.tooling .dimlbl { pointer-events: none; }
 .glyph { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 3px; display: grid; place-items: center; font-size: 11px; font-weight: 600; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--vp-bot) 70%, var(--geo-constr) 30%); border: 1px solid var(--geo-constr); cursor: pointer; user-select: none; }
 .glyph.sel { border-color: var(--geo-sel); color: var(--geo-sel); }
 .glyph.bad { border-color: var(--geo-bad); color: var(--geo-bad); }
@@ -298,6 +299,12 @@ const ICON = {
   dim: '<path d="M4 8v8M20 8v8M4 12h16"/><path d="M7 10l-3 2 3 2M17 10l3 2-3 2"/>',
   constr: '<path d="M5 19 19 5" stroke-dasharray="3 2.5"/>',
   del: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/>',
+  trim: '<path d="M4 12h5M15 12h5" /><path d="M9 12h6" stroke-dasharray="1.5 2"/><path d="M12 4v4M12 16v4"/><path d="M9.5 9.5 14.5 14.5"/>',
+  sfillet: '<path d="M5 20V12a7 7 0 0 1 7-7h8"/><path d="M5 5h3M5 5v3" stroke-dasharray="1.5 2"/>',
+  offset: '<path d="M4 18V8l6-4h10"/><path d="M8 20V10l4-2.5h8" stroke-dasharray="2.5 2"/>',
+  mirror: '<path d="M12 3v18" stroke-dasharray="2.5 2"/><path d="M9 7 4 17h5zM15 7l5 10h-5z"/>',
+  slot: '<rect x="3" y="8" width="18" height="8" rx="4"/><path d="M7 12h10" stroke-dasharray="1.5 2"/>',
+  polygon: '<path d="M12 3.5 19.4 7.75v8.5L12 20.5 4.6 16.25v-8.5z"/>',
   exit: '<path d="M5 12l5 5 9-10"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   plane: '<path d="M3 15l6-8h12l-6 8z"/>',
@@ -334,15 +341,16 @@ const gp = (sk, id) => sk.pts[id] || REF_PTS[id];
 const ge = (sk, id) => sk.ents[id] || REF_ENTS[id];
 const nid = (sk) => String(sk.nid++);
 
-const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle']);
+const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd']);
 const CON_NAMES = {
   coincident: 'Совпадение', horizontal: 'Горизонтальность', vertical: 'Вертикальность', hpts: 'Горизонтальность точек', vpts: 'Вертикальность точек',
   online: 'Точка на прямой', oncircle: 'Точка на окружности', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
   equal: 'Равенство', tangent: 'Касание', concentric: 'Концентричность', fix: 'Фиксация', collinear: 'Коллинеарность',
+  symmetric: 'Симметрия', offset: 'Смещение', offd: 'Смещение',
   dist: 'Расстояние', dx: 'Расстояние по X', dy: 'Расстояние по Y', pldist: 'Расстояние до прямой', rad: 'Радиус', diam: 'Диаметр', angle: 'Угол',
 };
-const REL_KEYS = { coincident: 'C', horizontal: 'H', hpts: 'H', vertical: 'V', vpts: 'V', parallel: 'P', perpendicular: 'N', equal: 'E', tangent: 'T', concentric: 'K', midpoint: 'M', online: 'O', oncircle: 'O', fix: 'F', collinear: 'J' };
-const CON_GLYPH = { horizontal: '—', vertical: '|', hpts: '—', vpts: '|', online: '◦', oncircle: '◦', midpoint: '½', parallel: '∥', perpendicular: '⊥', equal: '=', tangent: '⌒', concentric: '◎', fix: '⚓', coincident: '●', collinear: '⋯' };
+const REL_KEYS = { coincident: 'C', horizontal: 'H', hpts: 'H', vertical: 'V', vpts: 'V', parallel: 'P', perpendicular: 'N', equal: 'E', tangent: 'T', concentric: 'K', midpoint: 'M', online: 'O', oncircle: 'O', fix: 'F', collinear: 'J', symmetric: 'S' };
+const CON_GLYPH = { horizontal: '—', vertical: '|', hpts: '—', vpts: '|', online: '◦', oncircle: '◦', midpoint: '½', parallel: '∥', perpendicular: '⊥', equal: '=', tangent: '⌒', concentric: '◎', fix: '⚓', coincident: '●', collinear: '⋯', symmetric: '⌯', offset: '⇉' };
 
 // Builds the equation system of a sketch. Every equation group knows the variable indices it
 // depends on, so the Jacobian is computed locally and cheaply.
@@ -398,6 +406,17 @@ function buildSystem(sk, opts = {}) {
       }
       case 'tangent': {
         const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]);
+        // Curves that share an end point: the radius there is perpendicular to the line, or the
+        // two centres and the point are collinear. The distance form is singular in this case.
+        const shared = [e1.p1, e1.p2].find((q) => q && (q === e2.p1 || q === e2.p2));
+        if (shared && e1.t === 'line') {
+          const [a, b] = L(r[0]); const cc = P(e2.c), sp = P(shared);
+          add(cid, [a, b, cc, sp], (x) => { const u = dir(a.g(x), b.g(x)), w = dir(cc.g(x), sp.g(x)); return [dot(u, w) / (len(u) * len(w))]; }, 1); break;
+        }
+        if (shared) {
+          const c1 = P(e1.c), c2 = P(e2.c), sp = P(shared);
+          add(cid, [c1, c2, sp], (x) => { const S2 = sp.g(x); const w1 = dir(c1.g(x), S2), w2 = dir(c2.g(x), S2); return [cross(w1, w2) / (len(w1) * len(w2))]; }, 1); break;
+        }
         if (e1.t === 'line') {
           const [a, b] = L(r[0]); const cc = P(e2.c), rr = R(r[1]);
           add(cid, [a, b, cc, rr], (x) => { const A = a.g(x), u = dir(A, b.g(x)); return [(c.s || 1) * cross(u, dir(A, cc.g(x))) / len(u) - rr.g(x)]; }, 1);
@@ -407,6 +426,32 @@ function buildSystem(sk, opts = {}) {
         }
         break;
       }
+      case 'symmetric': {
+        const p = P(r[0]), q = P(r[1]); const [a, b] = L(r[2]);
+        add(cid, [p, q, a, b], (x) => { const A = a.g(x), u = dir(A, b.g(x)), Pp = p.g(x), Q = q.g(x); const M = [(Pp[0] + Q[0]) / 2 - A[0], (Pp[1] + Q[1]) / 2 - A[1]]; return [cross(u, M) / len(u), dot(u, dir(Pp, Q)) / len(u)]; }, 2); break;
+      }
+      // Offset copy of a curve; the distance comes from the offset dimension it belongs to.
+      case 'offset': {
+        const m = sk.cons[c.m]; const v = m && m.t === 'offd' ? m.v : c.v; const eN = ge(sk, r[0]), eO = ge(sk, r[1]);
+        if (eN.t === 'line') {
+          // Each end: on the offset line (plus square to an open end), or, where the source line is
+          // tangent to an arc, on the radius through the old joint (the tangent intersection is singular).
+          const [a, b] = L(r[1]); const ends = [[P(eN.p1), c.e1 && P(c.e1), c.c1 && P(c.c1)], [P(eN.p2), c.e2 && P(c.e2), c.c2 && P(c.c2)]];
+          const parts = [a, b]; for (const q of ends) parts.push(...q.filter(Boolean));
+          add(cid, parts, (x) => { const A = a.g(x), u = dir(A, b.g(x)); const out = [];
+            for (const [pn, po, pc] of ends) {
+              if (pc) { const C = pc.g(x); const w1 = dir(C, po.g(x)), w2 = dir(C, pn.g(x)); out.push(cross(w1, w2) / (len(w1) * len(w2))); continue; }
+              out.push(c.s * cross(u, dir(A, pn.g(x))) / len(u) - v); if (po) out.push(dot(u, dir(po.g(x), pn.g(x))) / len(u));
+            }
+            return out; }, 2);
+        } else {
+          const r1 = R(r[0]), r2 = R(r[1]); const cc = P(eO.c); const ends = eN.t === 'arc' ? [[P(eN.p1), c.e1], [P(eN.p2), c.e2]].filter(([, o]) => o).map(([pn, o]) => [pn, P(o)]) : [];
+          add(cid, [r1, r2, cc, ...ends.flat()], (x) => { const out = [c.s * (r1.g(x) - r2.g(x)) - v]; const C = cc.g(x);
+            for (const [pn, po] of ends) { const w1 = dir(C, po.g(x)), w2 = dir(C, pn.g(x)); out.push(cross(w1, w2) / len(w1) / len(w2)); } return out; }, 1 + ends.length);
+        }
+        break;
+      }
+      case 'offd': break;
       case 'dist': { const a = P(r[0]), b = P(r[1]); add(cid, [a, b], (x) => [len(dir(a.g(x), b.g(x))) - c.v], 1); break; }
       case 'dx': case 'dy': { const a = P(r[0]), b = P(r[1]); const k = c.t === 'dx' ? 0 : 1; add(cid, [a, b], (x) => [(c.s || 1) * (b.g(x)[k] - a.g(x)[k]) - c.v], 1); break; }
       case 'pldist': { const p = P(r[0]); const [a, b] = L(r[1]); add(cid, [p, a, b], (x) => { const A = a.g(x), u = dir(A, b.g(x)); return [(c.s || 1) * cross(u, dir(A, p.g(x))) / len(u) - c.v]; }, 1); break; }
@@ -525,6 +570,7 @@ function measure(sk, c) {
     case 'dy': return Math.abs(P(r[1]).y - P(r[0]).y);
     case 'pldist': { const e = ge(sk, r[1]); const a = P(e.p1), b = P(e.p2), p = P(r[0]); const ux = b.x - a.x, uy = b.y - a.y; return Math.abs(ux * (p.y - a.y) - uy * (p.x - a.x)) / (Math.hypot(ux, uy) || 1); }
     case 'rad': return ge(sk, r[0]).r;
+    case 'offd': return offsetDistance(sk, r[0], r[1]);
     case 'diam': return 2 * ge(sk, r[0]).r;
     case 'angle': { const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const u = [P(e1.p2).x - P(e1.p1).x, P(e1.p2).y - P(e1.p1).y], v = [P(e2.p2).x - P(e2.p1).x, P(e2.p2).y - P(e2.p1).y]; return Math.abs(Math.atan2(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1])) * 180 / Math.PI; }
   }
@@ -549,6 +595,12 @@ function initSigns(sk, c) {
     c.s = Math.sign(u[0] * v[1] - u[1] * v[0]) || 1;
   }
   if (c.t === 'fix') { const p = P(r[0]); c.x = p.x; c.y = p.y; }
+}
+// Distance between an offset curve and its source: point-to-line for lines, radius difference for arcs.
+function offsetDistance(sk, nId, oId) {
+  const n = ge(sk, nId), o = ge(sk, oId); if (!n || !o) return 0;
+  if (n.t === 'line') { const a = gp(sk, o.p1), b = gp(sk, o.p2), p = gp(sk, n.p1); const ux = b.x - a.x, uy = b.y - a.y; return Math.abs(ux * (p.y - a.y) - uy * (p.x - a.x)) / (Math.hypot(ux, uy) || 1); }
+  return Math.abs(n.r - o.r);
 }
 const snapshotGeo = (sk) => ({ pts: clone(sk.pts), r: Object.fromEntries(Object.entries(sk.ents).filter(([, e]) => e.r != null).map(([k, e]) => [k, e.r])) });
 const restoreGeo = (sk, s) => { for (const id in s.pts) if (sk.pts[id]) Object.assign(sk.pts[id], s.pts[id]); for (const id in s.r) if (sk.ents[id]) sk.ents[id].r = s.r[id]; };
@@ -1332,7 +1384,7 @@ function drawSketchObjects(f, active) {
     if (kind === 'v') { const [x, y] = S.refs.verts[i]; const d = 4 * unitsPerPx(); segsR = [[x - d, y - d, x + d, y + d], [x - d, y + d, x + d, y - d]]; }
     const l = segLines(segsR.flatMap((q) => [...W(q[0], q[1]).toArray(), ...W(q[2], q[3]).toArray()]), lineMat(colors['geo-hover'], 2.6, { depthTest: false })); l.renderOrder = 13; groups.sketch.add(l);
   }
-  if (S.draw?.preview?.length) { const l = segLines(S.draw.preview.flatMap((s) => [...W(s[0], s[1]).toArray(), ...W(s[2], s[3]).toArray()]), lineMat(colors['geo-hover'], 2, { depthTest: false })); l.renderOrder = 13; groups.sketch.add(l); }
+  if (S.draw?.preview?.length) { const l = segLines(S.draw.preview.flatMap((s) => [...W(s[0], s[1]).toArray(), ...W(s[2], s[3]).toArray()]), lineMat(S.draw.bad ? colors['geo-bad'] : colors['geo-hover'], S.draw.bad ? 3 : 2, { depthTest: false, dashed: !!S.draw.bad, dashSize: 3, gapSize: 2 })); l.renderOrder = 13; groups.sketch.add(l); }
   if (S.draw?.guides?.length) { const l = segLines(S.draw.guides.flatMap((s) => [...W(s[0], s[1]).toArray(), ...W(s[2], s[3]).toArray()]), lineMat(colors['geo-under'], 1, { dashed: true, dashSize: 3, gapSize: 3, depthTest: false })); l.renderOrder = 13; groups.sketch.add(l); }
   if (S.box) { const [a, b] = S.box; const l = segLines([a.u, a.v, b.u, a.v, b.u, a.v, b.u, b.v, b.u, b.v, a.u, b.v, a.u, b.v, a.u, a.v].reduce((acc, _, i, arr) => (i % 4 === 0 ? acc.concat([...W(arr[i], arr[i + 1]).toArray(), ...W(arr[i + 2], arr[i + 3]).toArray()]) : acc), []), lineMat(colors['geo-sel'], 1, { dashed: true, depthTest: false })); l.renderOrder = 13; groups.sketch.add(l); }
 }
@@ -1361,6 +1413,15 @@ function dimGeometry(sk, c) {
     case 'pldist': { const p = P(r[0]); const e = ge(sk, r[1]); const a = P(e.p1), b = P(e.p2); const dx = b.x - a.x, dy = b.y - a.y; const l = dx * dx + dy * dy || 1; const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l; const f = { x: a.x + t * dx, y: a.y + t * dy };
       if (t < 0 || t > 1) { const q = t < 0 ? a : b; lines.push([q.x, q.y, f.x, f.y]); }
       label = linear(f, p, pos); break; }
+    case 'offd': {
+      const n = ge(sk, r[0]), o = ge(sk, r[1]);
+      if (n.t === 'line') { const a = P(o.p1), b = P(o.p2); const q = pos || { x: (P(n.p1).x + P(n.p2).x) / 2, y: (P(n.p1).y + P(n.p2).y) / 2 }; const dx = b.x - a.x, dy = b.y - a.y; const l = dx * dx + dy * dy || 1; const t = ((q.x - a.x) * dx + (q.y - a.y) * dy) / l; const f = { x: a.x + t * dx, y: a.y + t * dy };
+        const na = P(n.p1), nb = P(n.p2); const ndx = nb.x - na.x, ndy = nb.y - na.y; const nl = ndx * ndx + ndy * ndy || 1; const t2 = ((q.x - na.x) * ndx + (q.y - na.y) * ndy) / nl; const g = { x: na.x + t2 * ndx, y: na.y + t2 * ndy };
+        lines.push([f.x, f.y, g.x, g.y]); arrow(f.x, f.y, f.x - g.x, f.y - g.y); arrow(g.x, g.y, g.x - f.x, g.y - f.y); label = q; break; }
+      const cc = P(o.c); const L = pos || { x: cc.x + Math.max(n.r, o.r) * 0.8, y: cc.y + Math.max(n.r, o.r) * 0.8 }; const ang = Math.atan2(L.y - cc.y, L.x - cc.x);
+      const x1 = cc.x + o.r * Math.cos(ang), y1 = cc.y + o.r * Math.sin(ang), x2 = cc.x + n.r * Math.cos(ang), y2 = cc.y + n.r * Math.sin(ang);
+      lines.push([x1, y1, x2, y2]); arrow(x1, y1, x1 - x2, y1 - y2); arrow(x2, y2, x2 - x1, y2 - y1); if (Math.hypot(L.x - cc.x, L.y - cc.y) > Math.max(n.r, o.r)) lines.push([x2 > x1 ? x2 : x1, x2 > x1 ? y2 : y1, L.x, L.y]); label = L; break;
+    }
     case 'rad': case 'diam': {
       const e = ge(sk, r[0]); const cc = P(e.c); const L = pos || { x: cc.x + e.r * 1.3, y: cc.y + e.r * 0.5 };
       const ang = Math.atan2(L.y - cc.y, L.x - cc.x); const ex = cc.x + e.r * Math.cos(ang), ey = cc.y + e.r * Math.sin(ang);
@@ -1415,7 +1476,10 @@ function layoutOverlay() {
 }
 glyphAnchor.count = {};
 function glyphAnchor(sk, c) {
-  const id = c.refs.find((r) => sk.ents[r]) ?? c.refs[0]; const e = sk.ents[id];
+  // Relations of a point sit at the point, chained relations at the second curve, tangency at the touch point.
+  if (['online', 'oncircle', 'midpoint'].includes(c.t)) { const p = gp(sk, c.refs[0]); if (p) return { x: p.x, y: p.y, key: 'p' + c.refs[0] }; }
+  if (c.t === 'tangent') { const e1 = ge(sk, c.refs[0]), e2 = ge(sk, c.refs[1]); const sh = e1 && e2 && [e1.p1, e1.p2].find((q) => q && (q === e2.p1 || q === e2.p2)); if (sh) { const p = gp(sk, sh); return { x: p.x, y: p.y, key: 'p' + sh }; } }
+  const id = (['equal', 'collinear', 'parallel', 'perpendicular'].includes(c.t) && sk.ents[c.refs[1]] ? c.refs[1] : null) ?? c.refs.find((r) => sk.ents[r]) ?? c.refs[0]; const e = sk.ents[id];
   if (e) {
     if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, key: 'e' + id }; }
     const cc = gp(sk, e.c); return { x: cc.x + e.r * 0.7071, y: cc.y + e.r * 0.7071, key: 'e' + id };
@@ -1542,6 +1606,8 @@ function sketchDown(ev) {
     return;
   }
   if (S.tool === 'dim') { dimClick(m); return; }
+  if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
+  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) return; const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
 function sketchMove(ev) {
@@ -1560,6 +1626,8 @@ function sketchMove(ev) {
       if (!(picks.length === 1 && firstIsPoint)) { const con = makeDim(sk, picks, m); if (con) { con.pos = [m.u, m.v]; initSigns(sk, con); con.v = measure(sk, con); S.dimPreview = con; } } }
     updateSketchVisuals(); return;
   }
+  if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; S.draw = e && !e.ext ? { stage: 0, preview: trimPreview(sk, e, m), bad: true } : null; updateSketchVisuals(); return; }
+  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); const k = p?.key || null; if (k !== S.hover) { S.hover = k; updateSketchVisuals(); } return; }
   drawMove(m); void sk;
 }
 function sketchUp(ev, d) {
@@ -1592,9 +1660,9 @@ function dragTo(m) {
 // ---------------- drawing tools ----------------
 function setTool(t) {
   if (!S.editing && t !== 'select') return;
-  S.tool = t; S.draw = null; S.dimPick = null; S.dimPreview = null; S.hover = null;
+  S.tool = t; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); S.dimPreview = null; S.hover = null;
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
-  renderTools(); updateSketchVisuals(); setHint();
+  renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
 }
 function endDrawing() { S.draw = null; updateSketchVisuals(); setHint(); }
 function drawMove(m) {
@@ -1608,6 +1676,16 @@ function drawMove(m) {
     if (!sn.kind) { const ang = Math.atan2(v - a.y, u - a.x); const tol = 3 * Math.PI / 180; if (Math.abs(Math.sin(ang)) < Math.sin(tol)) { v = a.y; D.glyph = '—'; D.hv = 'horizontal'; } else if (Math.abs(Math.cos(ang)) < Math.sin(tol)) { u = a.x; D.glyph = '|'; D.hv = 'vertical'; } else D.hv = null; } else D.hv = null;
     sn.u = u; sn.v = v; D.preview = [[a.x, a.y, u, v]]; D.lenTip = Math.hypot(u - a.x, v - a.y);
   }
+  if (t === 'slot' && D.stage === 1) {
+    const a = gp(sk, D.c1); let u = sn.u, v = sn.v;
+    if (!sn.kind) { const ang = Math.atan2(v - a.y, u - a.x); const tol = 3 * Math.PI / 180; if (Math.abs(Math.sin(ang)) < Math.sin(tol)) { v = a.y; D.glyph = '—'; D.hv = 'horizontal'; } else if (Math.abs(Math.cos(ang)) < Math.sin(tol)) { u = a.x; D.glyph = '|'; D.hv = 'vertical'; } else D.hv = null; } else D.hv = null;
+    sn.u = u; sn.v = v; D.preview = [[a.x, a.y, u, v]];
+  }
+  if (t === 'slot' && D.stage === 2) {
+    const a = gp(sk, D.c1), b = gp(sk, D.c2); const l = Math.hypot(b.x - a.x, b.y - a.y) || 1; const ux = (b.x - a.x) / l, uy = (b.y - a.y) / l; const r = Math.max(1e-3, Math.abs((m.u - a.x) * -uy + (m.v - a.y) * ux)); D.r = r; const nx = -uy, ny = ux; const a0 = Math.atan2(ny, nx);
+    D.preview = [[a.x + nx * r, a.y + ny * r, b.x + nx * r, b.y + ny * r], [a.x - nx * r, a.y - ny * r, b.x - nx * r, b.y - ny * r], ...circleSegs(b.x, b.y, r, a0 - Math.PI, Math.PI), ...circleSegs(a.x, a.y, r, a0, Math.PI)]; D.glyph = null; D.guides = [];
+  }
+  if (t === 'polygon' && D.stage === 1) { const c = gp(sk, D.c); const n = S.toolOpt.polySides; const r = Math.hypot(sn.u - c.x, sn.v - c.y); const a0 = Math.atan2(sn.v - c.y, sn.u - c.x); D.preview = []; for (let i = 0; i < n; i++) { const t0 = a0 + TAU * i / n, t1 = a0 + TAU * (i + 1) / n; D.preview.push([c.x + r * Math.cos(t0), c.y + r * Math.sin(t0), c.x + r * Math.cos(t1), c.y + r * Math.sin(t1)]); } }
   if (t === 'rect' && D.stage === 1) { const a = D.a; D.preview = [[a.u, a.v, sn.u, a.v], [sn.u, a.v, sn.u, sn.v], [sn.u, sn.v, a.u, sn.v], [a.u, sn.v, a.u, a.v]]; }
   if (t === 'circle' && D.stage === 1) { const c = gp(sk, D.c); D.preview = circleSegs(c.x, c.y, Math.hypot(sn.u - c.x, sn.v - c.y), 0, 2 * Math.PI); }
   if (t === 'arc' && D.stage === 1) { const c = gp(sk, D.c); D.preview = [[c.x, c.y, sn.u, sn.v]]; }
@@ -1641,6 +1719,16 @@ function drawClick(m) {
     const L = [[p1, p2], [p2, p3], [p3, p4], [p4, p1]].map(([a, b]) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b }; return id; });
     pending.push({ t: 'horizontal', refs: [L[0]] }, { t: 'horizontal', refs: [L[2]] }, { t: 'vertical', refs: [L[1]] }, { t: 'vertical', refs: [L[3]] });
     addRelations(sk, pending); S.draw = null; commitSketch(); return;
+  }
+  if (t === 'slot') {
+    if (D.stage === 0) { D.c1 = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c1]; D.stage = 1; refreshSketch(true); return; }
+    if (D.stage === 1) { const a = gp(sk, D.c1); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6) return; D.c2 = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.slotHv = sn.kind ? null : D.hv; D.newPts = [D.c1, D.c2]; D.stage = 2; refreshSketch(true); return; }
+    makeSlot(sk, D.c1, D.c2, D.r || 1); if (D.slotHv) { const ax = Object.values(sk.ents).find((e) => e.constr && e.t === 'line' && e.p1 === D.c1 && e.p2 === D.c2); if (ax) addRelations(sk, [{ t: D.slotHv, refs: [ax.id] }]); }
+    S.draw = null; commitSketch(); return;
+  }
+  if (t === 'polygon') {
+    if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
+    const c = gp(sk, D.c); if (Math.hypot(sn.u - c.x, sn.v - c.y) < 1e-6) return; makePolygon(sk, D.c, sn.u, sn.v, S.toolOpt.polySides); S.draw = null; commitSketch(); return;
   }
   if (t === 'circle') {
     if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
@@ -1740,6 +1828,7 @@ function relationOptions(sk) {
     if (e.t === 'line') { out.push(['online', 'На прямой', () => [{ t: 'online', refs: [pts[0], e.id] }]]); if (!e.ref) out.push(['midpoint', 'Середина', () => [{ t: 'midpoint', refs: [pts[0], e.id] }]]); }
     else out.push(['oncircle', 'На окружности', () => [{ t: 'oncircle', refs: [pts[0], e.id] }]]);
   }
+  if (pts.length === 2 && lines.length === 1 && !circs.length) out.push(['symmetric', 'Симметрично', () => [{ t: 'symmetric', refs: [pts[0], pts[1], lines[0].id] }]]);
   if (lines.length === 1 && circs.length === 1 && !pts.length) out.push(['tangent', 'Касательно', () => [{ t: 'tangent', refs: [lines[0].id, circs[0].id] }]]);
   if (circs.length >= 2 && !lines.length && !pts.length) {
     const pairs = circs.slice(1).map((e) => [circs[0], e]);
@@ -1774,6 +1863,290 @@ function showUnderDefined() {
   toast(`Не определено: ${S.sel.size} ${plural(S.sel.size, 'объект', 'объекта', 'объектов')}. Они выделены, их можно тянуть мышью и видеть, куда они двигаются.`, 'info');
 }
 function toggleConstruction() { const sk = editSk(); let any = false; for (const k of S.sel) if (k.startsWith('e:') && sk.ents[k.slice(2)]) { const e = sk.ents[k.slice(2)]; e.constr = !e.constr; any = true; } if (any) commitSketch(); else toast('Выделите линии или окружности, чтобы сделать их вспомогательными', 'info'); }
+
+// ---------------- sketch tools: trim, fillet, offset, mirror, slot, polygon ----------------
+S.toolOpt = { filletR: 5, polySides: 6, offsetD: 5, offsetFlip: false };
+const TAU = 2 * Math.PI;
+const normA = (a) => { a %= TAU; return a < 0 ? a + TAU : a; };
+function arcSpan(sk, e) { const c = gp(sk, e.c), p1 = gp(sk, e.p1), p2 = gp(sk, e.p2); const a0 = Math.atan2(p1.y - c.y, p1.x - c.x); let sw = Math.atan2(p2.y - c.y, p2.x - c.x) - a0; while (sw <= 0) sw += TAU; return { a0, sw }; }
+// Position along a curve: 0..1 on a line, angle from the start on an arc, angle on a circle.
+function curveParam(sk, e, x, y) {
+  if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); const dx = b.x - a.x, dy = b.y - a.y; return ((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy || 1); }
+  const c = gp(sk, e.c); const ang = Math.atan2(y - c.y, x - c.x);
+  return e.t === 'arc' ? normA(ang - arcSpan(sk, e).a0) : normA(ang);
+}
+function curvePoint(sk, e, t) {
+  if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) }; }
+  const c = gp(sk, e.c); const ang = e.t === 'arc' ? arcSpan(sk, e).a0 + t : t; return { x: c.x + e.r * Math.cos(ang), y: c.y + e.r * Math.sin(ang) };
+}
+function curveSegs(sk, e, t0, t1) {
+  if (e.t === 'line') { const a = curvePoint(sk, e, t0), b = curvePoint(sk, e, t1); return [[a.x, a.y, b.x, b.y]]; }
+  const c = gp(sk, e.c); const base = e.t === 'arc' ? arcSpan(sk, e).a0 : 0; return circleSegs(c.x, c.y, e.r, base + t0, t1 - t0);
+}
+// Intersections of two unbounded curves (line through two points, full circle).
+function rawIntersect(g1, g2) {
+  const out = [];
+  if (g1.t === 'line' && g2.t === 'line') {
+    const d1 = [g1.b.x - g1.a.x, g1.b.y - g1.a.y], d2 = [g2.b.x - g2.a.x, g2.b.y - g2.a.y]; const den = d1[0] * d2[1] - d1[1] * d2[0];
+    if (Math.abs(den) < 1e-12 * Math.hypot(...d1) * Math.hypot(...d2)) return out;
+    const t = ((g2.a.x - g1.a.x) * d2[1] - (g2.a.y - g1.a.y) * d2[0]) / den; out.push({ x: g1.a.x + t * d1[0], y: g1.a.y + t * d1[1] }); return out;
+  }
+  if (g1.t !== 'line' && g2.t === 'line') return rawIntersect(g2, g1);
+  if (g1.t === 'line') {
+    const dx = g1.b.x - g1.a.x, dy = g1.b.y - g1.a.y; const fx = g1.a.x - g2.c.x, fy = g1.a.y - g2.c.y;
+    const A = dx * dx + dy * dy, B = 2 * (fx * dx + fy * dy), C = fx * fx + fy * fy - g2.r * g2.r; let D = B * B - 4 * A * C;
+    if (D < -1e-9 * A * g2.r * g2.r) return out; D = Math.max(D, 0); const sq = Math.sqrt(D);
+    for (const t of D < 1e-18 ? [-B / (2 * A)] : [(-B - sq) / (2 * A), (-B + sq) / (2 * A)]) out.push({ x: g1.a.x + t * dx, y: g1.a.y + t * dy });
+    return out;
+  }
+  const dx = g2.c.x - g1.c.x, dy = g2.c.y - g1.c.y; const d = Math.hypot(dx, dy);
+  if (d < 1e-12 || d > g1.r + g2.r + 1e-9 || d < Math.abs(g1.r - g2.r) - 1e-9) return out;
+  const a = (g1.r * g1.r - g2.r * g2.r + d * d) / (2 * d); const hh = Math.sqrt(Math.max(0, g1.r * g1.r - a * a));
+  const mx = g1.c.x + a * dx / d, my = g1.c.y + a * dy / d;
+  out.push({ x: mx + hh * dy / d, y: my - hh * dx / d }); if (hh > 1e-9) out.push({ x: mx - hh * dy / d, y: my + hh * dx / d });
+  return out;
+}
+const geomOf = (sk, e) => (e.t === 'line' ? { t: 'line', a: gp(sk, e.p1), b: gp(sk, e.p2) } : { t: 'circle', c: gp(sk, e.c), r: e.r });
+function onCurve(sk, e, p, tol = 1e-7) {
+  const t = curveParam(sk, e, p.x, p.y);
+  if (e.t === 'line') return t >= -tol && t <= 1 + tol;
+  if (e.t === 'arc') { const sw = arcSpan(sk, e).sw; return t <= sw + tol / Math.max(e.r, 1e-9) || t >= TAU - tol / Math.max(e.r, 1e-9); }
+  return true;
+}
+// Where other sketch curves cross or touch e, as parameters on e.
+function cutsOn(sk, e) {
+  const cuts = [];
+  for (const f of Object.values(sk.ents)) {
+    if (f.id === e.id) continue;
+    for (const p of rawIntersect(geomOf(sk, e), geomOf(sk, f))) if (onCurve(sk, e, p) && onCurve(sk, f, p)) cuts.push({ t: curveParam(sk, e, p.x, p.y), x: p.x, y: p.y, f });
+  }
+  return cuts;
+}
+const usedPoints = (sk) => { const u = new Set(); for (const e of Object.values(sk.ents)) [e.p1, e.p2, e.c].forEach((p) => p && u.add(p)); return u; };
+// Drops points nothing uses any more and relations that refer to removed items.
+function cleanupSketch(sk, keepPts = new Set()) {
+  const used = usedPoints(sk);
+  for (const id of Object.keys(sk.pts)) if (!used.has(id) && !sk.pts[id].free && !keepPts.has(id)) delete sk.pts[id];
+  for (const c of Object.values(sk.cons)) if (c.refs.some((r) => !(r in sk.pts) && !(r in sk.ents) && !(r in REF_PTS) && !(r in REF_ENTS))) delete sk.cons[c.id];
+}
+// A point at a cut: an existing end point of the cutting curve when there is one, else a new point
+// held on that curve by a relation.
+function cutPoint(sk, cut, pending) {
+  const f = cut.f;
+  for (const id of [f.p1, f.p2, f.c]) { if (!id) continue; const q = gp(sk, id); if (Math.hypot(q.x - cut.x, q.y - cut.y) < 1e-7) return id; }
+  for (const [id, q] of Object.entries(sk.pts)) if (Math.hypot(q.x - cut.x, q.y - cut.y) < 1e-9) return id;
+  const id = nid(sk); sk.pts[id] = { id, x: cut.x, y: cut.y }; pending.push({ t: f.t === 'line' ? 'online' : 'oncircle', refs: [id, f.id] }); return id;
+}
+// The piece of e between the cuts on either side of parameter tc, the way power trim removes it.
+function trimPiece(sk, e, tc) {
+  const cuts = cutsOn(sk, e);
+  if (e.t === 'circle') {
+    const ts = [...new Map(cuts.map((c) => [Math.round(c.t * 1e9), c])).values()].sort((a, b) => a.t - b.t);
+    if (ts.length < 2) return { all: true };
+    let hi = ts.find((c) => c.t > tc) || ts[0]; let lo = [...ts].reverse().find((c) => c.t < tc) || ts[ts.length - 1];
+    return { lo, hi };
+  }
+  const end = e.t === 'line' ? 1 : arcSpan(sk, e).sw; const eps = e.t === 'line' ? 1e-7 : 1e-7 / Math.max(e.r, 1e-9);
+  const inner = cuts.filter((c) => c.t > eps && c.t < end - eps);
+  const lo = inner.filter((c) => c.t < tc).sort((a, b) => b.t - a.t)[0] || null; const hi = inner.filter((c) => c.t > tc).sort((a, b) => a.t - b.t)[0] || null;
+  if (!lo && !hi) return { all: true };
+  return { lo, hi };
+}
+function trimPreview(sk, e, m) {
+  const tc = curveParam(sk, e, m.u, m.v); const pc = trimPiece(sk, e, tc);
+  if (pc.all) return e.t === 'line' ? curveSegs(sk, e, 0, 1) : e.t === 'arc' ? curveSegs(sk, e, 0, arcSpan(sk, e).sw) : curveSegs(sk, e, 0, TAU);
+  if (e.t === 'circle') { const t0 = pc.lo.t, t1 = pc.hi.t > pc.lo.t ? pc.hi.t : pc.hi.t + TAU; return curveSegs(sk, e, t0, t1); }
+  const end = e.t === 'line' ? 1 : arcSpan(sk, e).sw; return curveSegs(sk, e, pc.lo ? pc.lo.t : 0, pc.hi ? pc.hi.t : end);
+}
+function trimAt(sk, e, m) {
+  const tc = curveParam(sk, e, m.u, m.v); const pc = trimPiece(sk, e, tc); const pending = [];
+  if (pc.all) { delete sk.ents[e.id]; cleanupSketch(sk); return; }
+  if (e.t === 'circle') {
+    const a = cutPoint(sk, pc.hi, pending), b = cutPoint(sk, pc.lo, pending);
+    e.t = 'arc'; e.p1 = a; e.p2 = b;
+  } else if (pc.lo && pc.hi) {
+    const a = cutPoint(sk, pc.lo, pending), b = cutPoint(sk, pc.hi, pending); const id = nid(sk);
+    sk.ents[id] = { ...clone(e), id, p1: b, p2: e.p2 }; e.p2 = a;
+    pending.push(e.t === 'line' ? { t: 'collinear', refs: [e.id, id] } : { t: 'equal', refs: [e.id, id] });
+  } else if (pc.lo) e.p2 = cutPoint(sk, pc.lo, pending);
+  else e.p1 = cutPoint(sk, pc.hi, pending);
+  cleanupSketch(sk); addRelations(sk, pending);
+}
+// Fillet at a corner shared by two lines. The corner stays as a point on both lines, like the
+// virtual sharp in SolidWorks, when dimensions or relations use it.
+function filletCorner(sk, pid, r) {
+  const lines = Object.values(sk.ents).filter((e) => e.t === 'line' && !e.ext && (e.p1 === pid || e.p2 === pid));
+  if (lines.length !== 2) return 'Скругление ставится в угол, где сходятся ровно две линии';
+  const P = gp(sk, pid); const far = lines.map((e) => gp(sk, e.p1 === pid ? e.p2 : e.p1));
+  const u = far.map((A) => { const l = Math.hypot(A.x - P.x, A.y - P.y); return { x: (A.x - P.x) / l, y: (A.y - P.y) / l, l }; });
+  const cosF = u[0].x * u[1].x + u[0].y * u[1].y; const phi = Math.acos(Math.max(-1, Math.min(1, cosF)));
+  if (phi < 1e-3 || phi > Math.PI - 1e-3) return 'Линии в этой точке не образуют угол';
+  const d = r / Math.tan(phi / 2); if (d >= u[0].l - 1e-6 || d >= u[1].l - 1e-6) return `Радиус ${fmt(r)} не помещается на этих линиях`;
+  const T = u.map((w) => ({ x: P.x + w.x * d, y: P.y + w.y * d })); const bl = Math.hypot(u[0].x + u[1].x, u[0].y + u[1].y);
+  const C = { x: P.x + (u[0].x + u[1].x) / bl * r / Math.sin(phi / 2), y: P.y + (u[0].y + u[1].y) / bl * r / Math.sin(phi / 2) };
+  const tIds = T.map((t) => { const id = nid(sk); sk.pts[id] = { id, x: t.x, y: t.y }; return id; }); const cId = nid(sk); sk.pts[cId] = { id: cId, x: C.x, y: C.y };
+  lines.forEach((e, i) => { if (e.p1 === pid) e.p1 = tIds[i]; else e.p2 = tIds[i]; });
+  const ccw = (T[0].x - C.x) * (T[1].y - C.y) - (T[0].y - C.y) * (T[1].x - C.x) > 0;
+  const aid = nid(sk); sk.ents[aid] = { id: aid, t: 'arc', c: cId, p1: ccw ? tIds[0] : tIds[1], p2: ccw ? tIds[1] : tIds[0], r };
+  const pending = [{ t: 'tangent', refs: [lines[0].id, aid] }, { t: 'tangent', refs: [lines[1].id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (P.x - C.x) * 1.6, C.y + (P.y - C.y) * 1.6] }];
+  const keep = isRefPt(pid) || Object.values(sk.cons).some((c) => c.refs.includes(pid));
+  if (keep) pending.push({ t: 'online', refs: [pid, lines[0].id] }, { t: 'online', refs: [pid, lines[1].id] }); else delete sk.pts[pid];
+  addRelations(sk, pending);
+  return { arc: aid };
+}
+// Offsets a selection: chains of connected curves become joined offset chains. One driving
+// dimension and an offset relation on every copy keep the result fully defined.
+function offsetChains(sk, ids) {
+  const E = ids.map((id) => sk.ents[id]).filter((e) => e && !e.ref); const used = new Set(); const chains = [];
+  const ends = (e) => (e.t === 'circle' ? [] : [e.p1, e.p2]);
+  const deg = new Map(); for (const e of E) for (const p of ends(e)) deg.set(p, (deg.get(p) || 0) + 1);
+  const walk = (start) => {
+    const ch = []; let e = start; let from = deg.get(start.p1) === 1 || deg.get(start.p2) !== 1 ? start.p1 : start.p2;
+    while (e && !used.has(e.id)) { used.add(e.id); const fwd = e.p1 === from; ch.push({ e, fwd }); const to = fwd ? e.p2 : e.p1; from = to; e = E.find((x) => !used.has(x.id) && x.t !== 'circle' && (x.p1 === to || x.p2 === to)); }
+    return ch;
+  };
+  for (const e of E) if (e.t === 'circle') { used.add(e.id); chains.push([{ e, fwd: true }]); }
+  for (const e of E) if (!used.has(e.id) && ends(e).some((p) => deg.get(p) === 1)) chains.push(walk(e));
+  for (const e of E) if (!used.has(e.id)) chains.push(walk(e));
+  return chains;
+}
+function chainClosed(ch) { if (ch[0].e.t === 'circle') return true; const s = ch[0].fwd ? ch[0].e.p1 : ch[0].e.p2; const l = ch[ch.length - 1]; return (l.fwd ? l.e.p2 : l.e.p1) === s; }
+function chainArea(sk, ch) {
+  const pts = []; for (const { e, fwd } of ch) { const end = e.t === 'line' ? 1 : e.t === 'arc' ? arcSpan(sk, e).sw : TAU; for (let i = 0; i < 8; i++) { const t = (fwd ? i : 8 - i) / 8 * end; pts.push(curvePoint(sk, e, t)); } }
+  let a = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p.x * q.y - q.x * p.y; } return a / 2;
+}
+// Offset curve of one chain element: o > 0 moves it to the left of the travel direction.
+function offsetElem(sk, e, fwd, o) {
+  if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); const l = Math.hypot(b.x - a.x, b.y - a.y) || 1; const s = fwd ? 1 : -1; const nx = -(b.y - a.y) / l * s, ny = (b.x - a.x) / l * s;
+    return { t: 'line', a: { x: a.x + nx * o, y: a.y + ny * o }, b: { x: b.x + nx * o, y: b.y + ny * o } }; }
+  const r = e.t === 'circle' ? e.r + o : fwd ? e.r - o : e.r + o; return { t: 'circle', c: gp(sk, e.c), r };
+}
+function offsetEndPoint(sk, e, g, pid) { if (g.t === 'line') return pid === e.p1 ? g.a : g.b; const c = g.c, p = gp(sk, pid); const a = Math.atan2(p.y - c.y, p.x - c.x); return { x: c.x + g.r * Math.cos(a), y: c.y + g.r * Math.sin(a) }; }
+function planOffset(sk, ids, d, flip) {
+  const plan = []; const segs = []; let err = null;
+  for (const ch of offsetChains(sk, ids)) {
+    const closed = chainClosed(ch); let o = d;
+    if (ch[0].e.t !== 'circle' && closed && chainArea(sk, ch) > 0) o = -d;
+    if (flip) o = -o;
+    const G = ch.map(({ e, fwd }) => offsetElem(sk, e, fwd, o));
+    if (G.some((g) => g.t === 'circle' && g.r <= 1e-6)) { err = 'Смещение больше радиуса дуги'; continue; }
+    const newPt = new Map();
+    const n = ch.length;
+    for (let i = 0; i < n; i++) {
+      const { e, fwd } = ch[i]; if (e.t === 'circle') continue;
+      const endId = fwd ? e.p2 : e.p1; const nextI = i + 1 < n ? i + 1 : closed ? 0 : -1;
+      if (nextI < 0) continue;
+      const ne = ch[nextI].e; const A = offsetEndPoint(sk, e, G[i], endId), B = offsetEndPoint(sk, ne, G[nextI], endId);
+      let P = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+      if (Math.hypot(A.x - B.x, A.y - B.y) > 1e-7) { const xs = rawIntersect(G[i], G[nextI]); if (xs.length) P = xs.sort((p, q) => Math.hypot(p.x - P.x, p.y - P.y) - Math.hypot(q.x - P.x, q.y - P.y))[0]; }
+      // Tangent joint between a line and an arc: remembered so the line end is held radially.
+      let tanArc = null; const lineE = e.t === 'line' ? e : ne.t === 'line' ? ne : null; const arcE = e.t === 'arc' ? e : ne.t === 'arc' ? ne : null;
+      if (lineE && arcE) { const a = gp(sk, lineE.p1), b = gp(sk, lineE.p2), c = gp(sk, arcE.c), q = gp(sk, endId); const ux = b.x - a.x, uy = b.y - a.y, wx = q.x - c.x, wy = q.y - c.y; if (Math.abs(ux * wx + uy * wy) / (Math.hypot(ux, uy) * Math.hypot(wx, wy)) < 1e-6) tanArc = arcE.c; }
+      newPt.set(endId, { ...P, joint: true, tanArc });
+    }
+    ch.forEach(({ e }, i) => { if (e.t === 'circle') return; for (const pid of [e.p1, e.p2]) if (!newPt.has(pid)) newPt.set(pid, { ...offsetEndPoint(sk, e, G[i], pid), open: true }); });
+    plan.push({ ch, G, newPt, o });
+    ch.forEach(({ e }, i) => {
+      if (e.t === 'line') { const a = newPt.get(e.p1), b = newPt.get(e.p2); segs.push([a.x, a.y, b.x, b.y]); }
+      else if (e.t === 'circle') segs.push(...circleSegs(G[i].c.x, G[i].c.y, G[i].r, 0, TAU));
+      else { const c = G[i].c; const a = newPt.get(e.p1), b = newPt.get(e.p2); const a0 = Math.atan2(a.y - c.y, a.x - c.x); let sw = Math.atan2(b.y - c.y, b.x - c.x) - a0; while (sw <= 0) sw += TAU; segs.push(...circleSegs(c.x, c.y, G[i].r, a0, sw)); }
+    });
+  }
+  return { plan, segs, err };
+}
+function applyOffset(sk, ids, d, flip) {
+  const { plan, err } = planOffset(sk, ids, d, flip); if (err) return err; if (!plan.length) return 'Выделите линии, дуги или окружности';
+  let master = null; const pending = [];
+  for (const { ch, G, newPt } of plan) {
+    const pidMap = new Map(); for (const [old, P] of newPt) { const id = nid(sk); sk.pts[id] = { id, x: P.x, y: P.y }; pidMap.set(old, { id, open: P.open, tanArc: P.tanArc }); }
+    ch.forEach(({ e }, i) => {
+      const id = nid(sk); const ne = e.t === 'line' ? { id, t: 'line', p1: pidMap.get(e.p1).id, p2: pidMap.get(e.p2).id } : e.t === 'circle' ? { id, t: 'circle', c: e.c, r: G[i].r } : { id, t: 'arc', c: e.c, p1: pidMap.get(e.p1).id, p2: pidMap.get(e.p2).id, r: G[i].r };
+      sk.ents[id] = ne;
+      if (!master) { master = { t: 'offd', refs: [id, e.id], v: d }; master.id = nid(sk); sk.cons[master.id] = master; }
+      let s = 1;
+      if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2), p = gp(sk, ne.p1); s = Math.sign((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) || 1; } else s = Math.sign(ne.r - e.r) || 1;
+      const c = { t: 'offset', refs: [id, e.id], m: master.id, v: d, s };
+      if (e.t !== 'circle') for (const k of [1, 2]) { const old = e['p' + k]; const info = pidMap.get(old); if (info.open || (e.t === 'line' && info.tanArc)) { c['e' + k] = old; c.refs.push(old); } if (e.t === 'line' && info.tanArc) { c['c' + k] = info.tanArc; c.refs.push(info.tanArc); } }
+      pending.push(c);
+    });
+  }
+  for (const c of pending) { c.id = nid(sk); sk.cons[c.id] = c; }
+  solveSketch(sk); return null;
+}
+// Mirror about a line: copies with symmetric points; points on the line are shared.
+function mirrorEntities(sk, ids, axisId) {
+  const ax = ge(sk, axisId); const A = gp(sk, ax.p1), B = gp(sk, ax.p2); const dx = B.x - A.x, dy = B.y - A.y; const l2 = dx * dx + dy * dy;
+  const refl = (p) => { const t = ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2; const fx = A.x + t * dx, fy = A.y + t * dy; return { x: 2 * fx - p.x, y: 2 * fy - p.y }; };
+  const onAxis = (p) => Math.abs((p.x - A.x) * dy - (p.y - A.y) * dx) / Math.sqrt(l2) < 1e-7;
+  const map = new Map(); const pending = [];
+  const mp = (id) => {
+    if (map.has(id)) return map.get(id); const p = gp(sk, id); let nidv;
+    if (isRefPt(id) || onAxis(p)) { nidv = id; if (!isRefPt(id) && !Object.values(sk.cons).some((c) => c.t === 'online' && c.refs[0] === id && c.refs[1] === axisId) && axisId !== 'H' && axisId !== 'V') pending.push({ t: 'online', refs: [id, axisId] }); }
+    else { nidv = nid(sk); const q = refl(p); sk.pts[nidv] = { id: nidv, x: q.x, y: q.y }; pending.push({ t: 'symmetric', refs: [id, nidv, axisId] }); }
+    map.set(id, nidv); return nidv;
+  };
+  let n = 0;
+  for (const id of ids) {
+    const e = sk.ents[id]; if (!e || id === axisId) continue; const nidE = nid(sk); n++;
+    if (e.t === 'line') sk.ents[nidE] = { id: nidE, t: 'line', p1: mp(e.p1), p2: mp(e.p2), constr: e.constr };
+    else if (e.t === 'circle') { sk.ents[nidE] = { id: nidE, t: 'circle', c: mp(e.c), r: e.r, constr: e.constr }; pending.push({ t: 'equal', refs: [e.id, nidE] }); }
+    else { sk.ents[nidE] = { id: nidE, t: 'arc', c: mp(e.c), p1: mp(e.p2), p2: mp(e.p1), r: e.r, constr: e.constr }; pending.push({ t: 'equal', refs: [e.id, nidE] }); }
+    if (!sk.ents[nidE].constr) delete sk.ents[nidE].constr;
+  }
+  addRelations(sk, pending); return n;
+}
+function cmdMirror() {
+  const sk = editSk(); const ents = [...S.sel].filter((k) => k.startsWith('e:')).map((k) => k.slice(2));
+  const lines = ents.filter((id) => ge(sk, id)?.t === 'line');
+  const axis = lines.find((id) => id === 'H' || id === 'V' || ge(sk, id).constr) || lines[lines.length - 1];
+  const rest = ents.filter((id) => id !== axis && sk.ents[id]);
+  if (!axis || !rest.length) { toast('Выделите элементы и линию (лучше вспомогательную), относительно которой отразить', 'info'); return; }
+  const n = mirrorEntities(sk, rest, axis); S.sel.clear(); commitSketch(); toast(`Отражено: ${n}`, 'info');
+}
+function cmdOffset() {
+  const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => k.slice(2));
+  if (!ids.length) { toast('Выделите линии, дуги или окружности, затем нажмите «Смещение»', 'info'); return; }
+  S.skOp = { kind: 'offset', ids }; renderSide(); previewOffset();
+  setTimeout(() => { const i = $('opOffset'); if (i) { i.focus(); i.select(); } }, 0);
+}
+function previewOffset() { const op = S.skOp; if (op?.kind !== 'offset') return; const r = planOffset(editSk(), op.ids, S.toolOpt.offsetD, S.toolOpt.offsetFlip); S.draw = { stage: 0, preview: r.segs }; updateSketchVisuals(); }
+function okOffset() { const op = S.skOp; S.skOp = null; S.draw = null; const err = applyOffset(editSk(), op.ids, S.toolOpt.offsetD, S.toolOpt.offsetFlip); if (err) toast(err, 'warn'); S.sel.clear(); commitSketch(); }
+function cancelSkOp() { S.skOp = null; S.draw = null; refreshSketch(); }
+// Panel section for the active sketch tool's options.
+function toolOptionsPanel() {
+  const o = S.toolOpt; const field = (label, id, val, set, unit = 'мм', int = false) => {
+    const inp = h('input', { type: 'text', id, value: fmt(val, 4), inputmode: 'decimal' });
+    const apply = () => { let v = evalExpr(inp.value); if (int) v = Math.round(v); if (Number.isFinite(v) && v > 0 && (!int || v >= 3)) { set(v); inp.value = fmt(v, 4); } else inp.value = fmt(val, 4); };
+    inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); if (S.skOp?.kind === 'offset') okOffset(); else inp.blur(); } if (e.key === 'Escape') { inp.blur(); if (S.skOp) cancelSkOp(); } });
+    return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
+  };
+  if (S.skOp?.kind === 'offset') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), field('Расстояние', 'opOffset', o.offsetD, (v) => { o.offsetD = v; previewOffset(); }),
+    h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: o.offsetFlip, onchange: (e) => { o.offsetFlip = e.target.checked; previewOffset(); } }), 'В другую сторону'),
+    h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okOffset }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')));
+  if (S.tool === 'sfillet') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; }), h('div', { class: 'note' }, 'Щёлкайте углы, где сходятся две линии'));
+  if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true));
+  return null;
+}
+// Straight slot: two centres, then the width. Built from two arcs and two lines with tangency.
+function makeSlot(sk, c1, c2, r) {
+  const P1 = gp(sk, c1), P2 = gp(sk, c2); const l = Math.hypot(P2.x - P1.x, P2.y - P1.y); const ux = (P2.x - P1.x) / l, uy = (P2.y - P1.y) / l; const nx = -uy, ny = ux;
+  const mk = (x, y) => { const id = nid(sk); sk.pts[id] = { id, x, y }; return id; };
+  const A1 = mk(P1.x + nx * r, P1.y + ny * r), A2 = mk(P2.x + nx * r, P2.y + ny * r), B2 = mk(P2.x - nx * r, P2.y - ny * r), B1 = mk(P1.x - nx * r, P1.y - ny * r);
+  const ent = (o) => { const id = nid(sk); sk.ents[id] = { id, ...o }; return id; };
+  const top = ent({ t: 'line', p1: A1, p2: A2 }), bot = ent({ t: 'line', p1: B2, p2: B1 });
+  const arc2 = ent({ t: 'arc', c: c2, p1: B2, p2: A2, r }), arc1 = ent({ t: 'arc', c: c1, p1: A1, p2: B1, r });
+  const axis = ent({ t: 'line', p1: c1, p2: c2, constr: true });
+  addRelations(sk, [{ t: 'tangent', refs: [top, arc1] }, { t: 'tangent', refs: [top, arc2] }, { t: 'tangent', refs: [bot, arc1] }, { t: 'tangent', refs: [bot, arc2] }, { t: 'equal', refs: [arc1, arc2] }]);
+  void axis;
+}
+// Regular polygon on a construction circle: vertices on the circle, sides equal.
+function makePolygon(sk, cId, vx, vy, n) {
+  const C = gp(sk, cId); const r = Math.hypot(vx - C.x, vy - C.y); const a0 = Math.atan2(vy - C.y, vx - C.x);
+  const circ = nid(sk); sk.ents[circ] = { id: circ, t: 'circle', c: cId, r, constr: true };
+  const P = []; for (let i = 0; i < n; i++) { const id = nid(sk); const a = a0 + TAU * i / n; sk.pts[id] = { id, x: C.x + r * Math.cos(a), y: C.y + r * Math.sin(a) }; P.push(id); }
+  const L = P.map((p, i) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: p, p2: P[(i + 1) % n] }; return id; });
+  addRelations(sk, [...P.map((p) => ({ t: 'oncircle', refs: [p, circ] })), ...L.slice(1).map((l) => ({ t: 'equal', refs: [L[0], l] }))]);
+}
 
 // ============================================================================================
 // Commands: sketch, extrude, cut, revolve
@@ -2580,6 +2953,13 @@ function renderTools() {
       toolBtn('Окружность', ICON.circle, () => setTool('circle'), { pressed: S.tool === 'circle', disabled: !ed, kbd: 'C' }),
       toolBtn('Дуга', ICON.arc, () => setTool('arc'), { pressed: S.tool === 'arc', disabled: !ed, kbd: 'A' }),
       toolBtn('Точка', ICON.point, () => setTool('point'), { pressed: S.tool === 'point', disabled: !ed, kbd: 'P' }),
+      toolBtn('Паз', ICON.slot, () => setTool('slot'), { pressed: S.tool === 'slot', disabled: !ed, title: 'Прямой паз: два центра, затем ширина' }),
+      toolBtn('Многоуг.', ICON.polygon, () => setTool('polygon'), { pressed: S.tool === 'polygon', disabled: !ed, title: 'Правильный многоугольник: центр, затем вершина' }),
+      h('div', { class: 'sep' }),
+      toolBtn('Обрезать', ICON.trim, () => setTool('trim'), { pressed: S.tool === 'trim', disabled: !ed, kbd: 'T', title: 'Обрезка: щёлкните кусок, который нужно убрать (T)' }),
+      toolBtn('Скругл.', ICON.sfillet, () => setTool('sfillet'), { pressed: S.tool === 'sfillet', disabled: !ed, title: 'Скругление угла эскиза' }),
+      toolBtn('Смещение', ICON.offset, cmdOffset, { pressed: S.skOp?.kind === 'offset', disabled: !ed, title: 'Смещение выделенных объектов' }),
+      toolBtn('Зеркало', ICON.mirror, cmdMirror, { disabled: !ed, title: 'Отразить выделенное относительно выделенной линии' }),
       h('div', { class: 'sep' }),
       toolBtn('Размер', ICON.dim, () => setTool('dim'), { pressed: S.tool === 'dim', disabled: !ed, kbd: 'D', title: 'Автоматический размер (D)' }),
       toolBtn('Вспомогат.', ICON.constr, toggleConstruction, { disabled: !ed, kbd: 'G', title: 'Сделать выделенное вспомогательной геометрией (G)' }),
@@ -2717,6 +3097,7 @@ function renderSketchPanel() {
   pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dof ? h('span', { class: 'note' }, `  свободно: ${a.dof} ${plural(a.dof, 'степень', 'степени', 'степеней')}`) : null),
     a && a.dof ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
     a && a.redundant.size ? h('div', { class: 'note', style: 'color:var(--bad)' }, 'Лишние взаимосвязи: ' + [...a.redundant].map((c) => conLabel(sk, c)).join(', ')) : null));
+  const topt = toolOptionsPanel(); if (topt) pmEl.append(topt);
   const sel = [...S.sel];
   if (sel.length) {
     const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Выделено: ${sel.length}`));
@@ -2760,6 +3141,10 @@ function setHint(text) {
     rect: S.draw?.stage === 1 ? 'Щёлкните противоположный угол' : 'Прямоугольник: щёлкните первый угол',
     circle: S.draw?.stage === 1 ? 'Щёлкните, чтобы задать радиус' : 'Окружность: щёлкните центр',
     arc: S.draw?.stage === 2 ? 'Ведите по дуге и щёлкните конечную точку' : S.draw?.stage === 1 ? 'Щёлкните начальную точку дуги' : 'Дуга: щёлкните центр',
+    slot: S.draw?.stage === 2 ? 'Щёлкните, чтобы задать ширину паза' : S.draw?.stage === 1 ? 'Щёлкните второй центр паза' : 'Паз: щёлкните первый центр',
+    polygon: S.draw?.stage === 1 ? 'Щёлкните вершину многоугольника' : 'Многоугольник: щёлкните центр',
+    trim: 'Обрезка: наведите на кусок линии и щёлкните, чтобы убрать его до ближайших пересечений',
+    sfillet: 'Скругление: щёлкните угол, где сходятся две линии',
     point: 'Точка: щёлкните место', dim: 'Размер: выберите объект, затем щёлкните место для размера',
   })[S.tool] : S.mode === 'asm' ? (S.pm?.kind === 'mate' ? (S.pm.picks.length < 2 ? 'Сопряжение: щёлкните грань или цилиндр на двух разных компонентах' : 'Выберите тип сопряжения и нажмите Enter') : 'Тяните компонент мышью, Shift+тянуть: вращать. Пустое место: вращение вида')
     : S.pm?.kind === 'pickPlane' ? 'Выберите плоскость или плоскую грань' : S.pm ? 'Настройте параметры, затем OK' : 'Левая кнопка: вращение, правая: сдвиг, колёсико: масштаб. Двойной щелчок по элементу дерева открывает его');
@@ -2912,7 +3297,7 @@ function pushUndo(merge) {
 }
 function restore(s) {
   if (S.mode === 'asm') { const o = JSON.parse(s); activeEntry().data = S.doc = o.doc; lastSaved = s; asmRefresh(true); saveProjectSoon(); return; }
-  const o = JSON.parse(s); S.doc = o.doc; activeEntry().data = S.doc; S.editing = o.editing && featById(o.editing) ? o.editing : null; S.sel.clear(); S.draw = null; S.conflict = new Set(); S.pm = null; groups.regions.clear();
+  const o = JSON.parse(s); S.doc = o.doc; activeEntry().data = S.doc; S.editing = o.editing && featById(o.editing) ? o.editing : null; S.sel.clear(); S.draw = null; S.skOp = null; S.conflict = new Set(); S.pm = null; groups.regions.clear();
   if (S.editing) { S.refs = modelRefs(editF()); analyze(); setTab('sketch'); } else { S.refs = null; S.analysis = null; if (S.tool !== 'select') { S.tool = 'select'; canvas.style.cursor = 'default'; } }
   rebuild(); refreshAll(); lastSaved = s; saveProjectSoon();
 }
@@ -3006,6 +3391,7 @@ window.addEventListener('keydown', (e) => {
     // Esc never leaves the sketch: it ends the current tool action, then clears the selection.
     if (!$('modal').hidden) return closeModal();
     if (!menu.hidden) return closeMenu();
+    if (S.editing && S.skOp) { cancelSkOp(); return; }
     if (S.editing) { if (S.draw || S.dimPick) { S.dimPick = null; S.dimPreview = null; endDrawing(); refreshSketch(); } else if (S.tool !== 'select') setTool('select'); else { S.sel.clear(); S.conflict = new Set(); refreshSketch(); } return; }
     if (S.measure) return closeMeasure();
     if (S.pm) return closePM();
@@ -3026,7 +3412,7 @@ window.addEventListener('keydown', (e) => {
   if (k === 'f') return fitView();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
   if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase()); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
-  if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); }
+  if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); }
   else { if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); if (k === 's') return cmdSketch(); if (k === 'e') return cmdFeature('extrude', 'add'); if (k === 'x') return cmdFeature('extrude', 'cut'); }
 });
 
@@ -3041,5 +3427,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
