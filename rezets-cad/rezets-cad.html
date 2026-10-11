@@ -2435,7 +2435,7 @@ function toggleRegion(id) {
 // ---------------- property manager ----------------
 function openPM(pm) { S.pm = pm; renderSide(); renderCorner(); if (pm.feature) { rebuild(); drawRegions(); } setHint(); }
 function closePM(silent) {
-  if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
+  if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
   const had = S.pm; S.pm = null; groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); setHint(); requestRender(); }
 function okPM() {
   const pm = S.pm; if (!pm) return;
@@ -3489,8 +3489,11 @@ function applyHoleStd(f) {
 function holePoints(sf) {
   const sk = sf.sk; const out = []; const used = new Set();
   for (const e of Object.values(sk.ents)) if (e.t === 'circle' && !e.constr && !e.ext) { out.push(gp(sk, e.c)); used.add(e.c); }
-  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !used.has(id)) out.push(p);
-  return out.map((p) => toWorld(sf.plane, p.x, p.y));
+  // Model vertices brought in for snapping are references, not hole positions; a point snapped onto
+  // one sits at the same place, and two holes there would leave coincident walls for the boolean.
+  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed && !used.has(id)) out.push(p);
+  const uniq = []; for (const p of out) if (!uniq.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 1e-6)) uniq.push(p);
+  return uniq.map((p) => toWorld(sf.plane, p.x, p.y));
 }
 // Half profile in (radius, depth) with depth growing into the material, from just above the face.
 function holeProfile(f, depth) {
@@ -4031,10 +4034,9 @@ function tryAddMate(asm, m) {
 }
 // Turns the moving component over first when the requested alignment is the far solution.
 function preAlign(asm, m) {
-  if (!['coincident', 'parallel', 'distance'].includes(m.type) || m.a.kind !== m.b.kind || m.a.kind === 'point') return;
+  if (!['coincident', 'parallel', 'distance', 'concentric'].includes(m.type) || m.a.kind !== m.b.kind || m.a.kind === 'point') return;
   const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
   const A = worldEnt(m.a, poseOf(ca)), B = worldEnt(m.b, poseOf(cb)); const want = m.flip ? 1 : -1;
-  if (m.a.kind === 'axis' && m.type !== 'parallel') return;
   if (Math.sign(A.d.dot(B.d) || 1) === want) return;
   const pivot = mov === cb ? B.p : A.p; const [ax] = perpBasis(mov === cb ? B.d : A.d); const pose = poseOf(mov);
   const rq = new THREE.Quaternion().setFromAxisAngle(ax, Math.PI); const t = pose.t.clone().sub(pivot).applyQuaternion(rq).add(pivot);
@@ -4189,11 +4191,28 @@ function previewMate() {
 function okMate() {
   const pm = S.pm; const asm = S.doc;
   if (!pm.mate) { if (pm.result?.status) toast(mateMessage(pm.result), 'err'); else toast('Выберите две грани или две оси', 'warn'); return; }
-  restorePoses(asm, pm.before); const m = pm.mate; m.id = 'm' + asm.nid++; m.name = MATE_NAMES[m.type] + (asm.mates.filter((x) => x.type === m.type).length + 1);
+  restorePoses(asm, pm.before); const m = pm.mate;
+  if (pm.edit) { m.id = pm.edit.id; m.name = pm.edit.type === m.type ? pm.edit.name : MATE_NAMES[m.type] + (asm.mates.filter((x) => x.type === m.type).length + 1); m.suppressed = pm.edit.suppressed; }
+  else { m.id = 'm' + asm.nid++; m.name = MATE_NAMES[m.type] + (asm.mates.filter((x) => x.type === m.type).length + 1); }
   const r = tryAddMate(asm, m); if (r.status !== 'ok') { toast(mateMessage(r), 'err'); return; }
+  if (pm.edit) { asm.mates.splice(asm.mates.indexOf(m), 1); asm.mates.splice(pm.editAt, 0, m); pm.done = true; S.pm = null; asmRefresh(true); pushUndo(); renderCorner(); toast(`Изменено: ${m.name}`, 'info'); return; }
   S.pm = { kind: 'mate', picks: [], mate: null, before: snapPoses(asm) }; asmRefresh(true); pushUndo(); renderCorner();
   toast(`Добавлено: ${m.name}. Выберите следующую пару или нажмите Esc`, 'info');
 }
+// An existing mate is taken out while it is edited and put back on cancel.
+function editMate(m) {
+  const asm = S.doc; if (S.pm) closePM(); const at = asm.mates.indexOf(m); if (at < 0) return;
+  const before = snapPoses(asm); asm.mates.splice(at, 1);
+  openPM({ kind: 'mate', picks: [m.a, m.b], type: m.type, flip: m.flip, v: m.v ?? null, side: m.side, before, edit: m, editAt: at }); previewMate();
+}
+// Turns a mate over: the moving part is flipped onto the other solution, then everything is re-solved.
+function reverseMate(m) {
+  const asm = S.doc; const before = snapPoses(asm); m.flip = !m.flip; if (m.type === 'angle') m.side = m.flip ? -1 : 1;
+  preAlign(asm, m); if (!asmSolve(asm)) { m.flip = !m.flip; if (m.type === 'angle') m.side = m.flip ? -1 : 1; restorePoses(asm, before); toast('Развернуть не получается: мешают другие сопряжения', 'err'); }
+  else pushUndo();
+  asmRefresh(true);
+}
+const canReverse = (a, b, type) => a && b && a.kind === b.kind && a.kind !== 'point' && ['coincident', 'parallel', 'distance', 'angle', 'concentric'].includes(type);
 function mateMessage(r) {
   const names = r.group.map((id) => S.doc.mates.find((m) => m.id === id)?.name).filter(Boolean);
   return r.status === 'redundant' ? `Это сопряжение ничего не добавляет: положение уже задано${names.length ? ' (' + names.join(', ') + ')' : ''}` : `Сопряжение противоречит${names.length ? ': ' + names.join(', ') : ' существующим'}`;
@@ -4223,8 +4242,8 @@ function renderAsmTree() {
     const na = asm.comps.find((c) => c.id === m.a.comp)?.name, nb = asm.comps.find((c) => c.id === m.b.comp)?.name;
     const bad = an?.redundant.has(m.id);
     const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : ''), tabindex: '0', role: 'treeitem', title: `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
-    r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [[m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
-    r.ondblclick = () => editMateValue(m, r);
+    r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
+    r.ondblclick = (e) => (e.target.classList.contains('meta') ? editMateValue(m, r) : editMate(m));
     tree.append(r);
   }
   side.append(tree);
@@ -4389,14 +4408,14 @@ function renderAsmPM() {
     return;
   }
   const [a, b] = pm.picks; const opts = mateOptions(a, b); const asm = S.doc; const cname = (r) => asm.comps.find((c) => c.id === r.comp)?.name;
-  const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mate), h('span', {}, 'Сопряжение'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okMate }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
+  const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mate), h('span', {}, pm.edit ? 'Изменить: ' + pm.edit.name : 'Сопряжение'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okMate }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные объекты'),
     ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])} · ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр')),
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { pm.v = v; previewMate(); }, pm.type === 'angle' ? '°' : 'мм') : null,
-      ['coincident', 'parallel', 'distance', 'angle'].includes(pm.type) && a.kind === b.kind ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!pm.flip, onchange: (e) => { pm.flip = e.target.checked; previewMate(); } }), a.kind === 'plane' ? 'Выровнять (грани смотрят в одну сторону)' : 'Развернуть') : null));
+      canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { pm.flip = !pm.flip; previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
   }
   if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result))));
   side.append(box);
@@ -5060,5 +5079,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
