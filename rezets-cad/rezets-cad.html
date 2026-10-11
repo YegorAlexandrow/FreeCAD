@@ -1203,7 +1203,7 @@ function isInside(body, p) {
 function buildTool(f, body, cyls = []) {
   const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
   const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров');
-  const loops = profileLoops(reg, selectedRegionIds(f, reg)); if (!loops.length) throw new Error('Не выбрано ни одной области');
+  let loops = profileLoops(reg, selectedRegionIds(f, reg)); if (!loops.length) throw new Error('Не выбрано ни одной области');
   const M = planeMatrix(sf.plane); let g;
   if (f.type === 'loft') { g = loftGeometry(f); g.computeVertexNormals(); return g; }
   if (f.type === 'sweep') { g = sweepGeometry(f, sf, loops); g.computeVertexNormals(); return g; }
@@ -1236,6 +1236,9 @@ function buildTool(f, body, cyls = []) {
     if (f.end === 'mid') { z0 = -d / 2; z1 = d / 2; }
     else if (f.dir === -1) { z0 = -d; z1 = eps; } else { z0 = -eps; z1 = d; }
     if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = -d; z1 = d; }
+    // A cut drawn on the walls of the body (the same sketch as the boss) leaves coplanar faces the
+    // boolean cannot resolve; the tool is widened by 0.2 µm so it clears those walls instead.
+    if (f.mode === 'cut' && body) loops = loops.map((l) => ({ ...l, pts: offsetRing(l.pts, 2e-4), holes: l.holes.map((hh) => offsetRing(hh, 2e-4)) }));
     if (f.draft > 0) {
       const tn = Math.tan(f.draft * Math.PI / 180) * (f.draftOut ? 1 : -1); const zs = z0 < -1e-3 && z1 > 1e-3 ? [z0, 0, z1] : [z0, z1];
       g = taperedExtrude(loops, zs, (z) => tn * Math.abs(z));
@@ -2022,7 +2025,7 @@ function relationOptions(sk) {
   const sel = [...S.sel]; const pts = sel.filter((k) => k.startsWith('p:')).map((k) => k.slice(2));
   const ents = sel.filter((k) => k.startsWith('e:')).map((k) => ge(sk, k.slice(2))).filter(Boolean);
   const lines = ents.filter((e) => e.t === 'line'); const circs = ents.filter((e) => e.t === 'circle' || e.t === 'arc');
-  if (ents.some((e) => e.t === 'spline' || e.t === 'ellipse')) { const out2 = []; if (pts.length === 1 && ents.length === 1 && ents[0].t === 'ellipse') out2.push(['oncircle', 'На эллипсе', () => [{ t: 'oncircle', refs: [pts[0], ents[0].id] }]]); return out2; }
+  if (ents.some((e) => e.t === 'spline' || e.t === 'ellipse')) { const out2 = []; if (pts.length === 1 && ents.length === 1 && ents[0].t === 'ellipse') { out2.push(['oncircle', 'На эллипсе', () => [{ t: 'oncircle', refs: [pts[0], ents[0].id] }]]); if (ents[0].c !== pts[0]) out2.push(['concentric', 'Концентрично', () => [{ t: 'coincident', refs: [pts[0], ents[0].c] }]]); } return out2; }
   const out = [];
   if (!pts.length && lines.length && !circs.length) {
     if (lines.every((e) => !e.ref)) { out.push(['horizontal', 'Горизонтально', () => lines.filter((e) => !e.ref).map((e) => ({ t: 'horizontal', refs: [e.id] }))]); out.push(['vertical', 'Вертикально', () => lines.map((e) => ({ t: 'vertical', refs: [e.id] }))]); }
@@ -2042,7 +2045,7 @@ function relationOptions(sk) {
   if (pts.length === 1 && ents.length === 1) {
     const e = ents[0];
     if (e.t === 'line') { out.push(['online', 'На прямой', () => [{ t: 'online', refs: [pts[0], e.id] }]]); if (!e.ref) out.push(['midpoint', 'Середина', () => [{ t: 'midpoint', refs: [pts[0], e.id] }]]); }
-    else out.push(['oncircle', 'На окружности', () => [{ t: 'oncircle', refs: [pts[0], e.id] }]]);
+    else { out.push(['oncircle', 'На окружности', () => [{ t: 'oncircle', refs: [pts[0], e.id] }]]); if (e.c !== pts[0]) out.push(['concentric', 'Концентрично', () => [{ t: 'coincident', refs: [pts[0], e.c] }]]); }
   }
   if (pts.length === 2 && lines.length === 1 && !circs.length) out.push(['symmetric', 'Симметрично', () => [{ t: 'symmetric', refs: [pts[0], pts[1], lines[0].id] }]]);
   if (lines.length === 1 && circs.length === 1 && !pts.length) out.push(['tangent', 'Касательно', () => [{ t: 'tangent', refs: [lines[0].id, circs[0].id] }]]);
@@ -2495,9 +2498,10 @@ function edgeTopology(body, cyls) {
   // Seams along cylinder walls are artefacts of the mesh, not edges of the part.
   const onCylAx = (a, b) => (cyls || []).some((cy) => { const on = (v) => { const w = v.clone().sub(cy.p); const t = w.dot(cy.dir); return Math.abs(w.addScaledVector(cy.dir, -t).length() - cy.r) < 5e-3; }; return on(a) && on(b) && Math.abs(b.clone().sub(a).normalize().dot(cy.dir)) > 0.999; });
   const cl = classifyChains(chainSegments(segs.filter((sg, i) => !onCircle[i] && !onCylAx(new THREE.Vector3(sg[0], sg[1], sg[2]), new THREE.Vector3(sg[3], sg[4], sg[5]))), 3));
-  const onRim = (v) => circles.some((c) => { const w = v.clone().sub(c.c); return Math.abs(w.dot(c.n)) < 1e-2 && Math.abs(w.length() - c.r) < 1e-2; });
-  cl.lines = cl.lines.filter(([a, b]) => !(onRim(a) && onRim(b)));
-  const verts = cl.verts.filter((v) => !onRim(v)); for (const c of circles) if (!verts.some((v) => v.distanceToSquared(c.c) < 1e-8)) verts.push(c.c);
+  // Only chords of one rim are mesh artefacts; a line joining two rims (a slot side) is an edge.
+  const onC = (v, c) => { const w = v.clone().sub(c.c); return Math.abs(w.dot(c.n)) < 1e-2 && Math.abs(w.length() - c.r) < 1e-2; };
+  cl.lines = cl.lines.filter(([a, b]) => !circles.some((c) => onC(a, c) && onC(b, c)));
+  const verts = cl.verts.filter((v) => !circles.some((c) => onC(v, c))); for (const c of circles) if (!verts.some((v) => v.distanceToSquared(c.c) < 1e-8)) verts.push(c.c);
   // What gets drawn: rim segments as they are, straight edges as clean runs.
   const display = []; segs.forEach((sg, i) => { if (onCircle[i]) display.push(...sg); });
   for (const [a, b] of cl.lines) display.push(a.x, a.y, a.z, b.x, b.y, b.z);
@@ -5014,5 +5018,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, relationOptions, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
