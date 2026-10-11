@@ -204,6 +204,16 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #menu .sw.on { outline: 2px solid var(--accent); outline-offset: 1px; }
 .swc { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; color: var(--fg-2); cursor: pointer; }
 .swc input { width: 26px; height: 22px; padding: 0; border: none; background: none; cursor: pointer; }
+#projModal { position: fixed; inset: 0; z-index: 40; background: rgb(0 0 0 / .35); display: grid; place-items: center; padding: 16px; }
+.projbox { width: min(760px, 100%); max-height: 86vh; overflow: auto; }
+.proj-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; } .proj-h h2 { margin: 0; font-size: 16px; } .proj-h .acts { margin-left: auto; display: flex; gap: 6px; }
+.proj-list { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; }
+.proj-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; align-items: center; padding: 7px 10px; border-radius: 7px; cursor: default; }
+.proj-row:hover { background: var(--panel-2); } .proj-row.cur { background: var(--accent-soft); } .proj-row .nm { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-row .meta { color: var(--fg-2); font-size: 12px; white-space: nowrap; } .proj-row .acts { display: flex; gap: 4px; } .proj-row a.chip { text-decoration: none; color: inherit; }
+.proj-row input { font: inherit; padding: 2px 6px; border: 1px solid var(--accent); border-radius: 4px; background: var(--bg); color: var(--fg); }
+.projbtn { font-weight: 500; color: var(--fg); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 760px) { .proj-row { grid-template-columns: 1fr auto; } .proj-row .meta:nth-of-type(2) { display: none; } }
 .savest { font-size: 11.5px; color: var(--fg-2); padding: 2px 8px; border-radius: 10px; white-space: nowrap; border: 1px solid transparent; }
 .savest::before { content: '●'; margin-right: 5px; font-size: 9px; vertical-align: 1px; color: var(--fg-2); }
 .savest[data-state="saved"]::before { color: var(--good); } .savest[data-state="saving"]::before { color: var(--warn); }
@@ -239,6 +249,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div class="toprow">
       <button class="tbtn" id="sideToggle" aria-label="Дерево построения">☰</button>
       <div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20 14 10M14 10l3-6 3 3-6 3M4 20l3-1-2-2z"/></svg>Резец CAD</div>
+      <button class="tbtn projbtn" id="bProjects" hidden title="Проекты на сервере">Проект ▾</button>
       <div class="doctabs" id="docTabs" role="tablist" aria-label="Документы проекта"></div>
       <button class="tbtn addtab" id="bAdd" title="Новый документ или импорт" aria-label="Добавить документ">＋</button>
       <div class="filebtns">
@@ -276,6 +287,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 </div>
 <div id="menu" hidden></div>
 <div id="modal" hidden><div class="mbox"><h2 id="mTitle"></h2><div class="note" id="mNote"></div><textarea id="mText" spellcheck="false"></textarea><div class="acts" id="mActs"></div></div></div>
+<div id="projModal" hidden><div class="mbox projbox" id="projBox"></div></div>
 <input type="file" id="fileIn" accept=".json,.rezets,application/json" hidden>
 <input type="file" id="stepIn" accept=".step,.stp,.STEP,.STP" hidden>
 
@@ -3291,9 +3303,97 @@ function docVersionsMenu(d, x, y) {
     catch (e) { toast('Версия повреждена: ' + e.message, 'err'); } }]));
 }
 async function exportProjectFile() {
+  if (SRV.on) { await serverSave(); const a = h('a', { href: `/api/projects/${SRV.pid}/export`, download: '' }); document.body.append(a); a.click(); a.remove(); return; }
   const json = JSON.stringify(projectToJSON()); const name = (S.project.name || 'Проект') + ' ' + new Date().toISOString().slice(0, 10) + '.rezets.json';
   if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: name, data: json }); return; } catch (e) { if (e?.code === 'declined' || e?.code === 'cancelled') return; console.warn('download', e); } }
   showModal('Сохранить проект', 'Скопируйте текст в файл .json. Открыть его можно кнопкой «Открыть…».', json, [['Копировать', copyText], ['Закрыть', closeModal]]);
+}
+
+// ============================================================================================
+// Local server (server/rezets_server.py): when the page is served by it, projects live on the
+// server's disk with per-document revisions and history, and the project list is managed here.
+// ============================================================================================
+const SRV = { on: false, pid: null, revs: new Map(), hashes: new Map(), metaHash: '', saving: false, again: false, conflict: new Set(), info: null };
+async function api(method, path, body) {
+  const r = await fetch('/api/' + path, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => null); if (!r.ok) { const e = new Error(j?.error || r.statusText); e.status = r.status; e.body = j; throw e; } return j;
+}
+async function serverDetect() {
+  if (!/^https?:$/.test(location.protocol)) return false;
+  try { const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 1500); const r = await fetch('/api/health', { signal: ctl.signal }); clearTimeout(t); if (!r.ok) return false; SRV.info = await r.json(); return !!SRV.info?.ok; } catch { return false; }
+}
+const metaOf = () => ({ name: S.project.name, active: S.project.active, nid: S.project.nid, order: S.project.docs.map((d) => d.id) });
+// Opens a project from the server; what was stored is remembered as already saved.
+async function serverOpen(pid) {
+  const p = await api('GET', 'projects/' + pid); SRV.pid = pid; SRV.revs.clear(); SRV.hashes.clear(); SRV.conflict.clear();
+  const docs = p.docs.map((d) => { SRV.revs.set(d.id, d.rev); const o = docFromStore({ id: d.id, kind: d.kind, name: d.name, data: d.data }); SRV.hashes.set(d.id, hashStr(JSON.stringify(docToStore(o)))); return o; });
+  if (!docs.length) docs.push({ id: 'd1', kind: 'part', name: 'Деталь1', data: newDoc() });
+  const proj = { name: p.name, active: docs.some((d) => d.id === p.active) ? p.active : docs[0].id, nid: Math.max(p.nid || 1, ...docs.map((d) => +String(d.id).replace(/\D/g, '') + 1 || 1)), docs, pid };
+  SRV.metaHash = hashStr(JSON.stringify({ name: proj.name, active: proj.active, nid: proj.nid, order: docs.map((d) => d.id) }));
+  try { localStorage.setItem('rezets-last-pid', pid); } catch { /* storage unavailable */ }
+  history.replaceState(null, '', '?p=' + encodeURIComponent(pid));
+  openProject(proj); renderProjectButton(); setCloudState('saved', 'Проект сохранён на диске сервера: ' + (SRV.info?.data || ''));
+}
+async function serverSave() {
+  if (!SRV.on || !SRV.pid) return; if (SRV.saving) { SRV.again = true; return; } SRV.saving = true; setCloudState('saving');
+  let failed = false;
+  try {
+    const ent = activeEntry(); if (ent && S.mode !== 'import') ent.data = S.doc;
+    for (const d of S.project.docs) {
+      if (SRV.conflict.has(d.id)) continue;
+      const body = docToStore(d); const hash = hashStr(JSON.stringify(body)); if (SRV.hashes.get(d.id) === hash) continue;
+      try { const r = await api('PUT', `projects/${SRV.pid}/docs/${d.id}`, { doc: body, baseRev: SRV.revs.get(d.id) ?? null }); SRV.revs.set(d.id, r.rev); SRV.hashes.set(d.id, hash); }
+      catch (e) {
+        if (e.status === 409) { SRV.conflict.add(d.id); toast(`«${d.name}» изменён в другом окне`, 'err', [{ label: 'Оставить мой', act: () => serverForce(d) }, { label: 'Взять тот', act: () => serverOpen(SRV.pid) }]); }
+        else throw e;
+      }
+    }
+    for (const id of [...SRV.revs.keys()]) if (!S.project.docs.some((d) => d.id === id)) { await api('DELETE', `projects/${SRV.pid}/docs/${id}`); SRV.revs.delete(id); SRV.hashes.delete(id); }
+    const mh = hashStr(JSON.stringify(metaOf())); if (mh !== SRV.metaHash) { await api('PATCH', 'projects/' + SRV.pid, metaOf()); SRV.metaHash = mh; renderProjectButton(); }
+  } catch (e) { failed = true; console.warn('server save', e); setCloudState(e.status ? 'error' : 'offline', e.status ? 'Сервер ответил ошибкой: ' + e.message : 'Сервер не отвечает, повторю через 5 с'); setTimeout(serverSaveSoon, 5000); }
+  finally { SRV.saving = false; if (!failed) setCloudState(SRV.conflict.size ? 'conflict' : 'saved', SRV.conflict.size ? 'Есть документы, изменённые в другом окне' : 'Сохранено на диске сервера: ' + (SRV.info?.data || '')); if (SRV.again) { SRV.again = false; serverSaveSoon(); } }
+}
+async function serverForce(d) { try { const r = await api('PUT', `projects/${SRV.pid}/docs/${d.id}`, { doc: docToStore(d), force: true }); SRV.revs.set(d.id, r.rev); SRV.hashes.set(d.id, hashStr(JSON.stringify(docToStore(d)))); SRV.conflict.delete(d.id); setCloudState(SRV.conflict.size ? 'conflict' : 'saved'); toast(`«${d.name}» сохранён поверх`, 'info'); } catch (e) { toast('Не сохранено: ' + e.message, 'err'); } }
+let srvTimer = null; function serverSaveSoon() { clearTimeout(srvTimer); setCloudState('saving'); srvTimer = setTimeout(serverSave, 700); }
+window.addEventListener('beforeunload', (e) => { if (SRV.on && (SRV.saving || CLOUD.state === 'saving')) { e.preventDefault(); e.returnValue = ''; } });
+async function serverVersionsMenu(d, x, y) {
+  let list; try { list = await api('GET', `projects/${SRV.pid}/docs/${d.id}/versions`); } catch { toast('Версии недоступны', 'err'); return; }
+  if (!list.length) { toast('Прежних версий пока нет', 'info'); return; }
+  const fmtT = (t) => new Date(t).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  openMenu(x, y, list.slice(0, 20).map((v) => [`${fmtT(v.updated)} (версия ${v.rev})`, async () => {
+    try { const o = docFromStore(await api('GET', `projects/${SRV.pid}/docs/${d.id}/versions/${v.v}`)); leaveCurrentDoc(); d.data = o.data; d._hist = undefined; S.project.active = d.id; S.mode = null; S.cache.clear(); enterDoc(); saveProjectSoon(); toast(`«${d.name}»: возвращена версия от ${fmtT(v.updated)}`, 'info'); }
+    catch (e) { toast('Не удалось прочитать версию: ' + e.message, 'err'); } }]));
+}
+// ---------------- project manager ----------------
+function renderProjectButton() { const b = $('bProjects'); if (!b) return; b.hidden = !SRV.on; b.textContent = (S.project?.name || 'Проект') + ' ▾'; }
+async function openProjects() {
+  const box = $('projBox'); $('projModal').hidden = false; box.textContent = 'Загрузка…';
+  let list; try { list = await api('GET', 'projects'); } catch (e) { box.textContent = 'Сервер не отвечает: ' + e.message; return; }
+  const fmtT = (t) => new Date(t).toLocaleString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); const kb = (n) => (n > 1048576 ? fmt(n / 1048576, 1) + ' МБ' : fmt(n / 1024, 0) + ' КБ');
+  box.textContent = '';
+  box.append(h('div', { class: 'proj-h' }, h('h2', {}, 'Проекты'), h('span', { class: 'note' }, SRV.info?.data || ''),
+    h('div', { class: 'acts' }, h('button', { class: 'big-btn', onclick: async () => { const p = await api('POST', 'projects', { name: 'Новый проект' }); $('projModal').hidden = true; await serverOpen(p.id); } }, 'Новый проект'), h('button', { class: 'ghost-btn', onclick: () => { $('projModal').hidden = true; $('fileIn').click(); } }, 'Открыть файл…'), h('button', { class: 'ghost-btn', onclick: () => { $('projModal').hidden = true; } }, 'Закрыть'))));
+  const tbl = h('div', { class: 'proj-list' });
+  for (const p of list) {
+    const cur = p.id === SRV.pid; const nm = h('span', { class: 'nm' }, p.name);
+    const row = h('div', { class: 'proj-row' + (cur ? ' cur' : '') }, nm, h('span', { class: 'meta' }, `${p.docs} док. · ${kb(p.size)}`), h('span', { class: 'meta' }, fmtT(p.updated)),
+      h('div', { class: 'acts' },
+        cur ? h('span', { class: 'meta' }, 'открыт') : h('button', { class: 'chip', onclick: async () => { await serverSave(); $('projModal').hidden = true; await serverOpen(p.id); } }, 'Открыть'),
+        h('button', { class: 'chip', title: 'Переименовать', onclick: () => { const inp = h('input', { type: 'text', value: p.name }); nm.replaceWith(inp); inp.focus(); inp.select(); const done = async (ok) => { if (ok && inp.value.trim() && inp.value.trim() !== p.name) { await api('PATCH', 'projects/' + p.id, { name: inp.value.trim() }); if (cur) { S.project.name = inp.value.trim(); SRV.metaHash = hashStr(JSON.stringify(metaOf())); renderProjectButton(); } } openProjects(); }; inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); }; inp.onblur = () => done(true); } }, '✎'),
+        h('a', { class: 'chip', href: `/api/projects/${p.id}/export`, download: '', title: 'Скачать файл проекта' }, '⤓'),
+        cur ? null : h('button', { class: 'chip', title: 'В корзину на диске сервера', onclick: async () => { if (row.dataset.confirm) { await api('DELETE', 'projects/' + p.id); openProjects(); } else { row.dataset.confirm = '1'; toast(`Нажмите ещё раз, чтобы удалить «${p.name}». Файлы уйдут в папку trash`, 'warn'); } } }, '✕')));
+    row.ondblclick = async () => { if (!cur) { await serverSave(); $('projModal').hidden = true; await serverOpen(p.id); } };
+    tbl.append(row);
+  }
+  box.append(tbl);
+}
+async function serverStart() {
+  SRV.on = true; renderProjectButton(); setCloudState('saving', 'Подключение к серверу');
+  const want = new URLSearchParams(location.search).get('p'); let last = null; try { last = localStorage.getItem('rezets-last-pid'); } catch { last = null; }
+  const list = await api('GET', 'projects'); const ids = new Set(list.map((p) => p.id));
+  let pid = [want, last].find((x) => x && ids.has(x)) || list[0]?.id;
+  if (!pid) { const p = await api('POST', 'projects', { name: 'Мой проект' }); pid = p.id; await api('PUT', `projects/${pid}/docs/d1`, { doc: docToStore({ id: 'd1', kind: 'part', name: 'Кронштейн', data: sampleDoc() }), baseRev: null }); await api('PATCH', 'projects/' + pid, { active: 'd1', nid: 2 }); }
+  await serverOpen(pid);
 }
 
 // ============================================================================================
@@ -4663,7 +4763,7 @@ function saveProjectSoon() {
     const plain = { name: S.project.name, active: S.project.active, nid: S.project.nid, savedAt: Date.now(), docs: S.project.docs.map((d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.data })) };
     const ok = await idbPut('project', plain);
     if (!ok) try { localStorage.setItem('rezets-cad-doc', JSON.stringify(S.doc)); } catch { /* storage unavailable */ }
-    cloudSaveSoon();
+    if (SRV.on) serverSaveSoon(); else cloudSaveSoon();
   }, 400);
 }
 const b64 = { enc(arr) { const u = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength); let s = ''; for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); },
@@ -4708,7 +4808,7 @@ function renderDocTabs() {
     const b = h('button', { class: 'doctab', role: 'tab', 'aria-selected': String(d.id === S.project.active), title: KIND_NAME[d.kind] + ': ' + d.name }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name));
     b.onclick = () => switchDoc(d.id);
     b.ondblclick = () => renameDoc(d, b);
-    b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Переименовать', () => renameDoc(d, b)], ['Дублировать', () => addDoc(d.kind, d.name, clone(d.data), false)], ...(CLOUD.db ? [['Прежние версии…', () => docVersionsMenu(d, e.clientX, e.clientY)]] : []), null, ['Удалить', () => deleteDoc(d)]]); };
+    b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Переименовать', () => renameDoc(d, b)], ['Дублировать', () => addDoc(d.kind, d.name, clone(d.data), false)], ...(SRV.on ? [['Прежние версии…', () => serverVersionsMenu(d, e.clientX, e.clientY)]] : CLOUD.db ? [['Прежние версии…', () => docVersionsMenu(d, e.clientX, e.clientY)]] : []), null, ['Удалить', () => deleteDoc(d)]]); };
     box.append(b);
   }
 }
@@ -4842,6 +4942,7 @@ $('fileIn').onchange = async (e) => {
   try {
     const o = JSON.parse(await file.text());
     if (Array.isArray(o.features)) { addDoc('part', o.name || file.name.replace(/\.\w+$/, ''), o); toast(`Деталь «${o.name}» добавлена в проект`, 'info'); }
+    else if (Array.isArray(o.docs) && SRV.on) { await serverSave(); const p = await api('POST', 'projects/import', o); await serverOpen(p.id); toast(`Проект «${o.name}» добавлен на сервер и открыт`, 'info'); }
     else if (Array.isArray(o.docs)) { openProject(projectFromJSON(o)); toast(`Открыт проект «${o.name}»`, 'info'); }
     else throw new Error();
   } catch { toast('Не удалось прочитать файл: это не проект и не деталь Резец CAD', 'err'); }
@@ -4897,7 +4998,11 @@ window.addEventListener('keydown', (e) => {
 $('loading').remove();
 resize(); renderTools();
 CLOUD.writer = Math.random().toString(36).slice(2);
+$('bProjects').onclick = () => openProjects();
+$('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'projModal') $('projModal').hidden = true; });
 (async () => {
+  // Served by the local server: projects live on its disk.
+  if (await serverDetect()) { try { await serverStart(); return; } catch (e) { console.warn(e); SRV.on = false; toast('Сервер найден, но проект не открылся: ' + e.message, 'err'); } }
   let proj = await idbGet('project'); const hadLocal = !!proj;
   if (!proj) { let old = null; try { old = JSON.parse(localStorage.getItem('rezets-cad-doc') || 'null'); } catch { old = null; }
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
@@ -4909,5 +5014,5 @@ CLOUD.writer = Math.random().toString(36).slice(2);
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>

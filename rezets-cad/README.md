@@ -8,6 +8,29 @@ STEP import (occt-import-js) and assemblies with mates.
 with `occt-import-js.wasm` from the npm package `occt-import-js@0.0.23` (`dist/`), which is not
 kept in the repository.
 
+## Local server
+
+`server/rezets_server.py` (Python 3.9+, standard library only) serves the app and keeps
+projects on disk, with a project list in the app (button with the project name in the
+header), per-document history and protection against two windows overwriting each other.
+
+    git clone -b claude/keen-keller-egnr4v --depth 1 https://github.com/YegorAlexandrow/FreeCAD
+    cd FreeCAD/rezets-cad/server
+    python rezets_server.py --open        # Windows: double-click start.bat
+
+Options: `--data <folder>` (default `~/RezetsCAD`), `--port 8770`, `--host 0.0.0.0` to
+reach it from other devices on the local network. Data layout:
+
+    projects/<pid>/project.json               name, document order
+    projects/<pid>/docs/<doc>.json            current documents (plain JSON)
+    projects/<pid>/history/<doc>/<rev>.json.gz   earlier versions: the latest 50, then one a day for 120 days
+    trash/                                    deleted projects
+
+Writes go to a temporary file, are flushed and renamed, so a crash leaves the old or the
+new file, never a broken one. Back up the data folder with any file backup tool. STEP
+import needs `occt-import-js.wasm` next to `rezets-cad.html` or internet access (CDN);
+three.js always loads from the CDN. API tests: `python -m unittest test_server.py`.
+
 ## Tests
 
 Browser tests drive the page with Playwright (Chromium, SwiftShader):
