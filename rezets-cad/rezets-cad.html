@@ -2983,7 +2983,22 @@ function projectView(sources, key) {
     const T = edgeTopology(s.geo, s.cyls); const d = T.display; const a = new THREE.Vector3(), b = new THREE.Vector3();
     for (let i = 0; i < d.length; i += 6) { a.set(d[i], d[i + 1], d[i + 2]).applyMatrix4(s.M); b.set(d[i + 3], d[i + 4], d[i + 5]).applyMatrix4(s.M); addSeg(a, b); }
     const nM = new THREE.Matrix3().getNormalMatrix(s.M);
-    for (const x of meshAdjacency(s.geo)) { const n1 = x.n1.clone().applyMatrix3(nM), n2 = x.n2.clone().applyMatrix3(nM); const d1 = n1.dot(D), d2 = n2.dot(D); if (d1 * d2 < 0 && Math.max(Math.abs(d1), Math.abs(d2)) > 1e-3) addSeg(x.a.clone().applyMatrix4(s.M), x.b.clone().applyMatrix4(s.M)); }
+    // Cylinders: the two lines where the surface turns away from the viewer, between neighbouring
+    // rims, kept where the cylinder really is (material on one side of the surface only).
+    const onCylL = (v) => (s.cyls || []).some((cy) => { const w = v.clone().sub(cy.p); const t = w.dot(cy.dir); return Math.abs(w.addScaledVector(cy.dir, -t).length() - cy.r) < 5e-3; });
+    const mesh = bodyMesh(s.geo);
+    for (const cy of s.cyls || []) {
+      const ax = cy.dir.clone().normalize(); const axW = ax.clone().applyMatrix3(nM).normalize(); if (Math.abs(axW.dot(D)) > 0.9999) continue;
+      const ts = T.circles.filter((c) => Math.abs(c.r - cy.r) < 1e-4 && Math.abs(Math.abs(c.n.dot(ax)) - 1) < 1e-6 && c.c.clone().sub(cy.p).cross(ax).length() < 1e-3).map((c) => c.c.clone().sub(cy.p).dot(ax)).sort((a2, b2) => a2 - b2);
+      const uniq = []; for (const t of ts) if (!uniq.length || t - uniq[uniq.length - 1] > 1e-4) uniq.push(t); if (uniq.length < 2) continue;
+      const Dl = D.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(s.M.clone().invert())).normalize(); const side = new THREE.Vector3().crossVectors(ax, Dl).normalize();
+      for (const sg of [1, -1]) { const nrm = side.clone().multiplyScalar(sg);
+        for (let i = 0; i + 1 < uniq.length; i++) { const tm = (uniq[i] + uniq[i + 1]) / 2; const P = cy.p.clone().addScaledVector(ax, tm).addScaledVector(nrm, cy.r); const e = Math.max(1e-3, cy.r * 1e-3) * 3;
+          if (isInside(s.geo, P.clone().addScaledVector(nrm, e)) === isInside(s.geo, P.clone().addScaledVector(nrm, -e))) continue;
+          const A = cy.p.clone().addScaledVector(ax, uniq[i]).addScaledVector(nrm, cy.r).applyMatrix4(s.M), B = cy.p.clone().addScaledVector(ax, uniq[i + 1]).addScaledVector(nrm, cy.r).applyMatrix4(s.M); addSeg(A, B); } }
+    }
+    void mesh;
+    for (const x of meshAdjacency(s.geo)) { if (onCylL(x.a) && onCylL(x.b)) continue; const n1 = x.n1.clone().applyMatrix3(nM), n2 = x.n2.clone().applyMatrix3(nM); const d1 = n1.dot(D), d2 = n2.dot(D); if (d1 * d2 < 0 && Math.max(Math.abs(d1), Math.abs(d2)) > 1e-3) addSeg(x.a.clone().applyMatrix4(s.M), x.b.clone().applyMatrix4(s.M)); }
     for (const c of T.circles) { const cc = c.c.clone().applyMatrix4(s.M); const n = c.n.clone().applyMatrix3(nM).normalize(); if (Math.abs(n.dot(D)) > 0.9999) { const p = P(cc); if (!occluded(p[0] + c.r * 0.7071, p[1] + c.r * 0.7071, p[2]) || !occluded(p[0] - c.r, p[1], p[2])) circles.push({ u: p[0], v: p[1], r: c.r, w: cc.toArray(), n: n.toArray() }); } }
     for (const v of T.verts) { const w = v.clone().applyMatrix4(s.M); const p = P(w); verts.push({ u: p[0], v: p[1], w: w.toArray(), hidden: occluded(p[0], p[1], p[2]) }); }
   }
@@ -2992,7 +3007,20 @@ function projectView(sources, key) {
     for (const s2 of segs) { const k = key(s2[0], s2[1]); const prev = byEnd.get(k); if (prev) { const dx1 = prev[2] - prev[0], dy1 = prev[3] - prev[1], dx2 = s2[2] - s2[0], dy2 = s2[3] - s2[1]; if (Math.abs(dx1 * dy2 - dy1 * dx2) < 1e-9 * Math.hypot(dx1, dy1) * Math.hypot(dx2, dy2) + 1e-12 && dx1 * dx2 + dy1 * dy2 > 0) { byEnd.delete(k); prev[2] = s2[2]; prev[3] = s2[3]; byEnd.set(key(prev[2], prev[3]), prev); continue; } }
       out.push(s2); byEnd.set(key(s2[2], s2[3]), s2); } return out; };
   const dedupC = []; for (const c of circles) if (!dedupC.some((x) => Math.hypot(x.u - c.u, x.v - c.v) < 1e-4 && Math.abs(x.r - c.r) < 1e-4)) dedupC.push(c);
-  return { key, vis: merge(vis), hid: merge(hid), circles: dedupC, verts, box: { umin, umax, vmin, vmax }, R: V.R, U: V.U, D: V.D };
+  // Straight runs on one line are united; hidden pieces under visible ones are dropped.
+  const lineSets = (segs) => { const map = new Map();
+    for (const [x1, y1, x2, y2] of segs) { const L = Math.hypot(x2 - x1, y2 - y1); if (L < 1e-9) continue; let dx = (x2 - x1) / L, dy = (y2 - y1) / L; if (dx < -1e-9 || (Math.abs(dx) <= 1e-9 && dy < 0)) { dx = -dx; dy = -dy; }
+      const off = -dy * x1 + dx * y1; const k = `${Math.round(Math.atan2(dy, dx) * 2e4)},${Math.round(off * 1e3)}`; let e = map.get(k); if (!e) map.set(k, (e = { dx, dy, off, iv: [] }));
+      const t1 = dx * x1 + dy * y1, t2 = dx * x2 + dy * y2; e.iv.push([Math.min(t1, t2), Math.max(t1, t2)]); }
+    for (const e of map.values()) { e.iv.sort((a2, b2) => a2[0] - b2[0]); const u = []; for (const iv of e.iv) { const last = u[u.length - 1]; if (last && iv[0] <= last[1] + size * 1e-6) last[1] = Math.max(last[1], iv[1]); else u.push(iv.slice()); } e.iv = u; }
+    return map; };
+  const curved = (segs) => segs; // short pieces of curves stay as they are after joining
+  const V2 = lineSets(vis), H2 = lineSets(hid); const outV = [], outH = [];
+  const emit = (e, iv, out) => out.push([e.dx * iv[0] - e.dy * e.off, e.dy * iv[0] + e.dx * e.off, e.dx * iv[1] - e.dy * e.off, e.dy * iv[1] + e.dx * e.off]);
+  for (const e of V2.values()) for (const iv of e.iv) emit(e, iv, outV);
+  for (const [k, e] of H2.entries()) { const cover = V2.get(k)?.iv || []; for (const iv of e.iv) { let pieces = [iv.slice()]; for (const c of cover) pieces = pieces.flatMap(([a2, b2]) => (c[1] <= a2 || c[0] >= b2 ? [[a2, b2]] : [[a2, Math.max(a2, c[0])], [Math.min(b2, c[1]), b2]]).filter(([x, y]) => y - x > size * 1e-5)); for (const pc of pieces) emit(e, pc, outH); } }
+  void curved; void merge;
+  return { key, vis: outV, hid: outH, circles: dedupC, verts, box: { umin, umax, vmin, vmax }, R: V.R, U: V.U, D: V.D };
 }
 // Sheet layout: front view top-left, view from the left to its right, top view below, isometric
 // top-right when it fits. The scale is the largest standard one that fits.
@@ -3009,17 +3037,22 @@ function layoutDrawing(drw) {
   const x0 = fx0 + gap, y0 = fy0 + gap + 6; const pos = {};
   pos.front = { x: x0, y: y0 }; pos.left = { x: x0 + w('front') * scale + gap, y: y0 }; pos.top = { x: x0, y: y0 + hgt('front') * scale + gap };
   if (views.iso) { const xi = pos.left.x + w('left') * scale + gap; const isoW = w('iso') * scale, isoH = hgt('iso') * scale; if (xi + isoW <= fx1 - 4 && y0 + isoH <= fy1 - 55 - 8) pos.iso = { x: xi, y: y0 }; else { const yi = pos.top.y; const xi2 = pos.top.x + w('top') * scale + gap; if (xi2 + isoW <= fx1 - 4 && yi + isoH <= fy1 - 55 - 8) pos.iso = { x: xi2, y: yi }; else delete views.iso; } }
-  return { views, pos, scale, W, H, frame: [fx0, fy0, fx1, fy1] };
+  return { views, pos, scale, W, H, frame: [fx0, fy0, fx1, fy1], asm: docEntry(drw.src)?.kind === 'asm' };
 }
 // Paper coordinates of a model point in a view.
 function toPaper(L, key, w) { const v = L.views[key]; const p = V3(w); const u = p.dot(V3(v.R)), vv = p.dot(V3(v.U)); return [L.pos[key].x + (u - v.box.umin) * L.scale, L.pos[key].y + (v.box.vmax - vv) * L.scale]; }
 function autoDims(L) {
   const out = []; const v = L.views;
   const box = (k) => { const b = v[k].box; const X0 = L.pos[k].x, Y0 = L.pos[k].y, X1 = X0 + (b.umax - b.umin) * L.scale, Y1 = Y0 + (b.vmax - b.vmin) * L.scale; return { X0, Y0, X1, Y1, w: b.umax - b.umin, h: b.vmax - b.vmin }; };
-  const f = box('front'), t = box('top'), l = box('left');
-  out.push({ kind: 'h', x1: f.X0, x2: f.X1, y: f.Y0, at: f.Y0 - 8, val: f.w }, { kind: 'v', y1: f.Y0, y2: f.Y1, x: f.X0, at: f.X0 - 8, val: f.h }, { kind: 'v', y1: t.Y0, y2: t.Y1, x: t.X0, at: t.X0 - 8, val: t.h });
-  void l;
-  for (const k of ['front', 'top', 'left']) { const seen = new Set(); for (const c of v[k].circles) { const key = c.r.toFixed(3); if (seen.has(key) || seen.size >= 6) continue; seen.add(key); const [cx, cy] = toPaper(L, k, c.w); out.push({ kind: 'dia', cx, cy, r: c.r * L.scale, val: 2 * c.r }); } }
+  const f = box('front'), t = box('top');
+  // Extension lines start at the extreme vertices of the view, not at the corners of its box.
+  const ext = (k) => { const vv = v[k]; const pts = vv.vis.flatMap((s2) => [[s2[0], s2[1]], [s2[2], s2[3]]]); if (!pts.length) return null;
+    const P = ([u, w]) => [L.pos[k].x + (u - vv.box.umin) * L.scale, L.pos[k].y + (vv.box.vmax - w) * L.scale];
+    const by = (fn) => pts.reduce((a2, b2) => (fn(b2) < fn(a2) - 1e-9 ? b2 : a2)); return { xl: P(by((q) => q[0] + q[1] * 1e-6)), xr: P(by((q) => -q[0] + q[1] * 1e-6)), yt: P(by((q) => -q[1] + q[0] * 1e-6)), yb: P(by((q) => q[1] + q[0] * 1e-6)) }; };
+  const ef = ext('front'), et = ext('top');
+  if (ef) out.push({ kind: 'h', x1: ef.xl[0], x2: ef.xr[0], y: ef.xl[1], y2: ef.xr[1], at: f.Y1 + 9, val: f.w }, { kind: 'v', y1: ef.yt[1], y2: ef.yb[1], x: ef.yt[0], x2: ef.yb[0], at: f.X0 - 9, val: f.h });
+  if (et) out.push({ kind: 'v', y1: et.yt[1], y2: et.yb[1], x: et.yt[0], x2: et.yb[0], at: t.X0 - 9, val: t.h });
+  if (!L.asm) for (const k of ['front', 'top', 'left']) { const seen = new Set(); for (const c of v[k].circles) { const key = c.r.toFixed(3); if (seen.has(key) || seen.size >= 6) continue; seen.add(key); const [cx, cy] = toPaper(L, k, c.w); out.push({ kind: 'dia', cx, cy, r: c.r * L.scale, val: 2 * c.r, ang: [-45, -20, -65, -30, -55, -10][seen.size - 1] }); } }
   return out;
 }
 function dimSvg(d) {
@@ -3029,7 +3062,7 @@ function dimSvg(d) {
   const val = fmt(d.val, 2);
   if (d.kind === 'h') { const s = Math.sign(d.at - d.y) || -1; return ln(d.x1, d.y, d.x1, d.at + s * 2) + ln(d.x2, d.y2 ?? d.y, d.x2, d.at + s * 2) + ln(d.x1, d.at, d.x2, d.at) + arrow(d.x1, d.at, d.x1 - d.x2, 0) + arrow(d.x2, d.at, d.x2 - d.x1, 0) + t((d.x1 + d.x2) / 2, d.at - 1, val); }
   if (d.kind === 'v') { const s = Math.sign(d.at - d.x) || -1; return ln(d.x, d.y1, d.at + s * 2, d.y1) + ln(d.x2 ?? d.x, d.y2, d.at + s * 2, d.y2) + ln(d.at, d.y1, d.at, d.y2) + arrow(d.at, d.y1, 0, d.y1 - d.y2) + arrow(d.at, d.y2, 0, d.y2 - d.y1) + t(d.at - 1, (d.y1 + d.y2) / 2, val, -90); }
-  if (d.kind === 'dia') { const a = -Math.PI / 4; const ex = d.cx + d.r * Math.cos(a), ey = d.cy + d.r * Math.sin(a), sx = d.cx - d.r * Math.cos(a), sy = d.cy - d.r * Math.sin(a); const lx = ex + 6, ly = ey - 6;
+  if (d.kind === 'dia') { const a = (d.ang ?? -45) * Math.PI / 180; const ex = d.cx + d.r * Math.cos(a), ey = d.cy + d.r * Math.sin(a), sx = d.cx - d.r * Math.cos(a), sy = d.cy - d.r * Math.sin(a); const lx = ex + 6, ly = ey - 6;
     return ln(sx, sy, ex, ey) + arrow(ex, ey, Math.cos(a), Math.sin(a)) + arrow(sx, sy, -Math.cos(a), -Math.sin(a)) + ln(ex, ey, lx, ly) + ln(lx, ly, lx + 9, ly) + `<text x="${(lx + 0.5).toFixed(2)}" y="${(ly - 0.8).toFixed(2)}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif">⌀${val}</text>`; }
   return '';
 }
@@ -3043,7 +3076,7 @@ function drawingSvg(drw, L) {
     const path = (segs) => segs.map((s) => { const a = map(s[0], s[1]), b = map(s[2], s[3]); return `M${a[0].toFixed(3)} ${a[1].toFixed(3)}L${b[0].toFixed(3)} ${b[1].toFixed(3)}`; }).join('');
     if (drw.hidden && k !== 'iso' && v.hid.length) parts.push(`<path d="${path(v.hid)}" fill="none" stroke="#000" stroke-width="0.25" stroke-dasharray="2 1"/>`);
     parts.push(`<path d="${path(v.vis)}" fill="none" stroke="#000" stroke-width="0.5" stroke-linecap="round"/>`);
-    if (k !== 'front') { const [x, y] = [L.pos[k].x, L.pos[k].y - 3]; parts.push(`<text x="${x}" y="${y}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif" fill="#000">${DRW_VIEWS[k].label}</text>`); }
+    // Views in projection relation carry no label (ГОСТ 2.305).
   }
   const dims = [...(drw.auto ? autoDims(L) : []), ...(drw.dims || []).map((d) => userDimPaper(L, d)).filter(Boolean)];
   for (const d of dims) parts.push(dimSvg(d));
