@@ -187,6 +187,8 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #drawing .sheet svg { display: block; }
 #viewbar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 #sectionBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); font-size: 12px; max-width: calc(100% - 24px); }
+#ctxBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 6px 8px 6px 12px; box-shadow: 0 2px 8px rgb(0 0 0 / .15); font-size: 12px; color: var(--fg-2); max-width: calc(100% - 24px); }
+#ctxBar b { color: var(--fg); font-weight: 600; } #ctxBar button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 5px; padding: 3px 10px; cursor: pointer; font: inherit; }
 #sectionBar input[type=range] { width: 160px; } #sectionBar .num { width: 64px; font-family: var(--font-num); }
 #sectionBar button { border: 1px solid var(--line); background: var(--bg); color: var(--fg-2); border-radius: 5px; padding: 2px 8px; cursor: pointer; } #sectionBar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 #viewbar button:hover { background: var(--panel-2); color: var(--fg); }
@@ -278,6 +280,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
       <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button>
     </div>
     <div id="sectionBar" hidden></div>
+    <div id="ctxBar" hidden></div>
     <div id="drawing" hidden></div>
     <div id="corner"></div>
     <div id="toasts"></div>
@@ -1739,7 +1742,7 @@ canvas.addEventListener('pointermove', (ev) => {
 canvas.addEventListener('pointerup', (ev) => {
   const d = down; down = null;
   if (S.editing) { if (d && d.button === 0) sketchUp(ev, d); return; }
-  if (S.mode === 'asm' && !S.measure) { if (d && d.button === 2 && !d.moved && !S.pm) { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); if (c) { S.asmSel = c.id; asmRefresh(); openMenu(ev.clientX, ev.clientY, [['Цвет компонента…', () => compColorMenu(c, ev.clientX, ev.clientY)], ['Открыть деталь', () => switchDoc(c.doc)], [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(S.doc); asmRefresh(true); pushUndo(); }]]); } return; } if (!d || d.button === 0) asmUp(ev, d); return; }
+  if (S.mode === 'asm' && !S.measure) { if (d && d.button === 2 && !d.moved && !S.pm) { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); if (c) { S.asmSel = c.id; asmRefresh(); openMenu(ev.clientX, ev.clientY, [['Цвет компонента…', () => compColorMenu(c, ev.clientX, ev.clientY)], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(S.doc); asmRefresh(true); pushUndo(); }]]); } return; } if (!d || d.button === 0) asmUp(ev, d); return; }
   if (d && d.button === 0 && !d.moved) partClick(ev);
   if (d && d.button === 2 && !d.moved && !S.measure && (S.mode === 'part' || S.mode === 'import')) partContext(ev);
 });
@@ -4132,6 +4135,35 @@ function cmdInsert() {
   if (!parts.length) { toast('В проекте нет деталей для вставки', 'warn'); return; }
   openPM({ kind: 'insert' });
 }
+// ---------------- editing a part in the context of its assembly ----------------
+// The part is edited in its own coordinates; the other components are drawn around it, muted and
+// never picked, so the part cannot reference them and no part-assembly cycle can appear.
+const ctxGroup = new THREE.Group(); scene.add(ctxGroup);
+const camState = (M) => { const m = M ? new THREE.Matrix4().fromArray(M) : new THREE.Matrix4(); const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().extractRotation(m));
+  return { pos: camera.position.clone().applyMatrix4(m), target: controls.target.clone().applyMatrix4(m), up: camera.up.clone().applyQuaternion(q), zoom: camera.zoom }; };
+function setCamState(c) { cancelAnimationFrame(anim); camera.position.copy(c.pos); controls.target.copy(c.target); camera.up.copy(c.up); camera.zoom = c.zoom; camera.lookAt(c.target); camera.updateProjectionMatrix(); controls.update(); requestRender(); }
+function editInContext(compId) {
+  const asm = S.doc; const c = allComps(asm).find((x) => x.id === compId); const ent = c && docEntry(c.doc);
+  if (!ent || ent.kind !== 'part') { toast('В контексте сборки редактируются только детали', 'warn'); return; }
+  const Tc = displayT(asm, c); const inv = Tc.clone().invert(); const others = [];
+  allComps(asm).forEach((o) => {
+    if (o.id === c.id) return; const inf = docInfo(o.doc); if (!inf || inf.empty) return;
+    others.push({ geo: inf.geo, edges: inf.edges, M: inv.clone().multiply(displayT(asm, o)) });
+  });
+  const cam = camState(inv.toArray());
+  S.ctx = { asm: S.project.active, asmName: activeEntry().name, comp: c.id, compName: c.name, doc: c.doc, M: Tc.toArray(), others };
+  switchDoc(c.doc); setCamState(cam);
+}
+function drawContext() {
+  ctxGroup.clear(); const bar = $('ctxBar'); const on = !!S.ctx && S.mode === 'part'; bar.hidden = !on; if (!on) return;
+  const mat = new THREE.MeshStandardMaterial({ color: colors.body, transparent: true, opacity: 0.22, depthWrite: false, metalness: 0, roughness: 0.8, side: THREE.DoubleSide });
+  for (const o of S.ctx.others) {
+    const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.copy(o.M); g.renderOrder = -1;
+    g.add(new THREE.Mesh(shadedGeo(o.geo), mat)); g.add(segLines(o.edges, lineMat(colors.edge, 1, { opacity: 0.3 }))); ctxGroup.add(g);
+  }
+  bar.replaceChildren(h('span', {}, 'Редактирование ', h('b', {}, S.ctx.compName), ' в сборке ', h('b', {}, S.ctx.asmName)), h('button', { onclick: () => switchDoc(S.ctx.asm) }, 'Вернуться в сборку'));
+  requestRender();
+}
 function cmdMate() { if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; toast('Разнесённый вид выключен на время сопряжений', 'info'); } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
 function mateOptions(a, b) {
   if (!a || !b) return [];
@@ -4176,7 +4208,7 @@ function renderAsmTree() {
       svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name));
     r.onclick = () => { S.asmSel = c.id; asmRefresh(); };
     r.ondblclick = () => switchDoc(c.doc);
-    r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, [[c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]]); };
+    r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, [[c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]]); };
     tree.append(r);
   }
   if (!asm.comps.length) tree.append(h('div', { class: 'empty-tree' }, 'Сборка пустая. Нажмите «Вставить компонент».'));
@@ -4442,6 +4474,7 @@ function renderTools() {
       toolBtn('Спецификация', ICON.bom, cmdBom, { title: 'Список деталей с количеством и массой' }),
       toolBtn('Пересечения', ICON.interf, () => (S.pm?.kind === 'interf' ? closePM() : cmdInterference()), { pressed: S.pm?.kind === 'interf', title: 'Проверка пересечений компонентов' }),
       h('div', { class: 'sep' }),
+      toolBtn('Править в сборке', ICON.part, () => (S.asmSel ? editInContext(S.asmSel) : toast('Выберите компонент', 'info')), { disabled: !S.asmSel, title: 'Редактировать выбранную деталь на месте, среди остальных компонентов' }),
       toolBtn('Открыть деталь', ICON.part, () => { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) switchDoc(c.doc); else toast('Выберите компонент', 'info'); }, { disabled: !S.asmSel, title: 'Открыть выбранный компонент для редактирования' }),
     );
     return;
@@ -4790,13 +4823,17 @@ function leaveCurrentDoc() {
 }
 function switchDoc(id) {
   if (S.project.active === id && S.mode) return;
-  leaveCurrentDoc(); S.project.active = id; enterDoc(); saveProjectSoon();
+  // Leaving an in-context edit for its assembly keeps the view where it was.
+  const back = S.ctx && id === S.ctx.asm && S.project.active === S.ctx.doc ? camState(S.ctx.M) : null; if (S.ctx && id !== S.ctx.doc) S.ctx = null;
+  leaveCurrentDoc(); S.project.active = id; enterDoc(); saveProjectSoon(); if (back) setCamState(back);
 }
 function enterDoc() {
+  ctxGroup.clear(); $('ctxBar').hidden = true;
   const ent = activeEntry(); S.sel.clear(); S.selectedTree = null; S.pm = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
   S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
   if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); return; }
+  if (S.ctx && S.ctx.doc !== ent.id) S.ctx = null; drawContext();
   if (ent.kind === 'part') { for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk); asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); if (!lastSaved) pushUndo(); }
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
@@ -5023,5 +5060,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
