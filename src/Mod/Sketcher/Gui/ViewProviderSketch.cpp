@@ -22,7 +22,6 @@
  *                                                                         *
  ***************************************************************************/
 
-#include <array>
 #include <boost/bind/bind.hpp>
 #include <boost/core/ignore_unused.hpp>
 #include <Inventor/SbBox3f.h>
@@ -51,6 +50,7 @@
 #include <QWindow>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <limits>
@@ -4483,8 +4483,25 @@ inline QString constraintLabel(const Sketcher::SketchObject* sketch, int constrI
 }
 
 inline QString constraintListHelper(const Sketcher::SketchObject* sketch,
-                                    const std::vector<int>& ids)
+                                    std::vector<int> ids)
 {
+    // The solver reports the whole group of involved constraints in creation order, so the
+    // oldest (and least likely culprit) constraints would be listed first. Show dimensional
+    // constraints first and the most recently added ones before older ones instead.
+    const auto& constraints = sketch->Constraints.getValues();
+    auto isDimensional = [&constraints](int id) {
+        return id > 0 && id <= static_cast<int>(constraints.size())
+            && constraints[id - 1]->isDimensional();
+    };
+    std::ranges::stable_sort(ids, [&isDimensional](int lhs, int rhs) {
+        const bool lhsDim = isDimensional(lhs);
+        const bool rhsDim = isDimensional(rhs);
+        if (lhsDim != rhsDim) {
+            return lhsDim;
+        }
+        return lhs > rhs;
+    });
+
     QString results;
     // The 8 is a bit heuristic... more than that and we shift formats
     const std::size_t numToShow = ids.size() < 8 ? ids.size() : 3;
