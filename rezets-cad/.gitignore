@@ -2,3 +2,4 @@ test.html
 occt-import-js.wasm
 *.png
 mod.mjs
+testdata/big/

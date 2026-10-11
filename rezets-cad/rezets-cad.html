@@ -4065,12 +4065,16 @@ const shadedCache = new WeakMap(); function shadedGeo(g) { if (!shadedCache.has(
 function asmEdgePick(ev) {
   const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; const cands = [];
   const take = (o, d, tol, wq) => { if (d < tol) cands.push({ o, d, wq }); };
+  const pxPerMm = view.clientHeight * camera.zoom / (camera.top - camera.bottom);
   for (const c of S.doc.comps) {
     const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
     for (const v of T.verts) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 9, wq); }
     for (const ci of T.circles) {
       const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
-      for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; const wq = ci.c.clone().addScaledVector(u, ci.r * Math.cos(a)).addScaledVector(w, ci.r * Math.sin(a)).applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'axis', p: ci.c.toArray(), d: ci.n.toArray(), r: ci.r, edge: { t: 'circle', c: ci.c.toArray(), n: ci.n.toArray(), r: ci.r } }, Math.hypot(s2.x - mx, s2.y - my), 6, wq); }
+      // Circles far from the cursor are skipped before sampling; each circle gives one candidate.
+      const sc = toScreen(ci.c.clone().applyMatrix4(M)); if (Math.hypot(sc.x - mx, sc.y - my) > ci.r * pxPerMm + 8) continue;
+      let best = null; for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; const wq = ci.c.clone().addScaledVector(u, ci.r * Math.cos(a)).addScaledVector(w, ci.r * Math.sin(a)).applyMatrix4(M); const s2 = toScreen(wq); const dd = Math.hypot(s2.x - mx, s2.y - my); if (!best || dd < best.dd) best = { dd, wq }; }
+      take({ comp: c.id, kind: 'axis', p: ci.c.toArray(), d: ci.n.toArray(), r: ci.r, edge: { t: 'circle', c: ci.c.toArray(), n: ci.n.toArray(), r: ci.r } }, best.dd, 6, best.wq);
     }
     for (const [a, b] of T.lines) { const A = a.clone().applyMatrix4(M), B = b.clone().applyMatrix4(M); const sa = toScreen(A), sb = toScreen(B); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1)));
       take({ comp: c.id, kind: 'axis', p: a.toArray(), d: b.clone().sub(a).normalize().toArray(), edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), 6, A.clone().lerp(B, t)); }
@@ -4078,7 +4082,8 @@ function asmEdgePick(ev) {
   // Nearest one that is not hidden behind a surface.
   const meshes = []; asmGroup.traverse((o) => { if (o.isMesh && o.userData.comp) meshes.push(o); }); asmGroup.updateMatrixWorld(true);
   const dirV = camera.getWorldDirection(new THREE.Vector3()); const span = (camera.top - camera.bottom) / camera.zoom;
-  for (const cd of cands.sort((x, y) => x.d - y.d)) {
+  // Each visibility test is a raycast through every component, so only the nearest few are tried.
+  for (const cd of cands.sort((x, y) => x.d - y.d).slice(0, 12)) {
     const rc = new THREE.Raycaster(cd.wq.clone().addScaledVector(dirV, -1e4), dirV); const hit = rc.intersectObjects(meshes)[0];
     if (!hit || hit.distance >= 1e4 - span * 2e-3) return cd.o;
   }
@@ -5018,5 +5023,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, relationOptions, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
