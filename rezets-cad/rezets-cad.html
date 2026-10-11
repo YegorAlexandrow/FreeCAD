@@ -321,6 +321,7 @@ const ICON = {
   sweep: '<path d="M4 18c4 0 5-12 10-12h6"/><rect x="2.5" y="15.5" width="3" height="5" rx=".5"/><rect x="18.5" y="3.5" width="3" height="5" rx=".5"/>',
   loft: '<rect x="4" y="15" width="16" height="5" rx="1"/><circle cx="12" cy="6" r="3"/><path d="M4 15 9 7.5M20 15l-5-7.5"/>',
   vars: '<path d="M17 5H7l6 7-6 7h10"/>',
+  explode: '<rect x="9" y="9" width="6" height="6" rx="1"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><path d="M10.5 4.5 12 3l1.5 1.5M10.5 19.5 12 21l1.5-1.5M4.5 10.5 3 12l1.5 1.5M19.5 10.5 21 12l-1.5 1.5"/>',
   hole: '<path d="M7 4h10M9 4v5h6V4M10.5 9v10M13.5 9v10M10.5 19 12 21l1.5-2"/>',
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
@@ -3565,8 +3566,8 @@ function asmRefresh(reanalyze) {
   asmGroup.clear();
   allComps(asm).forEach((c) => {
     const inf = docInfo(c.doc); if (!inf || inf.empty) return; const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id));
-    const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.fromArray(c.T); g.userData.comp = c.virtual ? null : c.id;
-    const sel = S.asmSel === c.id || (S.pm?.kind === 'cpat' && S.pm.pat.seeds.includes(c.id)); const hov = S.asmHover?.comp === c.id && !S.pm;
+    const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.copy(displayT(asm, c)); g.userData.comp = c.virtual ? null : c.id;
+    const sel = S.asmSel === c.id || (S.pm?.kind === 'cpat' && S.pm.pat.seeds.includes(c.id)) || (S.pm?.kind === 'explode' && S.pm.cur.comps.includes(c.id)); const hov = S.asmHover?.comp === c.id && !S.pm;
     const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(COMP_COLORS[i % COMP_COLORS.length]), metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
     const mesh = new THREE.Mesh(shadedGeo(inf.geo), mat); mesh.userData.comp = c.virtual ? null : c.id; g.add(mesh);
     g.add(segLines(inf.edges, lineMat(colors.edge, 1.3)));
@@ -3641,7 +3642,7 @@ function cmdInsert() {
   if (!parts.length) { toast('В проекте нет деталей для вставки', 'warn'); return; }
   openPM({ kind: 'insert' });
 }
-function cmdMate() { if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
+function cmdMate() { if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; toast('Разнесённый вид выключен на время сопряжений', 'info'); } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
 function mateOptions(a, b) {
   if (!a || !b) return [];
   if (a.kind === 'point' || b.kind === 'point') { const o = a.kind === 'point' ? b : a; return o.kind === 'axis' ? ['coincident'] : ['coincident', 'distance']; }
@@ -3774,6 +3775,47 @@ function renderCompPatternPM() {
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!pat.flip, onchange: (e) => { pat.flip = e.target.checked; asmRefresh(); } }), 'Обратное направление')));
   side.append(box);
 }
+// ---------------- exploded view ----------------
+// Steps move components for display only; mates, mass and interference use the real positions.
+function explodeOffset(asm, c) {
+  const ex = asm.explode; const off = new THREE.Vector3(); if (!ex?.on) return off; const id = c.seed || c.id;
+  for (const st of ex.steps) if (st.comps.includes(id)) off.addScaledVector(V3(st.dir).normalize(), st.d);
+  return off;
+}
+function displayT(asm, c) { const off = explodeOffset(asm, c); const M = new THREE.Matrix4().fromArray(c.T); if (off.lengthSq()) M.premultiply(new THREE.Matrix4().makeTranslation(off.x, off.y, off.z)); return M; }
+function cmdExplode() {
+  const asm = S.doc; if (asm.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; }
+  asm.explode = asm.explode || { on: true, steps: [] }; asm.explode.on = true; S.asmSel = null;
+  openPM({ kind: 'explode', cur: { comps: [], dir: [0, 1, 0], d: 30 } }); asmRefresh();
+}
+// Radial explode: every movable component away from the assembly centre, in proportion to its offset.
+function autoExplode() {
+  const asm = S.doc; const ctrs = new Map(); const all = new THREE.Box3();
+  for (const c of asm.comps) { const inf = docInfo(c.doc); if (!inf?.geo) continue; inf.geo.computeBoundingBox(); const b = inf.geo.boundingBox.clone().applyMatrix4(new THREE.Matrix4().fromArray(c.T)); ctrs.set(c.id, b.getCenter(new THREE.Vector3())); all.union(b); }
+  const C = all.getCenter(new THREE.Vector3()); const size = all.getSize(new THREE.Vector3()).length();
+  asm.explode.steps = asm.explode.steps.filter((s) => !s.auto);
+  for (const c of asm.comps) { if (c.fixed) continue; const v = ctrs.get(c.id)?.clone().sub(C); if (!v) continue; if (v.lengthSq() < 1e-6) v.set(0, 1, 0); const d = Math.max(size * 0.35, v.length() * 0.8); asm.explode.steps.push({ id: 'x' + asm.nid++, comps: [c.id], dir: v.normalize().toArray(), d, auto: true }); }
+  asmRefresh(); pushUndo();
+}
+function explodeClick(ev) { const p = asmPick(ev); if (!p) return; const cur = S.pm.cur; const i = cur.comps.indexOf(p.comp); if (i >= 0) cur.comps.splice(i, 1); else cur.comps.push(p.comp); asmRefresh(); }
+function addExplodeStep() {
+  const cur = S.pm.cur; const asm = S.doc; if (!cur.comps.length) { toast('Щёлкните компоненты, которые нужно сдвинуть', 'warn'); return; }
+  asm.explode.steps.push({ id: 'x' + asm.nid++, comps: cur.comps.slice(), dir: cur.dir.slice(), d: cur.d }); S.pm.cur = { comps: [], dir: cur.dir, d: cur.d }; asmRefresh(); pushUndo();
+}
+function renderExplodePM() {
+  const asm = S.doc; const ex = asm.explode; const cur = S.pm.cur; const cname = (id) => asm.comps.find((c) => c.id === id)?.name || '?';
+  const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.explode), h('span', {}, 'Разнесённый вид'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'Готово', onclick: () => closePM() }, svg(ICON.exit)))));
+  box.append(h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: ex.on, onchange: (e) => { ex.on = e.target.checked; asmRefresh(); pushUndo(); } }), 'Показать разнесённым'),
+    h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: autoExplode }, 'Авторазнос'), ex.steps.length ? h('button', { class: 'chip', onclick: () => { ex.steps = []; asmRefresh(); pushUndo(); } }, 'Сбросить') : null)));
+  const g = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Новый шаг'), h('button', { class: 'rel pickbox on' }, h('b', {}, '▣'), cur.comps.length ? cur.comps.map(cname).join(', ') : 'щёлкните компоненты'),
+    h('div', { class: 'chips' }, [['X', [1, 0, 0]], ['−X', [-1, 0, 0]], ['Y', [0, 1, 0]], ['−Y', [0, -1, 0]], ['Z', [0, 0, 1]], ['−Z', [0, 0, -1]]].map(([l, d]) => h('button', { class: 'chip', style: d.join() === cur.dir.join() ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { cur.dir = d; renderSide(); } }, l))),
+    numField('Расстояние', 'exDist', cur.d, (v) => { cur.d = v; }), h('button', { class: 'ghost-btn', onclick: addExplodeStep }, 'Добавить шаг'));
+  box.append(g);
+  if (ex.steps.length) { const l = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Шаги: ${ex.steps.length}`));
+    ex.steps.forEach((st, i) => l.append(h('div', { class: 'rel' }, h('b', {}, String(i + 1)), `${st.comps.map(cname).join(', ')} · ${fmt(st.d)} мм`, h('button', { class: 'x', title: 'Удалить шаг', onclick: () => { ex.steps.splice(i, 1); asmRefresh(); pushUndo(); renderSide(); } }, '✕'))));
+    box.append(l); }
+  side.append(box);
+}
 // Interference: the common volume of every pair of components whose boxes overlap.
 function asmInterference(asm) {
   const items = allComps(asm).map((c) => { const inf = docInfo(c.doc); if (!inf || inf.empty) return null; const g = inf.geo.clone(); g.applyMatrix4(new THREE.Matrix4().fromArray(c.T)); g.computeBoundingBox(); return { c, g }; }).filter(Boolean);
@@ -3807,6 +3849,7 @@ function renderAsmPM() {
   const pm = S.pm; side.textContent = '';
   if (pm.kind === 'mass') { renderMassPM(); return; }
   if (pm.kind === 'cpat') { renderCompPatternPM(); return; }
+  if (pm.kind === 'explode') { renderExplodePM(); return; }
   if (pm.kind === 'interf') {
     const cname = (id) => S.doc.comps.find((c) => c.id === id)?.name || '?';
     const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.interf), h('span', {}, 'Проверка пересечений'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
@@ -3840,6 +3883,7 @@ function renderAsmPM() {
 function asmDown(ev) {
   if (ev.button !== 0) return;
   if (S.pm) return;
+  if (S.doc.explode?.on) { const p = asmPick(ev); if (p) { controls.mouseButtons.LEFT = null; S.asmDrag = { fixed: true, exploded: true }; } return; }
   const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp);
   if (!c) { controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE; return; }
   controls.mouseButtons.LEFT = null; S.asmSel = c.id;
@@ -3872,8 +3916,10 @@ function asmMove(ev) {
 function asmUp(ev, d) {
   const D = S.asmDrag; S.asmDrag = null;
   if (D && !D.fixed && d?.moved) { asmRefresh(true); pushUndo(); return; }
-  if (D?.fixed && d?.moved) toast('Компонент зафиксирован. Освободите его в контекстном меню, чтобы двигать', 'info');
+  if (D?.exploded && d?.moved) toast('В разнесённом виде компоненты не двигаются: выключите его в «Разнести»', 'info');
+  else if (D?.fixed && d?.moved) toast('Компонент зафиксирован. Освободите его в контекстном меню, чтобы двигать', 'info');
   if (d && !d.moved && S.pm?.kind === 'cpat') { cpatClick(ev); return; }
+  if (d && !d.moved && S.pm?.kind === 'explode') { explodeClick(ev); return; }
   if (d && !d.moved && S.pm?.kind === 'mate') {
     const ep = asmEdgePick(ev); const p = ep ? null : asmPick(ev); if (!ep && !p?.ent) return; const pm = S.pm; const ref = ep || { comp: p.comp, ...p.ent };
     if (pm.picks.length >= 2) { pm.picks = []; pm.flip = null; pm.v = null; }
@@ -3898,6 +3944,7 @@ function renderTools() {
     toolsEl.append(
       toolBtn('Вставить', ICON.insert, cmdInsert, { pressed: S.pm?.kind === 'insert', title: 'Вставить деталь в сборку (I)', kbd: 'I' }),
       toolBtn('Сопряжение', ICON.mate, () => (S.pm?.kind === 'mate' ? closePM() : cmdMate()), { pressed: S.pm?.kind === 'mate', title: 'Сопряжение двух граней или осей (M)', kbd: 'M' }),
+      toolBtn('Разнести', ICON.explode, () => (S.pm?.kind === 'explode' ? closePM() : cmdExplode()), { pressed: S.pm?.kind === 'explode' || !!S.doc.explode?.on, title: 'Разнесённый вид сборки' }),
       toolBtn('Массив', ICON.lpattern, () => cmdCompPattern('lin'), { title: 'Линейный массив компонентов' }),
       toolBtn('Круговой', ICON.cpattern, () => cmdCompPattern('circ'), { title: 'Круговой массив компонентов' }),
       h('div', { class: 'sep' }),
@@ -4156,7 +4203,7 @@ function renderSketchPanel() {
 function renderCorner() {
   const c = $('corner'); c.textContent = '';
   if (S.pm?.kind === 'mate' || S.pm?.kind === 'cpat') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
-  else if (S.pm?.kind === 'vars') c.append(h('button', { class: 'ok', title: 'Готово', onclick: () => closePM() }, svg(ICON.exit)));
+  else if (S.pm?.kind === 'vars' || S.pm?.kind === 'explode') c.append(h('button', { class: 'ok', title: 'Готово', onclick: () => closePM() }, svg(ICON.exit)));
   else if (S.pm?.kind === 'insert' || S.pm?.kind === 'interf' || S.pm?.kind === 'mass') c.append(h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm && S.pm.kind === 'feature') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.editing) c.append(h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)));
@@ -4459,5 +4506,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
