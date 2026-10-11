@@ -1319,6 +1319,13 @@ void View3DInventorViewer::init()
         this,
         &View3DInventorViewer::createStandardCursors
     );
+    connect(
+        this,
+        &View3DInventorViewer::devicePixelRatioChanged,
+        this,
+        &View3DInventorViewer::applyScaledPickRadius
+    );
+    applyScaledPickRadius();
 
     naviCube = new NaviCube(this);
     ParameterGrp::handle hViewGrp = App::GetApplication().GetParameterGroupByPath(
@@ -1420,6 +1427,20 @@ View3DInventorViewer::~View3DInventorViewer()
     SoGLRenderAction* glAction = this->getSoRenderManager()->getGLRenderAction();
     this->getSoRenderManager()->setGLRenderAction(nullptr);
     delete glAction;
+}
+
+void View3DInventorViewer::setPickRadius(float pickRadius)
+{
+    logicalPickRadius = pickRadius;
+    applyScaledPickRadius();
+}
+
+void View3DInventorViewer::applyScaledPickRadius()
+{
+    // Mouse positions handed to Coin are in physical pixels, so the pick radius
+    // has to be scaled as well. Otherwise the effective radius shrinks on HiDPI screens.
+    const auto ratio = static_cast<float>(devicePixelRatio());
+    Quarter::SoQTQuarterAdaptor::setPickRadius(logicalPickRadius * std::max(ratio, 1.0F));
 }
 
 void View3DInventorViewer::createStandardCursors()

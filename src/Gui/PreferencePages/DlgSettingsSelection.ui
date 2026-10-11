@@ -113,7 +113,7 @@ A larger value makes it easier to select elements, but may prevent selection of 
            <double>200.000000000000000</double>
           </property>
           <property name="value">
-           <double>5.000000000000000</double>
+           <double>8.000000000000000</double>
           </property>
           <property name="prefEntry" stdset="0">
            <cstring>PickRadius</cstring>

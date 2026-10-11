@@ -7,6 +7,7 @@ SET(PreferencePacks_Directories
         "Dark behave"
         "FreeCAD Light"
         "FreeCAD Dark"
+        "SolidWorks-like"
 )
 
 ADD_CUSTOM_TARGET(PreferencePacks_data ALL

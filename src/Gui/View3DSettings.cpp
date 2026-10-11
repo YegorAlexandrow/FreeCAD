@@ -497,7 +497,7 @@ void View3DSettings::OnChange(ParameterGrp::SubjectType& rCaller, ParameterGrp::
     }
     else if (strcmp(Reason, "PickRadius") == 0) {
         for (auto _viewer : _viewers) {
-            _viewer->setPickRadius(rGrp.GetFloat("PickRadius", 5.0f));
+            _viewer->setPickRadius(rGrp.GetFloat("PickRadius", 8.0f));
         }
     }
     else if (strcmp(Reason, "TransparentObjectRenderType") == 0) {

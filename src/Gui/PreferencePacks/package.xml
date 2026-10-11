@@ -35,5 +35,14 @@
       <tag>background</tag>
       <tag>dark</tag>
     </preferencepack>
+	<preferencepack>
+	  <name>SolidWorks-like</name>
+      <type>Theme</type>
+      <description>Light theme with SolidWorks-like sketch colors (blue under-defined, black fully defined), thin anti-aliased edges, SolidWorks navigation and a larger pick radius. Esc does not leave the sketch.</description>
+      <version>1.0.0</version>
+      <tag>built-in</tag>
+      <tag>light</tag>
+      <tag>solidworks</tag>
+    </preferencepack>
   </content>
 </package>

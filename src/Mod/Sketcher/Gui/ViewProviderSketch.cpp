@@ -22,6 +22,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <array>
 #include <boost/bind/bind.hpp>
 #include <boost/core/ignore_unused.hpp>
 #include <Inventor/SbBox3f.h>
@@ -231,7 +232,7 @@ void ViewProviderSketch::ParameterObserver::updateEscapeKeyBehaviour(const std::
     ParameterGrp::handle hSketch = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Mod/Sketcher");
     Client.viewProviderParameters.handleEscapeButton =
-        !hSketch->GetBool("LeaveSketchWithEscape", true);
+        !hSketch->GetBool("LeaveSketchWithEscape", false);
 }
 
 void ViewProviderSketch::ParameterObserver::updateAutoRecompute(const std::string& string,
@@ -4433,26 +4434,71 @@ QString ViewProviderSketch::appendConstraintMsg(const QString& singularmsg,
     return msg;
 }
 
-inline QString intListHelper(const std::vector<int>& ints)
+inline QString constraintLabel(const Sketcher::SketchObject* sketch, int constrId)
+{
+    // The solver reports 1-based constraint indices. Use the same "N-Type" (or user given name)
+    // labels as the constraint list, so that the constraints can be found there quickly.
+    static constexpr std::array<const char*, Sketcher::NumConstraintTypes> typeNames {
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Constraint"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Coincident"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Horizontal"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Vertical"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Parallel"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Tangent"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Distance"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "DistanceX"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "DistanceY"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Angle"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Perpendicular"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Radius"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Equal"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "PointOnObject"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Symmetric"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Alignment"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Snell"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Lock"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Diameter"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Weight"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Constraint"),
+        QT_TRANSLATE_NOOP("SketcherGui::ConstraintView", "Constraint"),
+    };
+
+    const auto& constraints = sketch->Constraints.getValues();
+    const int index = constrId - 1;
+    if (index < 0 || index >= static_cast<int>(constraints.size())) {
+        return QString::number(constrId);
+    }
+
+    const Sketcher::Constraint* constraint = constraints[index];
+    if (!constraint->Name.empty()) {
+        return QString::fromStdString(constraint->Name);
+    }
+
+    int type = static_cast<int>(constraint->Type);
+    if (type < 0 || type >= Sketcher::NumConstraintTypes) {
+        type = Sketcher::None;
+    }
+    return QStringLiteral("%1-%2").arg(constrId).arg(
+        QCoreApplication::translate("SketcherGui::ConstraintView", typeNames[type]));
+}
+
+inline QString constraintListHelper(const Sketcher::SketchObject* sketch,
+                                    const std::vector<int>& ids)
 {
     QString results;
-    if (ints.size() < 8) {// The 8 is a bit heuristic... more than that and we shift formats
-        for (const auto i : ints) {
-            if (results.isEmpty())
-                results.append(QStringLiteral("%1").arg(i));
-            else
-                results.append(QStringLiteral(", %1").arg(i));
+    // The 8 is a bit heuristic... more than that and we shift formats
+    const std::size_t numToShow = ids.size() < 8 ? ids.size() : 3;
+    for (std::size_t i = 0; i < numToShow; ++i) {
+        if (!results.isEmpty()) {
+            results.append(QStringLiteral(", "));
         }
+        results.append(constraintLabel(sketch, ids[i]));
     }
-    else {
-        const int numToShow = 3;
-        int more = ints.size() - numToShow;
-        for (int i = 0; i < numToShow; ++i) {
-            results.append(QStringLiteral("%1, ").arg(ints[i]));
-        }
-        results.append(QCoreApplication::translate("ViewProviderSketch", "and %1 more").arg(more));
+    if (numToShow < ids.size()) {
+        results.append(QStringLiteral(", "));
+        results.append(QCoreApplication::translate("ViewProviderSketch", "and %1 more")
+                           .arg(static_cast<int>(ids.size() - numToShow)));
     }
-    std::string testString = results.toStdString();
     return results;
 }
 
@@ -4470,32 +4516,38 @@ void ViewProviderSketch::UpdateSolverInformation()
         signalSetUp(QStringLiteral("empty"), tr("Empty sketch"), QString(), QString());
     }
     else if (dofs < 0 || hasConflicts) {// over-constrained sketch
+        const auto& conflicting = getSketchObject()->getLastConflicting();
+        const auto& redundant = getSketchObject()->getLastRedundant();
+        // If the solver could not single out conflicting constraints, the redundant ones are
+        // the culprits. Show those instead of an empty list.
+        const bool showRedundant = conflicting.empty() && !redundant.empty();
         signalSetUp(
             QStringLiteral("conflicting_constraints"),
             tr("Over-constrained:") + QLatin1String(" "),
-            QStringLiteral("#conflicting"),
-            QStringLiteral("(%1)").arg(intListHelper(getSketchObject()->getLastConflicting())));
+            showRedundant ? QStringLiteral("#redundant") : QStringLiteral("#conflicting"),
+            QStringLiteral("(%1)").arg(
+                constraintListHelper(getSketchObject(), showRedundant ? redundant : conflicting)));
     }
     else if (hasMalformed) {// malformed constraints
         signalSetUp(QStringLiteral("malformed_constraints"),
                     tr("Malformed constraints:") + QLatin1String(" "),
                     QStringLiteral("#malformed"),
                     QStringLiteral("(%1)").arg(
-                        intListHelper(getSketchObject()->getLastMalformedConstraints())));
+                        constraintListHelper(getSketchObject(), getSketchObject()->getLastMalformedConstraints())));
     }
     else if (hasRedundancies) {
         signalSetUp(
             QStringLiteral("redundant_constraints"),
             tr("Redundant constraints:") + QLatin1String(" "),
             QStringLiteral("#redundant"),
-            QStringLiteral("(%1)").arg(intListHelper(getSketchObject()->getLastRedundant())));
+            QStringLiteral("(%1)").arg(constraintListHelper(getSketchObject(), getSketchObject()->getLastRedundant())));
     }
     else if (hasPartiallyRedundant) {
         signalSetUp(QStringLiteral("partially_redundant_constraints"),
                     tr("Partially redundant:") + QLatin1String(" "),
                     QStringLiteral("#partiallyredundant"),
                     QStringLiteral("(%1)").arg(
-                        intListHelper(getSketchObject()->getLastPartiallyRedundant())));
+                        constraintListHelper(getSketchObject(), getSketchObject()->getLastPartiallyRedundant())));
     }
     else if (getSketchObject()->getLastSolverStatus() != GCS::SolveStatus::Success) {
         signalSetUp(QStringLiteral("solver_failed"),

@@ -61,10 +61,12 @@ TaskSketcherMessages::~TaskSketcherMessages()
 void TaskSketcherMessages::updateToolTip(const QString& link)
 {
     if (link == QStringLiteral("#conflicting")) {
-        setLinkTooltip(tr("Selects these conflicting constraints"));
+        setLinkTooltip(tr("Selects these conflicting constraints. Delete one of them, or set a "
+                          "dimension to reference mode, to fix the sketch."));
     }
     else if (link == QStringLiteral("#redundant")) {
-        setLinkTooltip(tr("Selects these redundant constraints"));
+        setLinkTooltip(tr("Selects these redundant constraints. They duplicate what other "
+                          "constraints already define and can be deleted."));
     }
     else if (link == QStringLiteral("#dofs")) {
         setLinkTooltip(tr("The sketch has unconstrained elements giving rise to those "

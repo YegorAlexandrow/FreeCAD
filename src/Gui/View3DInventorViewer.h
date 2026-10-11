@@ -599,6 +599,11 @@ public:
     bool getSceneBoundBox(SbBox3f& box) const;
     bool getSceneBoundBox(Base::BoundBox3d& box) const;
 
+    /// Set the pick radius in device independent pixels. The radius actually used by
+    /// pick actions (getPickRadius()) is scaled by the device pixel ratio, so that
+    /// picking and snapping feel the same on high-DPI screens.
+    void setPickRadius(float pickRadius) override;
+
 Q_SIGNALS:
     void cameraChanged();
 
@@ -659,9 +664,11 @@ private:
     void setCursorRepresentation(int mode);
     void aboutToDestroyGLContext();
     void createStandardCursors();
+    void applyScaledPickRadius();
     bool applyCameraState(const SoCamera& camera);
 
 private:
+    float logicalPickRadius = 8.0F;
     NaviCube* naviCube;
     SoAnnotation* naviCubeAnnotation;
     std::set<ViewProvider*> _ViewProviderSet;
