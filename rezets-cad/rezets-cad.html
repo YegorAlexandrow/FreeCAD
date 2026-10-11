@@ -198,6 +198,12 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #menu { position: fixed; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 22px rgb(0 0 0 / .2); padding: 4px; min-width: 190px; }
 #menu button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 6px 10px; border-radius: 5px; cursor: pointer; }
 #menu button:hover { background: var(--accent-soft); }
+.swatches { display: grid; grid-template-columns: repeat(7, 22px); gap: 5px; padding: 6px; }
+#menu .sw { display: block; width: 22px; height: 22px; border-radius: 5px; border: 1px solid rgb(0 0 0 / .2); cursor: pointer; padding: 0; }
+#menu .sw:hover { filter: brightness(1.1); background-image: none; }
+#menu .sw.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.swc { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; color: var(--fg-2); cursor: pointer; }
+.swc input { width: 26px; height: 22px; padding: 0; border: none; background: none; cursor: pointer; }
 #menu hr { border: none; border-top: 1px solid var(--line); margin: 4px; }
 #modal { position: fixed; inset: 0; z-index: 40; background: rgb(0 0 0 / .35); display: grid; place-items: center; padding: 16px; }
 .mbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: min(640px, 100%); max-height: 90%; display: flex; flex-direction: column; gap: 10px; padding: 14px; }
@@ -1304,13 +1310,14 @@ function buildPlanes() {
   groups.planes.visible = S.showPlanes !== false;
 }
 let bodyMeshObj = null, faceIndex = [];
-function updateBodyMesh() { updateBodyMesh0(); if (S.section || secGroup.children.length) applySection(); }
+function updateBodyMesh() { updateBodyMesh0(); if (S.section || secGroup.children.length) applySection(); requestRender(); }
 function updateBodyMesh0() {
   if (S.measure) { S.measure.picks = []; S.measure.result = null; groups.measure.clear(); }
   groups.body.clear(); bodyMeshObj = null; faceIndex = [];
   if (!S.body) { buildPlanes(); return; }
   const shaded = toCreasedNormals(S.body.clone(), 30 * Math.PI / 180);
-  const mat = new THREE.MeshStandardMaterial({ color: colors.body, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
+  const base = partColor(S.doc) || ('#' + colors.body.getHexString()); const vc = bodyColors(S.body, S.doc, S.cyls, base); if (vc) shaded.setAttribute('color', new THREE.BufferAttribute(vc, 3));
+  const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : base, vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
   bodyMeshObj = new THREE.Mesh(shaded, mat); groups.body.add(bodyMeshObj);
   groups.body.add(segLines(edgeTopology(S.body, S.cyls).display, lineMat(colors.edge, 1.4)));
   // Planar faces: triangles grouped by plane, for picking a face to sketch on.
@@ -1711,8 +1718,9 @@ canvas.addEventListener('pointermove', (ev) => {
 canvas.addEventListener('pointerup', (ev) => {
   const d = down; down = null;
   if (S.editing) { if (d && d.button === 0) sketchUp(ev, d); return; }
-  if (S.mode === 'asm' && !S.measure) { if (!d || d.button === 0) asmUp(ev, d); return; }
+  if (S.mode === 'asm' && !S.measure) { if (d && d.button === 2 && !d.moved && !S.pm) { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); if (c) { S.asmSel = c.id; asmRefresh(); openMenu(ev.clientX, ev.clientY, [['Цвет компонента…', () => compColorMenu(c, ev.clientX, ev.clientY)], ['Открыть деталь', () => switchDoc(c.doc)], [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(S.doc); asmRefresh(true); pushUndo(); }]]); } return; } if (!d || d.button === 0) asmUp(ev, d); return; }
   if (d && d.button === 0 && !d.moved) partClick(ev);
+  if (d && d.button === 2 && !d.moved && !S.measure && (S.mode === 'part' || S.mode === 'import')) partContext(ev);
 });
 canvas.addEventListener('dblclick', (ev) => { if (S.editing && S.tool === 'select') { const m = mouseToSketch(ev); const p = pick(m); if (p?.key.startsWith('c:')) openDimEditor(editSk().cons[p.key.slice(2)]); } else if (S.tool === 'line' && S.draw) { endDrawing(); } else if (S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); } });
 canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
@@ -3152,6 +3160,53 @@ function drwPrint() { const s = drwSvgText(); if (!s) return; const [W, H] = [dr
   const area = h('div', { id: 'printArea', style: 'display:none' }); area.innerHTML = s; document.body.append(st, area); const done = () => { st.remove(); area.remove(); window.removeEventListener('afterprint', done); }; window.addEventListener('afterprint', done); try { window.print(); } catch { done(); toast('Печать недоступна', 'warn'); } }
 
 // ============================================================================================
+// Appearance: a colour per part, per face (planar or cylindrical) and per assembly component.
+// ============================================================================================
+const SWATCHES = [['#9aa4b1', 'Серый'], ['#c9ced6', 'Алюминий'], ['#6f7782', 'Сталь'], ['#2b2f35', 'Чёрный'], ['#f2f2ee', 'Белый'], ['#c8463c', 'Красный'], ['#e0823a', 'Оранжевый'], ['#e6c247', 'Жёлтый'], ['#5aa66a', 'Зелёный'], ['#3f7fd1', 'Синий'], ['#5cb8c9', 'Бирюзовый'], ['#8a63c4', 'Фиолетовый'], ['#b08a5c', 'Дерево'], ['#d7b56d', 'Латунь']];
+// Which face a triangle lies on: the plane it spans, or a cylinder of the part.
+function faceKeyOfTri(a, b, c, cyls) {
+  const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)); if (n.lengthSq() < 1e-20) return null; n.normalize();
+  for (const cy of cyls || []) { const on = (v) => { const w = v.clone().sub(cy.p); const t = w.dot(cy.dir); return Math.abs(w.addScaledVector(cy.dir, -t).length() - cy.r) < 5e-3; }; if (on(a) && on(b) && on(c) && Math.abs(n.dot(cy.dir)) < 0.2) return { kind: 'cyl', p: cy.p.toArray(), dir: cy.dir.toArray(), r: cy.r }; }
+  return { kind: 'plane', n: n.toArray(), d: n.dot(a) };
+}
+function sameFace(x, y) {
+  if (!x || !y || x.kind !== y.kind) return false;
+  if (x.kind === 'plane') return V3(x.n).dot(V3(y.n)) > 1 - 1e-6 && Math.abs(x.d - y.d) < 1e-4;
+  return Math.abs(x.r - y.r) < 1e-4 && Math.abs(Math.abs(V3(x.dir).dot(V3(y.dir))) - 1) < 1e-6 && V3(x.p).sub(V3(y.p)).cross(V3(x.dir)).length() < 1e-3;
+}
+// Per-vertex colours for a body: the part colour, overridden face by face.
+function bodyColors(geo, data, cyls, base) {
+  const faces = data?.faceColors || []; const col = new THREE.Color(base); if (!faces.length) return null;
+  const pos = geo.getAttribute('position'); const out = new Float32Array(pos.count * 3); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); const fc = faces.map((f) => new THREE.Color(f.color));
+  for (let i = 0; i < pos.count; i += 3) {
+    a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const k = faceKeyOfTri(a, b, c, cyls); let cc = col;
+    if (k) for (let j = faces.length - 1; j >= 0; j--) if (sameFace(faces[j], k)) { cc = fc[j]; break; }
+    for (let q = 0; q < 3; q++) { out[3 * (i + q)] = cc.r; out[3 * (i + q) + 1] = cc.g; out[3 * (i + q) + 2] = cc.b; }
+  }
+  return out;
+}
+const partColor = (data) => data?.color || null;
+function colorPopover(x, y, current, onPick, extra = []) {
+  menu.textContent = ''; const grid = h('div', { class: 'swatches' });
+  for (const [hex, name] of SWATCHES) grid.append(h('button', { class: 'sw' + (current === hex ? ' on' : ''), title: name, style: `background:${hex}`, onclick: () => { closeMenu(); onPick(hex); } }));
+  const custom = h('input', { type: 'color', value: current || '#9aa4b1', title: 'Свой цвет' }); custom.onchange = () => { closeMenu(); onPick(custom.value); };
+  menu.append(grid, h('label', { class: 'swc' }, custom, 'Свой цвет'));
+  for (const it of extra) { if (!it) { menu.append(h('hr')); continue; } menu.append(h('button', { onclick: () => { closeMenu(); it[1](); } }, it[0])); }
+  menu.hidden = false; const r = menu.getBoundingClientRect(); menu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px'; menu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
+}
+function partContext(ev) {
+  if (!S.body || S.pm) return; const rc = rayFromEvent(ev); const hit = bodyMeshObj && keptHit(rc.intersectObject(bodyMeshObj)); const data = S.doc;
+  const items = [];
+  if (hit) {
+    const pos = S.body.getAttribute('position'); const t = hit.faceIndex; const v = [0, 1, 2].map((k) => new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k)); const key = faceKeyOfTri(...v, S.cyls);
+    if (key) items.push([key.kind === 'cyl' ? 'Цвет цилиндрической грани…' : 'Цвет грани…', () => colorPopover(ev.clientX, ev.clientY, data.faceColors?.find((f) => sameFace(f, key))?.color, (hex) => { data.faceColors = (data.faceColors || []).filter((f) => !sameFace(f, key)); data.faceColors.push({ ...key, color: hex }); updateBodyMesh(); pushUndo(); }, [null, ['Убрать цвет грани', () => { data.faceColors = (data.faceColors || []).filter((f) => !sameFace(f, key)); updateBodyMesh(); pushUndo(); }]])]);
+  }
+  items.push(['Цвет детали…', () => colorPopover(ev.clientX, ev.clientY, data.color, (hex) => { data.color = hex; updateBodyMesh(); pushUndo(); }, [null, ['Цвет по умолчанию', () => { delete data.color; updateBodyMesh(); pushUndo(); }], ...(data.faceColors?.length ? [['Убрать цвета всех граней', () => { data.faceColors = []; updateBodyMesh(); pushUndo(); }]] : [])])]);
+  openMenu(ev.clientX, ev.clientY, items);
+}
+function compColorMenu(c, x, y) { colorPopover(x, y, c.color, (hex) => { c.color = hex; asmRefresh(); pushUndo(); }, [null, ['Цвет детали', () => { delete c.color; asmRefresh(); pushUndo(); }]]); }
+
+// ============================================================================================
 // Mass properties and bill of materials. Densities in g/cm³.
 // ============================================================================================
 const MATERIALS = { pla: ['PLA', 1.24], petg: ['PETG', 1.27], abs: ['ABS', 1.04], nylon: ['Нейлон PA12', 1.01], steel: ['Сталь', 7.85], stainless: ['Нерж. сталь', 8.0], alu: ['Алюминий', 2.70], brass: ['Латунь', 8.5], copper: ['Медь', 8.96], wood: ['Сосна', 0.5] };
@@ -3802,8 +3857,10 @@ function asmRefresh(reanalyze) {
     const inf = docInfo(c.doc); if (!inf || inf.empty) return; const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id));
     const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.copy(displayT(asm, c)); g.userData.comp = c.virtual ? null : c.id;
     const sel = S.asmSel === c.id || (S.pm?.kind === 'cpat' && S.pm.pat.seeds.includes(c.id)) || (S.pm?.kind === 'explode' && S.pm.cur.comps.includes(c.id)); const hov = S.asmHover?.comp === c.id && !S.pm;
-    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(COMP_COLORS[i % COMP_COLORS.length]), metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
-    const mesh = new THREE.Mesh(shadedGeo(inf.geo), mat); mesh.userData.comp = c.virtual ? null : c.id; g.add(mesh);
+    const src = asm.comps[i] || c; const entD = docEntry(c.doc)?.data; const compCol = src.color || partColor(entD) || COMP_COLORS[i % COMP_COLORS.length];
+    let geoC = shadedGeo(inf.geo); const vc = bodyColors(inf.geo, entD, inf.cyls, compCol); if (vc) { geoC = geoC.clone(); geoC.setAttribute('color', new THREE.BufferAttribute(vc, 3)); }
+    const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : new THREE.Color(compCol), vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
+    const mesh = new THREE.Mesh(geoC, mat); mesh.userData.comp = c.virtual ? null : c.id; g.add(mesh);
     g.add(segLines(inf.edges, lineMat(colors.edge, 1.3)));
     asmGroup.add(g);
   });
@@ -3920,7 +3977,7 @@ function renderAsmTree() {
       svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name));
     r.onclick = () => { S.asmSel = c.id; asmRefresh(); };
     r.ondblclick = () => switchDoc(c.doc);
-    r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, [[c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Открыть деталь', () => switchDoc(c.doc)], null, ['Удалить', () => asmDeleteComp(c)]]); };
+    r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, [[c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]]); };
     tree.append(r);
   }
   if (!asm.comps.length) tree.append(h('div', { class: 'empty-tree' }, 'Сборка пустая. Нажмите «Вставить компонент».'));
@@ -4754,5 +4811,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
