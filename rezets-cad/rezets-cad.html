@@ -182,6 +182,10 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #corner .ok { color: var(--good); } #corner .cancel { color: var(--bad); }
 #viewbar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); display: flex; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); max-width: calc(100% - 120px); overflow-x: auto; }
 #viewbar button { border: none; background: none; padding: 4px 8px; border-radius: 5px; cursor: pointer; color: var(--fg-2); font-size: 12px; white-space: nowrap; }
+#viewbar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+#sectionBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); font-size: 12px; max-width: calc(100% - 24px); }
+#sectionBar input[type=range] { width: 160px; } #sectionBar .num { width: 64px; font-family: var(--font-num); }
+#sectionBar button { border: 1px solid var(--line); background: var(--bg); color: var(--fg-2); border-radius: 5px; padding: 2px 8px; cursor: pointer; } #sectionBar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 #viewbar button:hover { background: var(--panel-2); color: var(--fg); }
 #toasts { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; width: min(560px, calc(100% - 32px)); }
 .toast { pointer-events: auto; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 8px 12px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); display: flex; gap: 10px; align-items: center; line-height: 1.4; width: 100%; }
@@ -245,8 +249,9 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div id="editLayer"></div>
     <div id="relbar" hidden></div>
     <div id="viewbar">
-      <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button>
+      <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button>
     </div>
+    <div id="sectionBar" hidden></div>
     <div id="corner"></div>
     <div id="toasts"></div>
     <div id="loading">Загрузка геометрического ядра…</div>
@@ -1234,7 +1239,7 @@ function rebuild() {
 // Three.js scene
 // ============================================================================================
 const canvas = $('cv'); const view = $('view'); const overlay = $('overlay');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, stencil: true }); renderer.localClippingEnabled = true;
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 const scene = new THREE.Scene();
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -100000, 100000);
@@ -1293,7 +1298,8 @@ function buildPlanes() {
   groups.planes.visible = S.showPlanes !== false;
 }
 let bodyMeshObj = null, faceIndex = [];
-function updateBodyMesh() {
+function updateBodyMesh() { updateBodyMesh0(); if (S.section || secGroup.children.length) applySection(); }
+function updateBodyMesh0() {
   if (S.measure) { S.measure.picks = []; S.measure.result = null; groups.measure.clear(); }
   groups.body.clear(); bodyMeshObj = null; faceIndex = [];
   if (!S.body) { buildPlanes(); return; }
@@ -1355,6 +1361,7 @@ function fitView() {
   camera.zoom = Math.max(0.05, half * Math.min(1, asp) / (sphere.radius * 1.25 + 1)); camera.updateProjectionMatrix(); controls.update(); requestRender();
 }
 function viewCmd(k) {
+  if (k === 'section') return toggleSection();
   if (k === 'fit') return fitView();
   if (k === 'iso') return setView(new THREE.Vector3(1, 0.85, 1.15), new THREE.Vector3(0, 1, 0));
   if (k === 'normal') {
@@ -1708,7 +1715,7 @@ canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 function rayFromEvent(ev) { const r = canvas.getBoundingClientRect(); const ndc = new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1); const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); return rc; }
 function partPickAt(ev) {
   const rc = rayFromEvent(ev);
-  if (bodyMeshObj) { const hit = rc.intersectObject(bodyMeshObj)[0]; if (hit) { const face = faceForTriangle(hit.faceIndex); if (face) return { face, point: hit.point }; } }
+  if (bodyMeshObj) { const hit = keptHit(rc.intersectObject(bodyMeshObj)); if (hit) { const face = faceForTriangle(hit.faceIndex); if (face) return { face, point: hit.point }; } }
   if (groups.planes.visible) { const hit = rc.intersectObjects(groups.planes.children.filter((o) => o.userData.plane && (o.visible || !S.body || S.pm?.kind === 'pickPlane')))[0]; if (hit) return { plane: hit.object.userData.plane }; }
   if (S.pm?.regionsOf) return null; return null;
 }
@@ -2671,6 +2678,84 @@ function openEdgePM(f, isNew) {
 }
 
 // ============================================================================================
+// Section view: a clipping plane through the part or assembly, the cut faces filled by the
+// stencil technique (inside of a solid = more back faces than front faces behind the plane).
+// ============================================================================================
+const secPlane = new THREE.Plane(); const secGroup = new THREE.Group(); scene.add(secGroup);
+function secBounds() { const box = new THREE.Box3(); for (const g of [S.mode === 'asm' ? asmGroup : groups.body]) g.traverse((o) => { if (o.isMesh && !o.userData.sec) box.expandByObject(o); }); return box; }
+function updateSecPlane() {
+  const sc = S.section; if (!sc) return; const pl = PLANES[sc.plane] || PLANES.front; const n = V3(pl.n).multiplyScalar(sc.flip ? 1 : -1);
+  const o = V3(pl.o).addScaledVector(V3(pl.n), sc.off); secPlane.setFromNormalAndCoplanarPoint(n, o);
+}
+// Cut faces: the plane crossed with every triangle gives segments, chained into loops, nested
+// into outer boundaries and holes and triangulated. Exact, and gives the section area.
+function sectionLoops(geo, M, plane) {
+  const pos = geo.getAttribute('position'); const segs = []; const v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]; const d = [0, 0, 0];
+  for (let i = 0; i < pos.count; i += 3) {
+    for (let k = 0; k < 3; k++) { v[k].fromBufferAttribute(pos, i + k); if (M) v[k].applyMatrix4(M); d[k] = plane.distanceToPoint(v[k]); if (Math.abs(d[k]) < 1e-9) d[k] = 1e-9; }
+    const pts = []; for (let k = 0; k < 3; k++) { const a = k, b = (k + 1) % 3; if ((d[a] > 0) !== (d[b] > 0)) pts.push(v[a].clone().lerp(v[b], d[a] / (d[a] - d[b]))); }
+    if (pts.length === 2 && pts[0].distanceToSquared(pts[1]) > 1e-14) segs.push(pts);
+  }
+  const q = 1e-4; const key = (p) => `${Math.round(p.x / q)},${Math.round(p.y / q)},${Math.round(p.z / q)}`;
+  const adj = new Map(); segs.forEach((sg, i) => { for (const p of sg) { const k = key(p); if (!adj.has(k)) adj.set(k, []); adj.get(k).push(i); } });
+  const used = new Uint8Array(segs.length); const loops = [];
+  for (let s0 = 0; s0 < segs.length; s0++) {
+    if (used[s0]) continue; used[s0] = 1; const loop = [segs[s0][0]]; let cur = segs[s0][1]; let guard = 0;
+    while (guard++ < segs.length) {
+      if (cur.distanceToSquared(loop[0]) < q * q * 4 && loop.length > 2) break; loop.push(cur);
+      const next = (adj.get(key(cur)) || []).find((j) => !used[j]); if (next === undefined) { loop.length = 0; break; }
+      used[next] = 1; const sg = segs[next]; cur = key(sg[0]) === key(cur) ? sg[1] : sg[0];
+    }
+    if (loop.length > 2) loops.push(loop);
+  }
+  return loops;
+}
+function sectionCap(loops, plane, color) {
+  const n = plane.normal; const u = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(n, u);
+  const L2 = loops.map((l) => l.map((p) => new THREE.Vector2(p.dot(u), p.dot(w)))); const area = (P) => { let a = 0; for (let i = 0; i < P.length; i++) { const r = P[(i + 1) % P.length]; a += P[i].x * r.y - r.x * P[i].y; } return a / 2; };
+  const inside = (pt, P) => { let c = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) if ((P[i].y > pt.y) !== (P[j].y > pt.y) && pt.x < (P[j].x - P[i].x) * (pt.y - P[i].y) / (P[j].y - P[i].y) + P[i].x) c = !c; return c; };
+  const depth = L2.map((P, i) => L2.reduce((acc, Q, j) => acc + (j !== i && Math.abs(area(Q)) > Math.abs(area(P)) && inside(P[0], Q) ? 1 : 0), 0));
+  const pos = []; let total = 0;
+  L2.forEach((P, i) => {
+    if (depth[i] % 2) return; const outer = area(P) < 0 ? P.slice().reverse() : P;
+    const holes = L2.filter((Q, j) => depth[j] === depth[i] + 1 && inside(Q[0], P)).map((Q) => (area(Q) > 0 ? Q.slice().reverse() : Q));
+    total += Math.abs(area(P)) - holes.reduce((a2, Q) => a2 + Math.abs(area(Q)), 0);
+    const all = outer.concat(...holes); const to3 = (p) => u.clone().multiplyScalar(p.x).addScaledVector(w, p.y).addScaledVector(n, -plane.constant);
+    for (const t of THREE.ShapeUtils.triangulateShape(outer, holes)) for (const k of t) { const p3 = to3(all[k]); pos.push(p3.x, p3.y, p3.z); }
+  });
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.computeVertexNormals();
+  const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color, metalness: 0, roughness: 0.85, side: THREE.DoubleSide })); m.userData.sec = true; m.userData.area = total; return m;
+}
+function applySection() {
+  secGroup.clear(); const on = !!S.section; if (on) updateSecPlane();
+  const planes = on ? [secPlane] : null; const solids = [];
+  for (const g of [groups.body, asmGroup]) g.traverse((o) => { if (o.userData.sec) return; if (o.material) { o.material.clippingPlanes = planes; o.material.needsUpdate = true; } if (o.isMesh && (S.mode === 'asm') === (g === asmGroup)) solids.push(o); });
+  if (!on) { requestRender(); return; }
+  let area = 0;
+  for (const m of solids) { m.updateMatrixWorld(true); const loops = sectionLoops(m.geometry, m.matrixWorld, secPlane); if (!loops.length) continue;
+    const col = m.material.color ? m.material.color.clone().lerp(colors['geo-sel'], 0.55) : colors['geo-sel']; const cap = sectionCap(loops, secPlane, col); area += cap.userData.area; secGroup.add(cap);
+    const l = segLines(loops.flatMap((lp) => lp.flatMap((p, i) => [...p.toArray(), ...lp[(i + 1) % lp.length].toArray()])), lineMat(colors.edge, 1.3)); l.userData.sec = true; secGroup.add(l); }
+  S.section.area = area; const a = $('secArea'); if (a) a.textContent = `S = ${fmt(area, 2)} мм²`;
+  requestRender();
+}
+function renderSectionBar() {
+  const bar = $('sectionBar'); const sc = S.section; bar.hidden = !sc; $('bSection').setAttribute('aria-pressed', String(!!sc)); bar.textContent = ''; if (!sc) return;
+  const pl = PLANES[sc.plane]; const bb = secBounds(); const n = V3(pl.n); let lo = -50, hi = 50;
+  if (!bb.isEmpty()) { const ds = [bb.min.x, bb.max.x].flatMap((x) => [bb.min.y, bb.max.y].flatMap((y) => [bb.min.z, bb.max.z].map((z) => n.dot(new THREE.Vector3(x, y, z)) - n.dot(V3(pl.o))))); lo = Math.floor(Math.min(...ds)); hi = Math.ceil(Math.max(...ds)); }
+  const rng = h('input', { type: 'range', min: String(lo), max: String(hi), step: String(Math.max(0.1, (hi - lo) / 400)), value: String(sc.off), 'aria-label': 'Положение сечения' });
+  const num = h('input', { type: 'text', class: 'num', value: fmt(sc.off, 2), 'aria-label': 'Смещение, мм' });
+  rng.oninput = () => { sc.off = +rng.value; num.value = fmt(sc.off, 2); applySection(); };
+  num.onchange = () => { const v = evalExpr(num.value); if (Number.isFinite(v)) { sc.off = v; rng.value = String(v); applySection(); } else num.value = fmt(sc.off, 2); };
+  num.addEventListener('keydown', (e) => e.stopPropagation());
+  bar.append(...Object.entries(PLANES).map(([k, p]) => h('button', { 'aria-pressed': String(sc.plane === k), onclick: () => { sc.plane = k; sc.off = 0; renderSectionBar(); applySection(); } }, p.label)), rng, num, h('span', {}, 'мм'),
+    h('span', { id: 'secArea', class: 'num', style: 'width:auto;color:var(--fg-2)' }, sc.area != null ? `S = ${fmt(sc.area, 2)} мм²` : ''),
+    h('button', { title: 'Показать другую половину', onclick: () => { sc.flip = !sc.flip; applySection(); } }, '⇄'), h('button', { title: 'Закрыть разрез', onclick: () => toggleSection() }, '✕'));
+}
+function toggleSection() { S.section = S.section ? null : { plane: 'front', off: 0, flip: false }; renderSectionBar(); applySection(); }
+// Picking ignores what the section has cut away.
+const keptHit = (hits) => (S.section ? hits.find((h2) => secPlane.distanceToPoint(h2.point) >= -1e-6) : hits[0]);
+
+// ============================================================================================
 // Variables (like SolidWorks equations): dimensions and feature parameters may be expressions.
 // ============================================================================================
 const VAR_NAME = /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*$/;
@@ -3487,7 +3572,7 @@ function asmRefresh(reanalyze) {
     g.add(segLines(inf.edges, lineMat(colors.edge, 1.3)));
     asmGroup.add(g);
   });
-  drawMatePicks(); renderSide(); setHint(); requestRender();
+  drawMatePicks(); renderSide(); setHint(); if (S.section || secGroup.children.length) applySection(); requestRender();
 }
 const shadedCache = new WeakMap(); function shadedGeo(g) { if (!shadedCache.has(g)) shadedCache.set(g, toCreasedNormals(g.clone(), 30 * Math.PI / 180)); return shadedCache.get(g); }
 // Vertices and edges of components near the cursor, for mates (in component coordinates).
@@ -3515,7 +3600,7 @@ function asmEdgePick(ev) {
 }
 function asmPick(ev) {
   const rc = rayFromEvent(ev); const meshes = []; asmGroup.traverse((o) => { if (o.isMesh && o.userData.comp) meshes.push(o); });
-  asmGroup.updateMatrixWorld(true); const hit = rc.intersectObjects(meshes)[0]; if (!hit) return null;
+  asmGroup.updateMatrixWorld(true); const hit = keptHit(rc.intersectObjects(meshes)); if (!hit) return null;
   const c = S.doc.comps.find((x) => x.id === hit.object.userData.comp); const inf = docInfo(c.doc);
   const e = inf.triEnt[hit.faceIndex]; const ent = e >= 0 ? inf.ents[e] : null;
   return { comp: c.id, point: hit.point.clone(), ent: ent && { kind: ent.kind, p: ent.p.toArray(), d: (ent.n || ent.d).toArray(), r: ent.r, e } };
@@ -4374,5 +4459,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
