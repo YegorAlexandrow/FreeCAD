@@ -301,6 +301,8 @@ const ICON = {
   dim: '<path d="M4 8v8M20 8v8M4 12h16"/><path d="M7 10l-3 2 3 2M17 10l3 2-3 2"/>',
   constr: '<path d="M5 19 19 5" stroke-dasharray="3 2.5"/>',
   del: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/>',
+  shell: '<path d="M4 8l8-4 8 4v8l-8 4-8-4z"/><path d="M7 9.5l5-2.5 5 2.5v5l-5 2.5-5-2.5z" stroke-dasharray="2 1.5"/>',
+  hole: '<path d="M7 4h10M9 4v5h6V4M10.5 9v10M13.5 9v10M10.5 19 12 21l1.5-2"/>',
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
   trim: '<path d="M4 12h5M15 12h5" /><path d="M9 12h6" stroke-dasharray="1.5 2"/><path d="M12 4v4M12 16v4"/><path d="M9.5 9.5 14.5 14.5"/>',
@@ -1045,6 +1047,8 @@ function computeBody(features) {
     let err = null;
     try {
       if (f.type === 'fillet' || f.type === 'chamfer') { body = applyEdgeFeature(f, body); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
@@ -1599,6 +1603,7 @@ function regionAt(ev) {
 }
 function partHover(ev) {
   if (S.pm?.pattern) { patternPick(ev, false); return; }
+  if (S.pm?.shell) { const p = partPickAt(ev); showFaceHover(p?.face || null); return; }
   if (S.pm?.edgePick) { S.pm.hoverEdge = pickEdge(ev, S.pm.topo); drawEdgeSelection(); return; }
   if (S.measure) { S.measure.hover = measurePick(ev); drawMeasure(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); S.hoverRegion = r ? r.id : null; drawRegions(); return; }
@@ -1608,6 +1613,7 @@ function partHover(ev) {
 }
 function partClick(ev) {
   if (S.pm?.pattern) { patternPick(ev, true); return; }
+  if (S.pm?.shell) { shellClick(ev); return; }
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) toggleRegion(r.id); return; }
@@ -2204,6 +2210,7 @@ function startSketch(plane, existing) {
 function exitSketch() {
   if (!S.editing) return; const f = editF(); S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
   setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo();
+  if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } }
   const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. Нажмите «Вытянуть» или «Повернуть».`);
 }
 const plural = (n, a, b, c) => { const m = n % 10, m2 = n % 100; return m === 1 && m2 !== 11 ? a : m >= 2 && m <= 4 && (m2 < 10 || m2 >= 20) ? b : c; };
@@ -2517,6 +2524,173 @@ function openEdgePM(f, isNew) {
 }
 
 // ============================================================================================
+// Hole wizard: hole positions are the points (and circle centres) of a sketch, so they are
+// dimensioned with the sketch solver. Each hole is an exact solid of revolution.
+// ============================================================================================
+// Metric sizes: clearance (normal fit), counterbore for ISO 4762, countersink 90° for ISO 10642, tap drill.
+const HOLE_STD = {
+  M2: { clr: 2.4, cbD: 4.4, cbH: 2.3, csD: 4.4, tap: 1.6 }, M2_5: { clr: 2.9, cbD: 5.5, cbH: 2.8, csD: 5.5, tap: 2.05 },
+  M3: { clr: 3.4, cbD: 6.5, cbH: 3.3, csD: 6.5, tap: 2.5 }, M4: { clr: 4.5, cbD: 8, cbH: 4.4, csD: 8.4, tap: 3.3 },
+  M5: { clr: 5.5, cbD: 10, cbH: 5.4, csD: 10.4, tap: 4.2 }, M6: { clr: 6.6, cbD: 11, cbH: 6.4, csD: 12.4, tap: 5 },
+  M8: { clr: 9, cbD: 15, cbH: 8.6, csD: 16.4, tap: 6.8 }, M10: { clr: 11, cbD: 18, cbH: 10.6, csD: 20.4, tap: 8.5 }, M12: { clr: 13.5, cbD: 20, cbH: 12.6, csD: 24.4, tap: 10.2 },
+};
+const HOLE_KINDS = [['simple', 'Простое'], ['cbore', 'Цековка'], ['csink', 'Зенковка'], ['tap', 'Под резьбу']];
+const stdLabel = (k) => k.replace('_', ',');
+function applyHoleStd(f) {
+  const s = HOLE_STD[f.std]; if (!s) return;
+  f.dia = f.kind === 'tap' ? s.tap : s.clr; f.cbD = s.cbD; f.cbH = s.cbH; f.csD = s.csD;
+}
+function holePoints(sf) {
+  const sk = sf.sk; const out = []; const used = new Set();
+  for (const e of Object.values(sk.ents)) if (e.t === 'circle' && !e.constr && !e.ext) { out.push(gp(sk, e.c)); used.add(e.c); }
+  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !used.has(id)) out.push(p);
+  return out.map((p) => toWorld(sf.plane, p.x, p.y));
+}
+// Half profile in (radius, depth) with depth growing into the material, from just above the face.
+function holeProfile(f, depth) {
+  const r = f.dia / 2; const top = -0.01; const pts = [];
+  if (f.kind === 'cbore') { pts.push([0, top], [f.cbD / 2, top], [f.cbD / 2, f.cbH], [r, f.cbH]); }
+  else if (f.kind === 'csink') { const ang = (f.csA || 90) / 2 * Math.PI / 180; const R = f.csD / 2; const h0 = (R - r) / Math.tan(ang); pts.push([0, top], [R + Math.tan(ang) * 0.01, top], [r, h0]); }
+  else pts.push([0, top], [r, top]);
+  pts.push([r, depth]);
+  if (f.end !== 'through' && f.tip !== false) pts.push([0, depth + r / Math.tan(59 * Math.PI / 180)]); else pts.push([0, depth]);
+  return pts;
+}
+function holeTool(f, body, cyls) {
+  const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
+  const P = holePoints(sf); if (!P.length) throw new Error('В эскизе нет точек для отверстий: поставьте точки инструментом «Точка»');
+  if (!(f.dia > 0)) throw new Error('Задайте диаметр');
+  if (f.kind === 'cbore' && !(f.cbD > f.dia)) throw new Error('Диаметр цековки должен быть больше отверстия');
+  if (f.kind === 'csink' && !(f.csD > f.dia)) throw new Error('Диаметр зенковки должен быть больше отверстия');
+  const n = new THREE.Vector3(...sf.plane.n).multiplyScalar(f.dir === -1 ? -1 : 1).negate();
+  let depth = f.depth;
+  if (f.end === 'through') { if (!body) throw new Error('Нечего сверлить'); body.computeBoundingBox(); const sph = body.boundingBox.getBoundingSphere(new THREE.Sphere()); depth = 2 * (sph.radius + sph.center.distanceTo(P[0])) + 10; }
+  const prof = holeProfile(f, depth); const loop = { pts: prof.map(([r, z]) => [-r, z]), holes: [] };
+  const base = revolveGeometry([loop], [0, 0], [0, 1], 360);
+  const u = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(u, n);
+  const tools = [];
+  for (const p of P) {
+    const M = new THREE.Matrix4().makeBasis(u, n, w).setPosition(p); const g = base.clone(); g.applyMatrix4(M); if (M.determinant() < 0) { const pos = g.getAttribute('position'); for (let i = 0; i < pos.count; i += 3) { const x = pos.getX(i + 1), y = pos.getY(i + 1), z = pos.getZ(i + 1); pos.setXYZ(i + 1, pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2)); pos.setXYZ(i + 2, x, y, z); } }
+    g.computeVertexNormals(); tools.push(g);
+    cyls.push({ p: p.clone(), dir: n.clone(), r: f.dia / 2 }); if (f.kind === 'cbore') cyls.push({ p: p.clone(), dir: n.clone(), r: f.cbD / 2 });
+  }
+  return tools;
+}
+function cmdHole() {
+  if (S.measure) closeMeasure();
+  if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
+  let sf = null;
+  if (S.editing) { const id = S.editing; exitSketch(); sf = featById(id); }
+  else if (S.selectedTree?.startsWith('feat:')) { const f = featById(S.selectedTree.slice(5)); if (f?.type === 'sketch') sf = f; }
+  if (!sf) { const act = S.doc.features.slice(0, rollbackIndex()); for (let i = act.length - 1; i >= 0; i--) { const f = act[i]; if (f.type === 'sketch' && !S.doc.features.some((g) => g.sketch === f.id) && holePointsCount(f)) { sf = f; break; } } }
+  if (!sf || !holePointsCount(sf)) {
+    if (S.selectedTree === 'face' && S.pickedFace) { startSketch(S.pickedFace); setTool('point'); S.afterSketch = 'hole'; toast('Поставьте точки центров отверстий и задайте их размерами, затем закройте эскиз', 'info'); return; }
+    toast('Выберите грань для отверстий, затем нажмите «Отверстие» — откроется эскиз для точек центров', 'info'); return;
+  }
+  const f = { id: fid(), type: 'hole', name: nextName('Отверстие'), sketch: sf.id, kind: 'simple', std: 'M5', end: 'through', depth: 10, dir: 1, csA: 90, tip: true };
+  applyHoleStd(f);
+  if (S.body) { const p = holePoints(sf)[0]; const nn = new THREE.Vector3(...sf.plane.n); f.dir = isInside(S.body, p.clone().addScaledVector(nn, 0.05)) ? -1 : 1; }
+  openPM({ kind: 'feature', feature: f, isNew: true });
+}
+function holePointsCount(sf) { try { return holePoints(sf).length; } catch { return 0; } }
+function renderHolePM() {
+  const pm = S.pm; const f = pm.feature; const err = S.errors[f.id]; const sf = featById(f.sketch);
+  const refresh = () => { renderSide(); schedulePreview(); };
+  const body = h('div', { class: 'pm' }, pmHeader('Отверстие', ICON.hole));
+  body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), seg(HOLE_KINDS, f.kind, (v) => { f.kind = v; applyHoleStd(f); refresh(); })));
+  const sel = h('select', { id: 'pmStd' }, [...Object.keys(HOLE_STD).map((k) => h('option', { value: k, selected: f.std === k }, stdLabel(k))), h('option', { value: '', selected: !f.std }, 'Свой размер')]);
+  sel.onchange = () => { f.std = sel.value || null; applyHoleStd(f); refresh(); };
+  const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, f.kind === 'tap' ? 'Резьба' : 'Под крепёж'), h('label', { class: 'field' }, h('span', {}, 'Размер'), sel),
+    numField(f.kind === 'tap' ? 'Сверло' : 'Диаметр', 'pmDia', f.dia, (v) => { f.dia = v; f.std = null; refresh(); }));
+  if (f.kind === 'cbore') grp.append(numField('⌀ цековки', 'pmCbD', f.cbD, (v) => { f.cbD = v; f.std = null; refresh(); }), numField('Глубина цековки', 'pmCbH', f.cbH, (v) => { f.cbH = v; f.std = null; refresh(); }));
+  if (f.kind === 'csink') grp.append(numField('⌀ зенковки', 'pmCsD', f.csD, (v) => { f.csD = v; f.std = null; refresh(); }), numField('Угол', 'pmCsA', f.csA, (v) => { f.csA = Math.min(179, v); refresh(); }, '°'));
+  body.append(grp);
+  body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Глубина'), seg([['blind', 'На глубину'], ['through', 'Насквозь']], f.end, (v) => { f.end = v; refresh(); }),
+    f.end === 'blind' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
+    f.end === 'blind' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.tip !== false, onchange: (e) => { f.tip = e.target.checked; schedulePreview(); } }), 'Конус от сверла 118°') : null,
+    h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление')));
+  body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Положение'), h('div', { class: 'note' }, `${sf?.name || '?'}: ${sf ? holePointsCount(sf) : 0} ${plural(sf ? holePointsCount(sf) : 0, 'точка', 'точки', 'точек')}. Положение задаётся размерами в эскизе.`),
+    h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const s2 = featById(f.sketch); closePM(true); startSketch(s2.plane, s2); setTool('point'); } }, 'Редактировать точки'))));
+  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  side.append(body);
+}
+
+// ============================================================================================
+// Shell: the body minus an inner body. Every vertex moves so that each face it touches moves
+// inward by the wall thickness (exact for planar faces); faces to remove move slightly outward,
+// so the inner body opens them.
+// ============================================================================================
+const planeKeyOf = (n, d) => ({ n: [n.x, n.y, n.z], d });
+const onFacePlane = (n, d, f) => n.x * f.n[0] + n.y * f.n[1] + n.z * f.n[2] > 1 - 1e-6 && Math.abs(d - f.d) < 1e-4;
+function innerOffsetBody(body, t, open) {
+  const pos = body.getAttribute('position'); const q = 1e-5; const key = (x, y, z) => `${Math.round(x / q)},${Math.round(y / q)},${Math.round(z / q)}`;
+  const vid = new Map(); const V = []; const T = [];
+  for (let i = 0; i < pos.count; i++) { const k = key(pos.getX(i), pos.getY(i), pos.getZ(i)); if (!vid.has(k)) { vid.set(k, V.length); V.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i))); } T.push(vid.get(k)); }
+  const inc = V.map(() => []);
+  for (let i = 0; i < T.length; i += 3) {
+    const a = V[T[i]], b = V[T[i + 1]], c = V[T[i + 2]]; const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)); if (n.lengthSq() < 1e-20) continue; n.normalize();
+    const d = n.dot(a); const s = open.some((f) => onFacePlane(n, d, f)) ? Math.min(0.2, t / 4) : -t;
+    for (const k of [T[i], T[i + 1], T[i + 2]]) { const L = inc[k]; if (!L.some((x) => x.n.dot(n) > 1 - 1e-9)) L.push({ n, s }); }
+  }
+  const W = inc.map((L) => {
+    if (!L.length) return new THREE.Vector3();
+    if (L.length === 1) return L[0].n.clone().multiplyScalar(L[0].s);
+    // Least squares on n_i · w = s_i (exact when three independent faces meet), minimum norm otherwise.
+    const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+    for (const { n, s } of L) { const v = [n.x, n.y, n.z]; for (let i = 0; i < 3; i++) { r[i] += v[i] * s; for (let j = 0; j < 3; j++) A[i][j] += v[i] * v[j]; } }
+    const det = new THREE.Matrix3().set(...A[0], ...A[1], ...A[2]).determinant();
+    if (Math.abs(det) > 1e-6 * L.length) { const x = solveLinear(A, r); return new THREE.Vector3(...x); }
+    // Two (nearly) independent directions: solve in their span.
+    const n1 = L[0].n; let n2 = L.find((x) => Math.abs(x.n.dot(n1)) < 1 - 1e-9)?.n || n1; const s1 = L[0].s, s2 = L.find((x) => x.n === n2).s;
+    if (n2 === n1) return n1.clone().multiplyScalar(s1);
+    const c = n1.dot(n2); const den = 1 - c * c; const a = (s1 - c * s2) / den, b = (s2 - c * s1) / den; return n1.clone().multiplyScalar(a).addScaledVector(n2, b);
+  });
+  const out = new Float32Array(T.length * 3);
+  T.forEach((k, i) => { const p = V[k].clone().add(W[k]); out[3 * i] = p.x; out[3 * i + 1] = p.y; out[3 * i + 2] = p.z; });
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(out, 3)); g.computeVertexNormals(); return g;
+}
+function applyShell(f, body, cyls) {
+  if (!body) throw new Error('Сначала создайте тело'); if (!(f.t > 0)) throw new Error('Задайте толщину');
+  const inner = innerOffsetBody(body, f.t, f.faces || []); const vb = geoVolume(body), vi = geoVolume(inner);
+  if (!(vi > 0) || vi >= vb) throw new Error('Толщина слишком большая для этой детали');
+  const out = boolean(body, inner, SUBTRACTION); const vo = geoVolume(out);
+  if (!out.getAttribute('position').count || vo <= 0 || vo >= vb) throw new Error('Оболочка не получилась: уменьшите толщину');
+  const added = []; for (const c of cyls) for (const r of [c.r - f.t, c.r + f.t]) if (r > 1e-6) added.push({ p: c.p.clone(), dir: c.dir.clone(), r });
+  return { body: out, cyls: added };
+}
+function cmdShell() {
+  if (S.editing) exitSketch(); if (S.measure) closeMeasure();
+  if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
+  const f = { id: fid(), type: 'shell', name: nextName('Оболочка'), t: 2, faces: [] };
+  if (S.selectedTree === 'face' && S.pickedFace) { const n = V3(S.pickedFace.n); f.faces.push(planeKeyOf(n, n.dot(V3(S.pickedFace.o)))); }
+  openShellPM(f, true);
+}
+function openShellPM(f, isNew) { openPM({ kind: 'feature', feature: f, isNew, shell: true }); drawShellFaces(); }
+function drawShellFaces() {
+  groups.measure.clear(); const pm = S.pm; if (!pm?.shell) { requestRender(); return; }
+  const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === pm.feature.id); const base = computeBody(S.doc.features.slice(0, idx)).body; if (!base) return;
+  const pos = base.getAttribute('position'); const arr = []; const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)); if (n.lengthSq() < 1e-20) continue; n.normalize(); const d = n.dot(a);
+    if (pm.feature.faces.some((f) => onFacePlane(n, d, f))) for (const v of [a, b, c]) { const w = v.clone().addScaledVector(n, 0.03); arr.push(w.x, w.y, w.z); } }
+  if (arr.length) { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors['geo-sel'], transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide })); m.renderOrder = 15; groups.measure.add(m); }
+  requestRender();
+}
+function shellClick(ev) {
+  const p = partPickAt(ev); if (!p?.face) return; const f = S.pm.feature; const n = p.face.n.clone(); const d = p.face.d;
+  const i = f.faces.findIndex((x) => onFacePlane(n, d, x)); if (i >= 0) f.faces.splice(i, 1); else f.faces.push(planeKeyOf(n, d));
+  renderSide(); drawShellFaces(); schedulePreview();
+}
+function renderShellPM() {
+  const f = S.pm.feature; const err = S.errors[f.id];
+  const body = h('div', { class: 'pm' }, pmHeader('Оболочка', ICON.shell),
+    h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Толщина'), numField('Стенка', 'pmThick', f.t, (v) => { f.t = v; schedulePreview(); })),
+    h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Удаляемые грани: ${f.faces.length}`), h('div', { class: 'note' }, 'Щёлкайте плоские грани, которые нужно открыть. Без граней получится закрытая полость.'),
+      f.faces.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { f.faces = []; renderSide(); drawShellFaces(); schedulePreview(); } }, 'Очистить')) : null));
+  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  side.append(body);
+}
+
+// ============================================================================================
 // Patterns and mirror: the tools of the seed features are rebuilt and placed again by rigid
 // transforms, so every copy is as exact as the original. Mirror without seeds mirrors the body.
 // ============================================================================================
@@ -2578,9 +2752,9 @@ function applyPattern(f, body, cyls, features) {
   if (!seeds.length) throw new Error('Выберите элементы для копирования');
   let out = body;
   for (const sd of seeds) {
-    if (sd.type !== 'extrude' && sd.type !== 'revolve') throw new Error(`«${sd.name}»: копировать можно вытягивания и вращения`);
-    const own = []; const tool = buildTool(sd, out, own);
-    for (const M of mats) { out = boolean(out, placeTool(tool, M), sd.mode === 'cut' ? SUBTRACTION : ADDITION); for (const c of own) added.push(placeCyl(c, M)); }
+    if (sd.type !== 'extrude' && sd.type !== 'revolve' && sd.type !== 'hole') throw new Error(`«${sd.name}»: копировать можно вытягивания, вращения и отверстия`);
+    const own = []; const tools = sd.type === 'hole' ? holeTool(sd, out, own) : [buildTool(sd, out, own)]; const op = sd.type === 'hole' || sd.mode === 'cut' ? SUBTRACTION : ADDITION;
+    for (const M of mats) { for (const tool of tools) out = boolean(out, placeTool(tool, M), op); for (const c of own) added.push(placeCyl(c, M)); }
   }
   if (!out.getAttribute('position').count) throw new Error('Результат пустой');
   return { body: out, cyls: added };
@@ -2603,8 +2777,9 @@ function isSymmetric(body, cyls, M) {
 function cmdPattern(type) {
   if (S.editing) exitSketch(); if (S.measure) closeMeasure();
   if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
-  const last = [...S.doc.features.slice(0, rollbackIndex())].reverse().find((x) => (x.type === 'extrude' || x.type === 'revolve') && !x.suppressed);
-  const sel = S.selectedTree?.startsWith('feat:') ? featById(S.selectedTree.slice(5)) : null; const seed = sel && (sel.type === 'extrude' || sel.type === 'revolve') ? sel : type === 'mirror' ? null : last;
+  const okSeed = (x) => x && (x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole') && !x.suppressed;
+  const last = [...S.doc.features.slice(0, rollbackIndex())].reverse().find(okSeed);
+  const sel = S.selectedTree?.startsWith('feat:') ? featById(S.selectedTree.slice(5)) : null; const seed = okSeed(sel) ? sel : type === 'mirror' ? null : last;
   const f = type === 'lpattern' ? { id: fid(), type, name: nextName('ЛинейныйМассив'), feats: seed ? [seed.id] : [], dir: { axis: 'x' }, n: 3, d: 20, flip: false, dir2: null, n2: 2, d2: 20, flip2: false }
     : type === 'cpattern' ? { id: fid(), type, name: nextName('КруговойМассив'), feats: seed ? [seed.id] : [], axis: { axis: 'y' }, n: 4, angle: 360, flip: false }
       : { id: fid(), type, name: nextName('Зеркало'), feats: seed ? [seed.id] : [], plane: S.selectedTree === 'face' && S.pickedFace ? { face: clone(S.pickedFace) } : S.selectedTree?.startsWith('plane:') ? { std: S.selectedTree.slice(6) } : { std: 'right' } };
@@ -2643,7 +2818,7 @@ function renderPatternPM() {
   const title = { lpattern: 'Линейный массив', cpattern: 'Круговой массив', mirror: 'Зеркальное отражение' }[f.type];
   const body = h('div', { class: 'pm' }, pmHeader(title, ICON[f.type]));
   const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id);
-  const cands = S.doc.features.slice(0, idx).filter((x) => (x.type === 'extrude' || x.type === 'revolve') && !x.suppressed);
+  const cands = S.doc.features.slice(0, idx).filter((x) => (x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole') && !x.suppressed);
   const seeds = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Копировать элементы'));
   if (f.type === 'mirror') seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !f.feats.length, onchange: (e) => { if (e.target.checked) f.feats = []; renderSide(); schedulePreview(); } }), 'Всё тело'));
   for (const c of cands) seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.feats.includes(c.id), onchange: (e) => { f.feats = e.target.checked ? [...f.feats, c.id] : f.feats.filter((x) => x !== c.id); renderSide(); schedulePreview(); } }), c.name));
@@ -3137,6 +3312,8 @@ function renderTools() {
       h('div', { class: 'sep' }),
       toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { title: 'Скруглить рёбра' }),
       toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { title: 'Фаска на рёбрах' }),
+      toolBtn('Оболочка', ICON.shell, cmdShell, { title: 'Оболочка: полая деталь с открытыми гранями' }),
+      toolBtn('Отверстие', ICON.hole, cmdHole, { title: 'Отверстие под крепёж: простое, цековка, зенковка, под резьбу' }),
       h('div', { class: 'sep' }),
       toolBtn('Массив', ICON.lpattern, () => cmdPattern('lpattern'), { title: 'Линейный массив элементов' }),
       toolBtn('Круговой', ICON.cpattern, () => cmdPattern('cpattern'), { title: 'Круговой массив элементов' }),
@@ -3200,8 +3377,8 @@ function renderTree() {
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
   const featRow = (f, i, child) => {
     const off = i >= rb || f.suppressed; const err = S.errors[f.id];
-    const icon = PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
-    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : fmt(f.depth) + ' мм') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : '';
+    const icon = f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
+    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : fmt(f.depth) + ' мм') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
@@ -3226,7 +3403,7 @@ function startRollDrag(ev) {
   window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
 }
 function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? null : i; rebuild(); if (!live) pushUndo(); }
-function editFeature(f) { if (!f) return; if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
+function editFeature(f) { if (!f) return; if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; } }
@@ -3264,6 +3441,8 @@ function renderPM() {
     return;
   }
   if (pm.pattern) { renderPatternPM(); return; }
+  if (pm.feature?.type === 'hole') { renderHolePM(); return; }
+  if (pm.shell) { renderShellPM(); return; }
   if (pm.feature?.type === 'plane') {
     const f = pm.feature; const b = f.base; const baseName = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
     side.append(h('div', { class: 'pm' }, pmHeader('Плоскость', ICON.plane),
@@ -3645,5 +3824,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
