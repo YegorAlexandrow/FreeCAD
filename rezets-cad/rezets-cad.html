@@ -157,6 +157,9 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .dimlbl.sel { color: var(--geo-sel); outline: 1px solid var(--geo-sel); }
 .dimlbl.bad { color: var(--geo-bad); outline: 1px solid var(--geo-bad); }
 #overlay.tooling .glyph, #overlay.tooling .dimlbl { pointer-events: none; }
+.kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.kv span { color: var(--fg-2); }
+.kv b { font-family: var(--font-num); font-weight: 500; text-align: right; }
 .pickbox { width: 100%; text-align: left; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
 .pickbox.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .glyph { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 3px; display: grid; place-items: center; font-size: 11px; font-weight: 600; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--vp-bot) 70%, var(--geo-constr) 30%); border: 1px solid var(--geo-constr); cursor: pointer; user-select: none; }
@@ -303,6 +306,8 @@ const ICON = {
   del: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/>',
   shell: '<path d="M4 8l8-4 8 4v8l-8 4-8-4z"/><path d="M7 9.5l5-2.5 5 2.5v5l-5 2.5-5-2.5z" stroke-dasharray="2 1.5"/>',
   interf: '<rect x="3" y="7" width="11" height="11" rx="1"/><rect x="10" y="4" width="11" height="11" rx="1"/><path d="M10 7h4v8h-4z" fill="currentColor" opacity=".35"/>',
+  mass: '<path d="M6 9h12l2 11H4z"/><circle cx="12" cy="6" r="2.2"/>',
+  bom: '<rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   hole: '<path d="M7 4h10M9 4v5h6V4M10.5 9v10M13.5 9v10M10.5 19 12 21l1.5-2"/>',
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
@@ -2525,6 +2530,72 @@ function openEdgePM(f, isNew) {
 }
 
 // ============================================================================================
+// Mass properties and bill of materials. Densities in g/cm³.
+// ============================================================================================
+const MATERIALS = { pla: ['PLA', 1.24], petg: ['PETG', 1.27], abs: ['ABS', 1.04], nylon: ['Нейлон PA12', 1.01], steel: ['Сталь', 7.85], stainless: ['Нерж. сталь', 8.0], alu: ['Алюминий', 2.70], brass: ['Латунь', 8.5], copper: ['Медь', 8.96], wood: ['Сосна', 0.5] };
+const matOf = (data) => MATERIALS[data?.material] ? data.material : 'pla';
+// Volume, surface area and centre of volume of a closed mesh, optionally placed by a matrix.
+function massProps(g, M) {
+  const pos = g.getAttribute('position'); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); let vol = 0, area = 0; const com = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) {
+    a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); if (M) { a.applyMatrix4(M); b.applyMatrix4(M); c.applyMatrix4(M); }
+    const v = a.dot(new THREE.Vector3().crossVectors(b, c)) / 6; vol += v; com.addScaledVector(a.clone().add(b).add(c), v / 4);
+    area += new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)).length() / 2;
+  }
+  return { vol, area, com: vol ? com.divideScalar(vol) : com };
+}
+const fmtMass = (g) => (g >= 1000 ? fmt(g / 1000, 3) + ' кг' : fmt(g, 2) + ' г');
+function cmdMass() {
+  if (S.editing) exitSketch(); if (S.measure) closeMeasure();
+  if (S.mode === 'asm') { if (!S.doc.comps.length) { toast('Сборка пустая', 'warn'); return; } openPM({ kind: 'mass' }); drawMassMarker(); return; }
+  if (!S.body) { toast('Нет тела', 'warn'); return; }
+  openPM({ kind: 'mass' }); drawMassMarker();
+}
+function asmMass() {
+  const rows = []; let mass = 0; const com = new THREE.Vector3();
+  for (const c of S.doc.comps) {
+    const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const ent = docEntry(c.doc); const mat = matOf(ent.data);
+    const mp = massProps(inf.geo, new THREE.Matrix4().fromArray(c.T)); const m = mp.vol * MATERIALS[mat][1] / 1000;
+    rows.push({ c, ent, mat, vol: mp.vol, mass: m }); mass += m; com.addScaledVector(mp.com, m);
+  }
+  return { rows, mass, com: mass ? com.divideScalar(mass) : com };
+}
+function drawMassMarker() {
+  groups.measure.clear(); if (S.pm?.kind !== 'mass') { requestRender(); return; }
+  const com = S.mode === 'asm' ? asmMass().com : massProps(S.body).com; const d = 10 * (camera.top - camera.bottom) / camera.zoom / Math.max(view.clientHeight, 1);
+  const segs = [[-d, 0, 0, d, 0, 0], [0, -d, 0, 0, d, 0], [0, 0, -d, 0, 0, d]].flatMap(([x1, y1, z1, x2, y2, z2]) => [com.x + x1, com.y + y1, com.z + z1, com.x + x2, com.y + y2, com.z + z2]);
+  const l = segLines(segs, lineMat(colors['geo-bad'], 2.2, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l); requestRender();
+}
+function renderMassPM() {
+  const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mass), h('span', {}, S.mode === 'asm' ? 'Масса сборки' : 'Свойства массы'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
+  const xyz = (v) => `${fmt(v.x, 2)}; ${fmt(v.y, 2)}; ${fmt(v.z, 2)} мм`;
+  if (S.mode === 'asm') {
+    const r = asmMass(); const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Итого'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(r.mass))), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(r.com))));
+    const list = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), ...r.rows.map((x) => h('div', { class: 'kv' }, h('span', {}, `${x.c.name} · ${MATERIALS[x.mat][0]}`), h('b', {}, fmtMass(x.mass)))));
+    box.append(grp, list, h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Материал задаётся в детали: откройте её и нажмите «Масса».')));
+    side.append(box); return;
+  }
+  const ent = activeEntry(); const data = ent.data; const mat = matOf(data); const mp = massProps(S.body); const m = mp.vol * MATERIALS[mat][1] / 1000;
+  const sel = h('select', { id: 'pmMat' }, Object.entries(MATERIALS).map(([k, [name, rho]]) => h('option', { value: k, selected: k === mat }, `${name} (${fmt(rho, 2)} г/см³)`)));
+  sel.onchange = () => { data.material = sel.value; if (S.mode === 'part') pushUndo(); else saveProjectSoon(); renderSide(); };
+  box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Материал'), h('label', { class: 'field' }, h('span', {}, 'Материал'), sel)),
+    h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Свойства'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(m))), h('div', { class: 'kv' }, h('span', {}, 'Объём'), h('b', {}, fmt(mp.vol, 2) + ' мм³')),
+      h('div', { class: 'kv' }, h('span', {}, 'Площадь поверхности'), h('b', {}, fmt(mp.area, 2) + ' мм²')), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(mp.com)))));
+  side.append(box);
+}
+// Bill of materials: one row per part, with quantity and mass.
+function bomRows() {
+  const map = new Map();
+  for (const c of S.doc.comps) { const ent = docEntry(c.doc); if (!ent) continue; const r = map.get(c.doc) || { ent, qty: 0 }; r.qty++; map.set(c.doc, r); }
+  return [...map.values()].map((r, i) => { const inf = docInfo(r.ent.id); const mat = matOf(r.ent.data); const vol = inf?.geo ? massProps(inf.geo).vol : 0; return { n: i + 1, name: r.ent.name, qty: r.qty, mat: MATERIALS[mat][0], mass: vol * MATERIALS[mat][1] / 1000, kind: r.ent.kind }; });
+}
+function cmdBom() {
+  const rows = bomRows(); if (!rows.length) { toast('Сборка пустая', 'warn'); return; }
+  const csv = ['№;Наименование;Кол-во;Материал;Масса шт, г;Масса всего, г', ...rows.map((r) => [r.n, r.name, r.qty, r.mat, r.mass.toFixed(2), (r.mass * r.qty).toFixed(2)].join(';'))].join('\n');
+  showModal('Спецификация', `${rows.length} ${plural(rows.length, 'позиция', 'позиции', 'позиций')}, ${S.doc.comps.length} ${plural(S.doc.comps.length, 'компонент', 'компонента', 'компонентов')}. Текст можно вставить в таблицу (разделитель «;»).`, csv, [['Копировать', copyText], ['Закрыть', closeModal]]);
+}
+
+// ============================================================================================
 // Hole wizard: hole positions are the points (and circle centres) of a sketch, so they are
 // dimensioned with the sketch solver. Each hole is an exact solid of revolution.
 // ============================================================================================
@@ -3287,6 +3358,7 @@ function asmDeleteComp(c) {
 }
 function renderAsmPM() {
   const pm = S.pm; side.textContent = '';
+  if (pm.kind === 'mass') { renderMassPM(); return; }
   if (pm.kind === 'interf') {
     const cname = (id) => S.doc.comps.find((c) => c.id === id)?.name || '?';
     const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.interf), h('span', {}, 'Проверка пересечений'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
@@ -3377,13 +3449,15 @@ function renderTools() {
     toolsEl.append(
       toolBtn('Вставить', ICON.insert, cmdInsert, { pressed: S.pm?.kind === 'insert', title: 'Вставить деталь в сборку (I)', kbd: 'I' }),
       toolBtn('Сопряжение', ICON.mate, () => (S.pm?.kind === 'mate' ? closePM() : cmdMate()), { pressed: S.pm?.kind === 'mate', title: 'Сопряжение двух граней или осей (M)', kbd: 'M' }),
+      toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Масса и центр масс сборки' }),
+      toolBtn('Спецификация', ICON.bom, cmdBom, { title: 'Список деталей с количеством и массой' }),
       toolBtn('Пересечения', ICON.interf, () => (S.pm?.kind === 'interf' ? closePM() : cmdInterference()), { pressed: S.pm?.kind === 'interf', title: 'Проверка пересечений компонентов' }),
       h('div', { class: 'sep' }),
       toolBtn('Открыть деталь', ICON.part, () => { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) switchDoc(c.doc); else toast('Выберите компонент', 'info'); }, { disabled: !S.asmSel, title: 'Открыть выбранный компонент для редактирования' }),
     );
     return;
   }
-  if (S.mode === 'import') { toolsEl.append(toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить (M)', kbd: 'M' })); return; }
+  if (S.mode === 'import') { toolsEl.append(toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить (M)', kbd: 'M' }), toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Материал, масса, центр масс' })); return; }
   if (S.tab === 'feat') {
     toolsEl.append(
       toolBtn('Эскиз', ICON.sketch, () => (S.editing ? exitSketch() : cmdSketch()), { pressed: !!S.editing, title: 'Новый эскиз на плоскости или грани (S)', kbd: 'S' }),
@@ -3404,6 +3478,7 @@ function renderTools() {
       h('div', { class: 'sep' }),
       h('div', { class: 'sep' }),
       toolBtn('Плоскость', ICON.plane, cmdPlane, { title: 'Справочная плоскость со смещением от плоскости или грани' }),
+      toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Материал, масса, центр масс' }),
       toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить расстояние, диаметр, угол (M)', kbd: 'M' }),
     );
   } else {
@@ -3523,6 +3598,7 @@ function renderPM() {
       h('div', { class: 'grp' }, h('button', { class: 'ghost-btn', onclick: () => closePM() }, 'Отмена'))));
     return;
   }
+  if (pm.kind === 'mass') { renderMassPM(); return; }
   if (pm.pattern) { renderPatternPM(); return; }
   if (pm.feature?.type === 'hole') { renderHolePM(); return; }
   if (pm.shell) { renderShellPM(); return; }
@@ -3609,7 +3685,7 @@ function renderSketchPanel() {
 function renderCorner() {
   const c = $('corner'); c.textContent = '';
   if (S.pm?.kind === 'mate') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
-  else if (S.pm?.kind === 'insert' || S.pm?.kind === 'interf') c.append(h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
+  else if (S.pm?.kind === 'insert' || S.pm?.kind === 'interf' || S.pm?.kind === 'mass') c.append(h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm && S.pm.kind === 'feature') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.editing) c.append(h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)));
   else if (S.measure) c.append(h('button', { class: 'cancel', title: 'Закрыть рулетку', onclick: closeMeasure }, svg(ICON.x)));
@@ -3907,5 +3983,5 @@ resize(); renderTools();
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj);
 })();
-window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
