@@ -3959,6 +3959,8 @@ function mateResiduals(m, A, B) {
       { const pl = A.kind === 'plane' ? A : B, ax = A.kind === 'plane' ? B : A; return [pl.d.dot(ax.d), ax.p.clone().sub(pl.p).dot(pl.d)]; }
     case 'concentric': { const [u1, u2] = perpBasis(A.d); return [...par(), sep.dot(u1), sep.dot(u2)]; }
     case 'distance':
+      // Axis to plane: the axis stays parallel to the plane at the given distance from it.
+      if (A.kind !== B.kind) { const pl = A.kind === 'plane' ? A : B, ax = A.kind === 'plane' ? B : A; return [pl.d.dot(ax.d), ax.p.clone().sub(pl.p).dot(pl.d) * (m.side || 1) - m.v]; }
       if (A.kind === 'axis' && B.kind === 'axis') { const t = sep.clone().addScaledVector(A.d, -sep.dot(A.d)); return [...par(), t.length() - m.v]; }
       return [...par(), sep.dot(A.d) * (m.side || 1) - m.v];
     case 'parallel':
@@ -4170,11 +4172,11 @@ function drawContext() {
 function cmdMate() { if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; toast('Разнесённый вид выключен на время сопряжений', 'info'); } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
 function mateOptions(a, b) {
   if (!a || !b) return [];
-  if (a.kind === 'point' || b.kind === 'point') { const o = a.kind === 'point' ? b : a; return o.kind === 'axis' ? ['coincident'] : ['coincident', 'distance']; }
+  if (a.kind === 'point' || b.kind === 'point') { const o = a.kind === 'point' ? b : a; return ['coincident', 'distance']; }
   if (a.kind === 'axis' && b.kind === 'axis' && !a.r && !b.r) return ['coincident', 'parallel', 'perpendicular', 'distance', 'angle'];
   if (a.kind === 'plane' && b.kind === 'plane') return ['coincident', 'parallel', 'perpendicular', 'distance', 'angle'];
   if (a.kind === 'axis' && b.kind === 'axis') return ['concentric', 'parallel', 'perpendicular', 'distance', 'angle'];
-  return ['coincident', 'parallel', 'perpendicular'];
+  return ['coincident', 'parallel', 'perpendicular', 'distance'];
 }
 function previewMate() {
   const pm = S.pm; restorePoses(S.doc, pm.before); pm.result = null;
@@ -4208,12 +4210,15 @@ function editMate(m) {
 }
 // Turns a mate over: the moving part is flipped onto the other solution, then everything is re-solved.
 function reverseMate(m) {
-  const asm = S.doc; const before = snapPoses(asm); m.flip = !m.flip; if (m.type === 'angle') m.side = m.flip ? -1 : 1;
-  preAlign(asm, m); if (!asmSolve(asm)) { m.flip = !m.flip; if (m.type === 'angle') m.side = m.flip ? -1 : 1; restorePoses(asm, before); toast('Развернуть не получается: мешают другие сопряжения', 'err'); }
+  const asm = S.doc; const before = snapPoses(asm); const side = sideFlip(m.a, m.b, m.type);
+  const turn = () => { if (side) m.side = -(m.side || 1); else { m.flip = !m.flip; if (m.type === 'angle') m.side = m.flip ? -1 : 1; } };
+  turn(); if (!side) preAlign(asm, m); if (!asmSolve(asm)) { turn(); restorePoses(asm, before); toast('Развернуть не получается: мешают другие сопряжения', 'err'); }
   else pushUndo();
   asmRefresh(true);
 }
-const canReverse = (a, b, type) => a && b && a.kind === b.kind && a.kind !== 'point' && ['coincident', 'parallel', 'distance', 'angle', 'concentric'].includes(type);
+// A distance from a plane to an axis or a vertex is signed: its reverse puts the part on the other side.
+const sideFlip = (a, b, type) => a && b && type === 'distance' && a.kind !== b.kind && (a.kind === 'plane' || b.kind === 'plane');
+const canReverse = (a, b, type) => sideFlip(a, b, type) || (a && b && a.kind === b.kind && a.kind !== 'point' && ['coincident', 'parallel', 'distance', 'angle', 'concentric'].includes(type));
 // Why a direction mate cannot hold: an earlier mate between the same parts already leaves only a
 // turn about one axis, and a turn keeps the angle each picked face makes with that axis.
 function explainConflict(asm, m, group) {
@@ -4432,7 +4437,7 @@ function renderAsmPM() {
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { pm.v = v; previewMate(); }, pm.type === 'angle' ? '°' : 'мм') : null,
-      canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { pm.flip = !pm.flip; previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
+      canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { if (sideFlip(a, b, pm.type)) pm.side = -(pm.side || 1); else pm.flip = !pm.flip; previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, sideFlip(a, b, pm.type) ? 'с другой стороны грани' : a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
   }
   if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result))));
   side.append(box);
