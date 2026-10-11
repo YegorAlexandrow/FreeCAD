@@ -5175,6 +5175,37 @@ bool CmdSketcherConstrainCoincidentUnified::substituteConstraintCombinationsCoin
         }
     }
 
+    // A point-on-object constraint between one of the points and the curve the other point is an
+    // end point of becomes redundant once both points are coincident, and the coincidence would
+    // be rejected. Typical case: an arc end point was snapped onto a line while drawing, and the
+    // user later joins it with the end point of that line. Replace it by the coincidence.
+    auto isEndPoint = [](PointPos pos) {
+        return pos == Sketcher::PointPos::start || pos == Sketcher::PointPos::end;
+    };
+    if (isEndPoint(PosId1) && isEndPoint(PosId2)) {
+        std::vector<int> cidsToBeRemoved;
+        for (int cid = 0; cid < static_cast<int>(cvals.size()); ++cid) {
+            const Constraint* constr = cvals[cid];
+            if (constr->Type != Sketcher::PointOnObject) {
+                continue;
+            }
+            if ((constr->First == GeoId1 && constr->FirstPos == PosId1 && constr->Second == GeoId2)
+                || (constr->First == GeoId2 && constr->FirstPos == PosId2
+                    && constr->Second == GeoId1)) {
+                cidsToBeRemoved.push_back(cid);
+            }
+        }
+
+        for (auto it = cidsToBeRemoved.rbegin(); it != cidsToBeRemoved.rend(); ++it) {
+            Gui::cmdAppObjectArgs(Obj, "delConstraint(%d)", *it);
+        }
+
+        if (!cidsToBeRemoved.empty()) {
+            notifyConstraintSubstitutions(
+                QObject::tr("The point on object constraint was replaced by the coincidence."));
+        }
+    }
+
     return false;
 }
 
