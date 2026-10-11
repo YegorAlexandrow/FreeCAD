@@ -1,0 +1,76 @@
+# Builds a portable Windows x64 bundle of this branch and publishes it as a
+# pre-release in this repository, so that changes can be tried on Windows
+# without a local build environment.
+name: Build Windows preview
+
+on:
+  workflow_dispatch: ~
+  push:
+    branches:
+      - claude/keen-keller-egnr4v
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TAG: ux-preview
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - name: Set cache directories
+        shell: bash
+        run: |
+          echo 'PIXI_CACHE_DIR=D:\rattler' >> "$GITHUB_ENV"
+          echo 'RATTLER_CACHE_DIR=D:\rattler' >> "$GITHUB_ENV"
+
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          submodules: 'recursive'
+
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          pixi-version: v0.81.0
+          cache: false
+          locked: true
+
+      - name: Create or update the pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Portable Windows x64 build of branch ${GITHUB_REF_NAME} at ${GITHUB_SHA}. Unpack the .7z and run FreeCAD.exe (or bin/freecad.exe)."
+          if gh release view "${BUILD_TAG}" > /dev/null 2>&1; then
+            gh release edit "${BUILD_TAG}" --notes "${notes}"
+          else
+            gh release create "${BUILD_TAG}" --target "${GITHUB_SHA}" --prerelease \
+              --title "Usability preview (Windows)" --notes "${notes}"
+          fi
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 package/scripts/write_version_info.py ../freecad_version.txt
+          pixi run --locked "bash package/bundle/build.sh"
+
+      - name: Bundle and upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAKE_INSTALLER: "false"
+          UPLOAD_RELEASE: "true"
+          WINDOWS_SIGN_RELEASE: "0"
+        run: |
+          set -euo pipefail
+          cd package/bundle
+          pixi run --locked bash -c "cd windows && bash create_bundle.sh"
