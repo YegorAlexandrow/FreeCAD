@@ -4047,7 +4047,10 @@ function drawPatternRefs() {
 function patternPick(ev, click) {
   const pm = S.pm; const f = pm.feature;
   if (pm.pickFor === 'feats') {
-    const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); return; } if (!p?.face) return;
+    const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); const hp = f.type === 'mirror' ? p?.plane || null : null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); } return; }
+    // Planes are not features: in a mirror, a click on one is the mirror plane.
+    if (p?.plane && f.type === 'mirror') { f.plane = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; renderSide(); schedulePreview(); return; }
+    if (!p?.face) return;
     const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id); const steps = solidSteps().filter((st) => S.doc.features.indexOf(st.f) < idx);
     // The window shows the preview with the copies; a face of a copy is not on the part before the pattern.
     const sm = faceSample(p.face); if (!steps.length || !sm || !onSurface(steps.at(-1).body, sm.p, sm.n)) return;
@@ -4105,7 +4108,7 @@ function renderPatternPM() {
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; schedulePreview(); } }), 'Обратное направление')));
   } else {
     const b = f.plane; const name = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
-    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('div', { class: 'rel' }, h('b', {}, '▱'), name), h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне'),
+    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'plane' ? ' on' : ''), onclick: () => { pm.pickFor = 'plane'; renderSide(); } }, h('b', {}, '▱'), name), pm.pickFor === 'plane' ? h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне') : h('div', { class: 'note' }, 'Щёлкните поле выше, чтобы выбрать её в окне, или справочную плоскость в окне'),
       h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.plane = { std: k }; renderSide(); schedulePreview(); } }, p.label)))));
   }
   if (err) body.append(pmErr(err));
