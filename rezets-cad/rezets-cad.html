@@ -108,6 +108,8 @@ button { font: inherit; color: inherit; }
 .row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
 .row .meta { font-family: var(--font-num); font-size: 11px; color: var(--fg-2); }
 .row input { font: inherit; width: 100%; border: 1px solid var(--accent); border-radius: 4px; padding: 1px 4px; background: var(--bg); color: var(--fg); }
+.dropline { height: 2px; margin: 0 6px; background: var(--accent); border-radius: 1px; }
+.row.dragging { opacity: .5; }
 .rollbar { height: 6px; margin: 3px 6px; border-radius: 3px; background: var(--accent); cursor: ns-resize; opacity: .85; position: relative; }
 .rollbar::after { content: "Откат"; position: absolute; right: 0; top: 7px; font-size: 10px; color: var(--accent); }
 .rollbar { margin-bottom: 14px; }
@@ -5034,7 +5036,7 @@ function renderTree() {
   S.doc.features.forEach((f, i) => {
     if (i === rb) tree.append(rbBar());
     if (f.type === 'sketch' && consumed.has(f.id) && S.doc.features.findIndex((g) => g.sketch === f.id) > i) return;
-    const r = featRow(f, i, false); r.dataset.index = i; tree.append(r);
+    const r = featRow(f, i, false); r.dataset.index = i; r.dataset.fid = f.id; r.addEventListener('pointerdown', (ev) => startFeatDrag(ev, f, r)); tree.append(r);
     if (f.sketch) { const sf = featById(f.sketch); if (sf) { const r2 = featRow(sf, S.doc.features.indexOf(sf), true); r2.dataset.index = i; tree.append(r2); } }
   });
   if (rb >= S.doc.features.length) tree.append(rbBar());
@@ -5043,6 +5045,31 @@ function renderTree() {
 }
 // The bar moves among the rows while dragging and the model is rebuilt once, on release:
 // a rebuild redraws the tree, and a heavy part would lag behind the mouse.
+// Features are moved in the tree by dragging, like in SolidWorks. A feature cannot go above anything it
+// is built on (its sketch, the face its sketch sits on, the features it copies); its own sketch moves up
+// with it when needed.
+function featDeps(x) { const ids = new Set(S.doc.features.map((g) => g.id)); const out = new Set(); const walk = (v) => { if (typeof v === 'string') { if (ids.has(v) && v !== x.id) out.add(v); } else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') for (const [k, w] of Object.entries(v)) if (k !== 'sk') walk(w); }; walk(x); return out; }
+function moveFeature(id, beforeId) {
+  const list = S.doc.features.filter((g) => g.id !== id); const f = featById(id); if (!f) return false;
+  let at = beforeId ? list.findIndex((g) => g.id === beforeId) : list.length; if (at < 0) at = list.length; list.splice(at, 0, f);
+  for (const g of [...list]) if (g.sketch) { const si = list.findIndex((x) => x.id === g.sketch), gi = list.indexOf(g); if (si > gi) { const [sk] = list.splice(si, 1); list.splice(gi, 0, sk); } }
+  for (let i = 0; i < list.length; i++) for (const d of featDeps(list[i])) { const di = list.findIndex((x) => x.id === d); if (di > i) { toast(`«${list[i].name}» построен на «${list[di].name}», выше него его не поставить`, 'warn'); return false; } }
+  if (list.every((g, i) => g === S.doc.features[i])) return false;
+  S.doc.features = list; rebuild(); pushUndo(); return true;
+}
+function startFeatDrag(ev, f, row) {
+  if (ev.button !== 0) return; const tree = row.parentElement; const y0 = ev.clientY; let on = false, before = null; const line = h('div', { class: 'dropline' });
+  const mv = (e) => {
+    if (!on && Math.abs(e.clientY - y0) < 6) return; if (!on) { on = true; row.classList.add('dragging'); }
+    const rows = [...tree.querySelectorAll('.row[data-fid]')]; const at = rows.find((r) => e.clientY < r.getBoundingClientRect().top + r.getBoundingClientRect().height / 2);
+    before = at ? at.dataset.fid : null; if (at) tree.insertBefore(line, at); else { const last = rows.at(-1); let n = last; while (n.nextElementSibling && n.nextElementSibling.classList.contains('child')) n = n.nextElementSibling; n.after(line); }
+  };
+  const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); line.remove(); row.classList.remove('dragging'); if (!on) return;
+    // The click that ends a drag must not select the row.
+    window.addEventListener('click', (e) => e.stopPropagation(), { capture: true, once: true });
+    if (before !== f.id) moveFeature(f.id, before); renderSide(); };
+  window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+}
 function startRollDrag(ev) {
   ev.preventDefault(); const bar = ev.currentTarget; const tree = bar.parentElement; let idx = rollbackIndex();
   const mv = (e) => {
@@ -5552,5 +5579,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
