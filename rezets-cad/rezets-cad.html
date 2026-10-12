@@ -567,12 +567,12 @@ function buildSystem(sk, opts = {}) {
   return { idx, X: Float64Array.from(X), owner, eqs };
 }
 const residual = (sys, X) => { const F = []; for (const e of sys.eqs) F.push(...e.f(X)); return F; };
-function jacobian(sys, X) {
+function jacobian(sys, X, step = 1e-7) {
   const n = X.length; const rows = [];
   for (const e of sys.eqs) {
     const base = e.f(X); const block = base.map(() => new Float64Array(n));
     for (const v of e.vars) {
-      const hh = 1e-7 * Math.max(1, Math.abs(X[v]));
+      const hh = step * Math.max(1, Math.abs(X[v]));
       const o = X[v]; X[v] = o + hh; const f1 = e.f(X); X[v] = o - hh; const f2 = e.f(X); X[v] = o;
       for (let k = 0; k < base.length; k++) block[k][v] = (f1[k] - f2[k]) / (2 * hh);
     }
@@ -628,7 +628,7 @@ function solveSketch(sk, weights) {
 }
 // Incremental elimination with a record of which original rows were combined. A row that
 // reduces to zero is dependent; its combination names the constraints it duplicates.
-function eliminate(rows, n) {
+function eliminate(rows, n, tol = 1e-8) {
   const basis = []; const dependent = [];
   rows.forEach((r, ri) => {
     const s = Math.hypot(...r.row) || 1;
@@ -638,7 +638,7 @@ function eliminate(rows, n) {
       for (let k = 0; k < n; k++) vec[k] -= f * b.vec[k];
       for (const [k, v] of b.comb) comb.set(k, (comb.get(k) || 0) - f * v);
     }
-    let piv = -1, best = 1e-8; for (let k = 0; k < n; k++) if (Math.abs(vec[k]) > best) { best = Math.abs(vec[k]); piv = k; }
+    let piv = -1, best = tol; for (let k = 0; k < n; k++) if (Math.abs(vec[k]) > best) { best = Math.abs(vec[k]); piv = k; }
     if (piv < 0) { dependent.push({ ri, comb }); return; }
     const pv = vec[piv]; for (let k = 0; k < n; k++) vec[k] /= pv; for (const [k, v] of comb) comb.set(k, v / pv);
     basis.push({ vec, piv, comb });
@@ -4211,6 +4211,9 @@ function mateResiduals(m, A, B) {
   }
   return [];
 }
+// Faces and axes from STEP files are parallel only to about 1e-8, so a mate that repeats what
+// two others already fix leaves a remainder of that size and must not count as a new constraint.
+const ASM_TOL = 1e-6;
 function asmSystem(asm, extra = []) {
   const vars = []; const comps = asm.comps; const idx = new Map();
   comps.forEach((c) => { if (!c.fixed) { idx.set(c.id, vars.length); vars.push(c.id); } });
@@ -4244,7 +4247,7 @@ function asmSolve(asm, weights, extra) {
 function asmAnalyze(asm) {
   const sys = asmSystem(asm); const X = new Float64Array(sys.n);
   if (!sys.n) { const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > 1e-6) bad.add(e.cid); return { dof: 0, free: new Set(), redundant: bad }; }
-  const rows = jacobian(sys, X); const { basis, dependent } = eliminate(rows, sys.n);
+  const rows = jacobian(sys, X, 1e-5); const { basis, dependent } = eliminate(rows, sys.n, ASM_TOL);
   for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < sys.n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
   const piv = new Set(basis.map((b) => b.piv)); const freeCols = [...Array(sys.n).keys()].filter((k) => !piv.has(k)); const free = new Set(freeCols);
   for (const b of basis) if (freeCols.some((f) => Math.abs(b.vec[f]) > 1e-7)) free.add(b.piv);
@@ -4258,17 +4261,17 @@ const restorePoses = (asm, s) => { for (const [id, T] of s) { const c = asm.comp
 // Adds a mate like SolidWorks: refused when it conflicts or only repeats what is already defined.
 function tryAddMate(asm, m) {
   const before = snapPoses(asm); asm.mates.push(m);
-  const sys = asmSystem(asm); const X = new Float64Array(sys.n); const rows = jacobian(sys, X);
+  const sys = asmSystem(asm); const X = new Float64Array(sys.n); const rows = jacobian(sys, X, 1e-5);
   const own = rows.filter((r) => r.cid === m.id), others = rows.filter((r) => r.cid !== m.id);
-  const el = eliminate([...others, ...own], sys.n); const deps = el.dependent.filter((d) => d.ri >= others.length);
+  const el = eliminate([...others, ...own], sys.n, ASM_TOL); const deps = el.dependent.filter((d) => d.ri >= others.length);
   const group = new Set(); for (const d of deps) for (const [k, v] of d.comb) if (k < others.length && Math.abs(v) > 1e-6) group.add(others[k].cid);
   preAlign(asm, m);
   const ok = asmSolve(asm);
   if (!ok) { asm.mates.pop(); restorePoses(asm, before); return { status: 'conflict', group: [...group] }; }
   if (deps.length) {
-    const sys2 = asmSystem(asm); const rows2 = jacobian(sys2, new Float64Array(sys2.n)); const own2 = rows2.filter((r) => r.cid === m.id), oth2 = rows2.filter((r) => r.cid !== m.id);
+    const sys2 = asmSystem(asm); const rows2 = jacobian(sys2, new Float64Array(sys2.n), 1e-5); const own2 = rows2.filter((r) => r.cid === m.id), oth2 = rows2.filter((r) => r.cid !== m.id);
     // Partly overlapping mates are fine (concentric after a coincident face); one that adds nothing is not.
-    if (eliminate([...oth2, ...own2], sys2.n).dependent.filter((d) => d.ri >= oth2.length).length === own2.length) { asm.mates.pop(); restorePoses(asm, before); return { status: 'redundant', group: [...group] }; }
+    if (eliminate([...oth2, ...own2], sys2.n, ASM_TOL).dependent.filter((d) => d.ri >= oth2.length).length === own2.length) { asm.mates.pop(); restorePoses(asm, before); return { status: 'redundant', group: [...group] }; }
   }
   return { status: 'ok' };
 }
@@ -4739,7 +4742,7 @@ function asmDown(ev) {
 }
 // Null space of constraint rows: the motions the mates still allow.
 function nullSpace(rows, n) {
-  const { basis } = eliminate(rows, n);
+  const { basis } = eliminate(rows, n, ASM_TOL);
   for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
   const piv = new Set(basis.map((b) => b.piv));
   return [...Array(n).keys()].filter((k) => !piv.has(k)).map((f) => { const v = new Float64Array(n); v[f] = 1; for (const b of basis) v[b.piv] = -b.vec[f] / b.vec[b.piv]; return v; });
@@ -4750,7 +4753,7 @@ function dragFollow(asm, c, D, T) {
   const Lp = D.start.clone().sub(D.pose0.t).applyQuaternion(D.pose0.q.clone().invert());
   for (let it = 0; it < 12; it++) {
     const sys = asmSystem(asm); const n = sys.n; const i = sys.idx.get(c.id); if (i === undefined) return false;
-    const N = nullSpace(jacobian(sys, new Float64Array(n)), n); if (!N.length) return false;
+    const N = nullSpace(jacobian(sys, new Float64Array(n), 1e-5), n); if (!N.length) return false;
     const p = poseOf(c); const r = Lp.clone().applyQuaternion(p.q); const res = T.clone().sub(r.clone().add(p.t)); if (res.length() < 1e-4 * compSize(c)) break;
     const col = (j) => { const e = new THREE.Vector3(); e.setComponent(j % 3, 1); return j < 3 ? e.cross(r) : e; };
     const M = N.map((v) => { const s = new THREE.Vector3(); for (let j = 0; j < 6; j++) s.addScaledVector(col(j), v[6 * i + j]); return s; });
@@ -5436,5 +5439,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
