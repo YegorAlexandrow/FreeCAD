@@ -4318,6 +4318,7 @@ function drawMatePicks() {
   // A mate picked or hovered in the tree shows what it joins: first element in one colour, second in another.
   if (!S.pm) for (const id of new Set([S.mateSel, S.mateHover])) { const g = id && asm.mates.find((x) => x.id === id); if (g) { show(g.a, colors['geo-sel']); show(g.b, colors['geo-hover']); } }
   const pm = S.pm; if (pm?.kind === 'mate' && pm.result?.status === 'conflict') for (const id of pm.result.group) { const g = asm.mates.find((x) => x.id === id); if (g) { show(g.a, colors['geo-bad']); show(g.b, colors['geo-bad']); } }
+  if (pm?.kind === 'mate' && pm.suggest) show(pm.suggest, new THREE.Color('#3fbf6a'));
   if (pm?.kind === 'mate') { pm.picks.forEach((r) => show(r, colors['geo-sel'])); if (pm.hover && !pm.picks.some((r) => r.comp === pm.hover.comp && r.e === pm.hover.e)) show(pm.hover, colors['geo-hover']); }
   requestRender();
 }
@@ -4384,7 +4385,7 @@ function previewMate() {
   // Distance keeps the side the parts are on now.
   if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = Math.abs(raw); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
   if (pm.type === 'angle') { if (pm.v == null) pm.v = Math.round(Math.acos(Math.min(1, Math.abs(A.d.dot(B.d)))) * 180 / Math.PI); m.v = pm.v; m.side = pm.flip ? -1 : 1; }
-  pm.result = tryAddMate(asm, m); if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; if (pm.result.status === 'conflict') pm.result.why = explainConflict(asm, m, pm.result.group); }
+  pm.result = tryAddMate(asm, m); if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; pm.suggest = null; if (pm.result.status === 'conflict') { const ex = explainConflict(asm, m, pm.result.group); if (ex?.text) { pm.result.why = ex.text; pm.suggest = ex.suggest; } else pm.result.why = ex; } }
   asmRefresh(true);
 }
 function okMate() {
@@ -4427,6 +4428,25 @@ function explainConflict(asm, m, group) {
     const ta = ang(m.a.d, ua), tb = ang(m.b.d, ub); if (Math.abs(ta - tb) < 0.5) continue;
     const ax = g.a.kind === 'axis' ? 'оси' : 'нормали'; const mov = asm.comps.find((c) => c.id === m.a.comp)?.fixed ? m.b.comp : m.a.comp;
     return `Сопряжение «${g.name}» уже ${g.a.kind === 'axis' ? 'совместило оси' : 'выровняло грани'}, и ${cname(mov)} может только вращаться вокруг ${g.a.kind === 'axis' ? 'этой оси' : 'нормали к ним'}. ${pickName(m.a)} на ${cname(m.a.comp)} стоит к ${ax} под ${fmt(ta)}°, ${pickName(m.b).toLowerCase()} на ${cname(m.b.comp)} под ${fmt(tb)}°: вращением их не выровнять. Выберите элементы с одинаковым углом к ${ax} или погасите «${g.name}»`;
+  }
+  // Two axes of one part held on two axes (or centre points) of the other: the spacings must match.
+  if (m.a.kind === 'axis' && m.b.kind === 'axis' && ['concentric', 'coincident'].includes(m.type)) {
+    const pair = (g) => (g.a.comp === m.a.comp && g.b.comp === m.b.comp) || (g.a.comp === m.b.comp && g.b.comp === m.a.comp);
+    const side = (g, comp) => (g.a.comp === comp ? g.a : g.b);
+    const distTo = (axis, ref) => { if (!ref || ref.kind === 'plane') return null; const p = V3(axis.p), d = V3(axis.d).normalize(); if (ref.kind === 'axis' && Math.abs(Math.abs(V3(ref.d).normalize().dot(d)) - 1) > 1e-6) return null; const w = V3(ref.p).sub(p); return w.sub(d.clone().multiplyScalar(w.dot(d))).length(); };
+    for (const g of asm.mates) {
+      if (g.suppressed || !pair(g) || !['concentric', 'coincident'].includes(g.type) || g.a.kind === 'plane' || g.b.kind === 'plane') continue;
+      const ga = side(g, m.a.comp), gb = side(g, m.b.comp); const da = distTo(m.a, ga), db = distTo(m.b, gb); if (da == null || db == null || Math.abs(da - db) < 1e-3) continue;
+      // An axis of the same size at the right spacing is probably the one meant.
+      let suggest = null, hint = '';
+      for (const [ref, other, want] of [[m.a, ga, db], [m.b, gb, da]]) {
+        const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf) continue;
+        const k = inf.ents.findIndex((e, i) => e.kind === 'axis' && i !== ref.e && Math.abs(e.r - ref.r) < 1e-3 && Math.abs(Math.abs(e.d.dot(V3(ref.d).normalize())) - 1) < 1e-6 && Math.abs((distTo({ p: e.p.toArray(), d: e.d.toArray() }, other) ?? -1) - want) < 1e-3);
+        if (k >= 0) { const e = inf.ents[k]; suggest = { comp: c.id, kind: 'axis', p: e.p.toArray(), d: e.d.toArray(), r: e.r, e: k }; hint = ` На ${cname(c.id)} есть ось ⌀${fmt(2 * e.r)} на расстоянии ${fmt(want)} мм, она подсвечена зелёным: нажмите «Взять подсвеченную»`; break; }
+      }
+      if (da < 1e-3 || db < 1e-3) { const [c, nm] = da < 1e-3 ? [m.a.comp, pickName(m.a)] : [m.b.comp, pickName(m.b)]; return { text: `${nm} на ${cname(c)} уже сопряжена в «${g.name}»: одну ось нельзя поставить сразу в два места.${hint || ' Выберите другую ось'}`, suggest }; }
+      return { text: `«${g.name}» уже держит другую пару. Расстояние до неё на ${cname(m.a.comp)} ${fmt(da)} мм, на ${cname(m.b.comp)} ${fmt(db)} мм, поэтому обе пары сразу не совместить.${hint}`, suggest };
+    }
   }
   return null;
 }
@@ -4655,7 +4675,8 @@ function renderAsmPM() {
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
       canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { if (sideFlip(a, b, pm.type)) pm.side = -(pm.side || 1); else pm.flip = !pm.flip; previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, sideFlip(a, b, pm.type) ? 'с другой стороны грани' : a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
   }
-  if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result))));
+  if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result)),
+    pm.suggest ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const i = pm.picks.findIndex((r) => r.comp === pm.suggest.comp); if (i >= 0) pm.picks[i] = pm.suggest; pm.suggest = null; previewMate(); } }, 'Взять подсвеченную')) : null));
   side.append(box);
 }
 // ---------------- pointer handling in the assembly ----------------
