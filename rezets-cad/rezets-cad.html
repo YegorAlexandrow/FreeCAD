@@ -1216,12 +1216,34 @@ function refPlane(f, features = S.doc.features, depth = 0) {
   const s = (f.flip ? -1 : 1) * (f.d || 0); const n = B.n;
   return { label: f.name, o: [B.o[0] + n[0] * s, B.o[1] + n[1] * s, B.o[2] + n[2] * s], x: [...B.x], y: [...B.y], n: [...n], ref: f.id };
 }
+// A sketch on a face moves with that face: among the planar faces of the body with the same normal,
+// the one made by the same operation (traced back as in faceCreator) and nearest to the old position.
+function followFace(f, body, steps) {
+  const fc = f.plane.face; const n = V3(f.plane.n).normalize(); const pos = body.getAttribute('position'); const groups = new Map();
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  for (let t = 0; t < pos.count / 3; t++) {
+    a.fromBufferAttribute(pos, 3 * t); b.fromBufferAttribute(pos, 3 * t + 1); c.fromBufferAttribute(pos, 3 * t + 2); const nn = b.clone().sub(a).cross(c.clone().sub(a)); const ar = nn.length(); if (ar < 1e-9) continue; nn.divideScalar(ar);
+    if (nn.dot(n) < 1 - 1e-6) continue; const d = nn.dot(a); const k = Math.round(d * 1e4); const g = groups.get(k);
+    if (!g || ar > g.ar) groups.set(k, { d, ar, p: a.clone().add(b).add(c).divideScalar(3) });
+  }
+  let best = null;
+  for (const g of groups.values()) {
+    let k = steps.length - 1; if (k < 0) break; while (k > 0 && onSurface(steps[k - 1].body, g.p, n)) k--;
+    if (steps[k].id === fc.by && (!best || Math.abs(g.d - fc.d) < Math.abs(best.d - fc.d))) best = g;
+  }
+  if (!best || Math.abs(best.d - fc.d) < 1e-9) return;
+  const o = V3(f.plane.o).addScaledVector(n, best.d - fc.d); f.plane = { ...f.plane, o: o.toArray().map((v) => +v.toFixed(6)), face: { ...fc, d: best.d } };
+}
 function computeBody(features) {
   let body = null; const errors = {}; const key = []; let cyls = [];
   for (const f of features) if (f.type === 'sketch' && f.planeRef) { const pf = features.find((g) => g.id === f.planeRef); if (pf) { const pl = refPlane(pf, features); f.plane = { ...pl, label: pf.name }; } }
+  const steps = []; let lastSolid = null;
   for (const f of features) {
+    if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
+    if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
     key.push(JSON.stringify(f));
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
+    lastSolid = f.id;
     const k = key.join('\n');
     if (S.cache.has(k)) { const c = S.cache.get(k); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; continue; }
     let err = null;
@@ -1263,11 +1285,15 @@ function buildTool(f, body, cyls = []) {
   if (f.type === 'loft') { g = loftGeometry(f); g.computeVertexNormals(); return g; }
   if (f.type === 'sweep') { g = sweepGeometry(f, sf, loops); g.computeVertexNormals(); return g; }
   if (f.type === 'extrude') {
+    // Start: the sketch plane, an offset from it along the extrusion, or a face parallel to the sketch.
+    let s0 = 0; const nS = new THREE.Vector3(...sf.plane.n);
+    if (f.from === 'offset') s0 = (f.fromOffset || 0) * (f.dir === -1 && f.end !== 'mid' ? -1 : 1);
+    else if (f.from === 'face') { const T = f.fromTarget; if (!T) throw new Error('Выберите грань или плоскость, от которой начинать'); const nt = new THREE.Vector3(...T.n).normalize(); if (Math.abs(Math.abs(nt.dot(nS)) - 1) > 1e-6) throw new Error('Начальная грань должна быть параллельна эскизу'); s0 = new THREE.Vector3(...T.o).sub(new THREE.Vector3(...sf.plane.o)).dot(nS); }
     // A sliver of overlap makes a boss fuse with the face it starts on, and a cut pierce it.
     // It is only added on the side where it ends up inside the body or in empty space.
     let eps = 0; let d = f.depth;
     if (body) {
-      const ctr = (() => { const ids = selectedRegionIds(f, reg); const r = reg.faces.find((x) => ids.has(x.id)) || reg.faces[0]; return toWorld(sf.plane, r.sample[0], r.sample[1]); })();
+      const ctr = (() => { const ids = selectedRegionIds(f, reg); const r = reg.faces.find((x) => ids.has(x.id)) || reg.faces[0]; return toWorld(sf.plane, r.sample[0], r.sample[1]).addScaledVector(nS, s0); })();
       const back = new THREE.Vector3(...sf.plane.n).multiplyScalar(-(f.dir === -1 ? -1 : 1) * 0.01);
       const inside = isInside(body, ctr.clone().add(back));
       eps = f.mode === 'cut' ? (inside ? 0 : 0.002) : (inside ? 0.002 : 0);
@@ -1276,7 +1302,7 @@ function buildTool(f, body, cyls = []) {
     let clip = null;
     if (f.end === 'face') {
       const T = f.target; if (!T) throw new Error('Выберите грань или плоскость, до которой вытягивать');
-      const ids = selectedRegionIds(f, reg); const r0 = reg.faces.find((x) => ids.has(x.id)) || reg.faces[0]; const C = toWorld(sf.plane, r0.sample[0], r0.sample[1]);
+      const ids = selectedRegionIds(f, reg); const r0 = reg.faces.find((x) => ids.has(x.id)) || reg.faces[0]; const C = toWorld(sf.plane, r0.sample[0], r0.sample[1]).addScaledVector(nS, s0);
       const n = new THREE.Vector3(...sf.plane.n), nt = new THREE.Vector3(...T.n).normalize(); const cosA = n.dot(nt); if (Math.abs(cosA) < 1e-6) throw new Error('Грань параллельна направлению вытягивания');
       const Q = new THREE.Vector3(...T.o); const sAlong = Q.clone().sub(C).dot(nt) / cosA; f = { ...f, dir: sAlong < 0 ? -1 : 1 };
       if (body) { const inside = isInside(body, C.clone().addScaledVector(n, -f.dir * 0.01)); eps = f.mode === 'cut' ? (inside ? 0 : 0.002) : (inside ? 0.002 : 0); }
@@ -1294,7 +1320,7 @@ function buildTool(f, body, cyls = []) {
       const ids = selectedRegionIds(f, reg); for (const r of reg.faces) if (ids.has(r.id)) pts.push(r.sample);
       let best = f.mode === 'cut' ? 0 : Infinity, room = 0.05;
       for (const [u, v] of pts) {
-        const o = toWorld(sf.plane, u, v).addScaledVector(D, -1e-3); rc.set(o, D); const hits = rc.intersectObject(m).map((x) => x.distance - 1e-3).filter((t) => t > 1e-4);
+        const o = toWorld(sf.plane, u, v).addScaledVector(nS, s0).addScaledVector(D, -1e-3); rc.set(o, D); const hits = rc.intersectObject(m).map((x) => x.distance - 1e-3).filter((t) => t > 1e-4);
         const startIn = isInside(body, o.clone().addScaledVector(D, 2e-3));
         if (f.mode === 'cut') { const k = startIn ? 0 : 1; const exit = hits[k]; if (exit != null) { best = Math.max(best, exit); if (hits[k + 1] != null) room = Math.min(room, (hits[k + 1] - exit) / 2); } }
         else if (!startIn && hits.length) best = Math.min(best, hits[0]);
@@ -1317,6 +1343,7 @@ function buildTool(f, body, cyls = []) {
       const tn = Math.tan(f.draft * Math.PI / 180) * (f.draftOut ? 1 : -1); const zs = z0 < -1e-3 && z1 > 1e-3 ? [z0, 0, z1] : [z0, z1];
       g = taperedExtrude(loops, zs, (z) => tn * Math.abs(z));
     } else g = extrudeGeometry(loops, z0, z1);
+    if (s0) g.translate(0, 0, s0);
     const n = new THREE.Vector3(...sf.plane.n);
     if (!(f.draft > 0)) for (const e of Object.values(sf.sk.ents)) if ((e.t === 'circle' || e.t === 'arc') && !e.constr && !e.ext) { const c = gp(sf.sk, e.c); cyls.push({ p: toWorld(sf.plane, c.x, c.y), dir: n.clone(), r: e.r }); }
     if (clip) { g.applyMatrix4(M); g.computeVertexNormals(); return boolean(g, clip, INTERSECTION); }
@@ -1490,7 +1517,9 @@ function planeFromFace(face, hitPoint) {
   if (x.length() < 1e-3) x = new THREE.Vector3(0, 0, -1).projectOnPlane(n); x.normalize();
   if (Math.abs(n.y) > 0.9) x.set(1, 0, 0);
   const y = new THREE.Vector3().crossVectors(n, x); const o = n.clone().multiplyScalar(face.d);
-  void hitPoint; return { label: 'Грань', o: o.toArray().map((v) => +v.toFixed(6)), x: x.toArray(), y: y.toArray(), n: n.toArray() };
+  // The face is remembered by the operation that made it, so the sketch can follow it when the part changes.
+  let by = null; try { by = faceCreator(face); } catch { by = null; }
+  void hitPoint; return { label: 'Грань', o: o.toArray().map((v) => +v.toFixed(6)), x: x.toArray(), y: y.toArray(), n: n.toArray(), ...(by ? { face: { by, d: face.d } } : {}) };
 }
 
 // ---------------- view orientation ----------------
@@ -1889,7 +1918,7 @@ function regionAt(ev) {
 }
 function partHover(ev) {
   if (S.pm?.pattern) { patternPick(ev, false); return; }
-  if (S.pm?.shell || S.pm?.pickTarget) { const p = partPickAt(ev); showFaceHover(p?.face || null); return; }
+  if (S.pm?.shell || S.pm?.pickTarget || S.pm?.pickFrom) { const p = partPickAt(ev); showFaceHover(p?.face || null); return; }
   if (S.pm?.edgePick) { S.pm.hoverEdge = pickEdge(ev, S.pm.topo); drawEdgeSelection(); return; }
   if (S.measure) { S.measure.hover = measurePick(ev); drawMeasure(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); S.hoverRegion = r ? r.id : null; drawRegions(); return; }
@@ -1900,6 +1929,7 @@ function partHover(ev) {
 function partClick(ev) {
   if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.shell) { shellClick(ev); return; }
+  if (S.pm?.pickFrom) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.fromTarget = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.fromTarget = planeByKey(p.plane); else return; S.pm.pickFrom = false; showFaceHover(null); renderSide(); schedulePreview(); return; }
   if (S.pm?.pickTarget) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.target = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.target = planeByKey(p.plane); else return; S.pm.pickTarget = false; renderSide(); schedulePreview(); return; }
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
@@ -4931,7 +4961,7 @@ const numField = (label, id, val, onset, unit = 'мм') => {
   const inp = h('input', { type: 'text', id, value: ex ?? fmt(val, 4), inputmode: 'decimal', title: ex ? `${ex} = ${fmt(val, 4)}` : '' });
   // onset may re-render the panel, and removing the focused input fires 'change' again with the old text.
   let busy = false; const apply = () => { if (busy) return; busy = true; try { apply0(); } finally { busy = false; } };
-  const apply0 = () => { const str = inp.value; const v = evalExpr(str); if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal')) {
+  const apply0 = () => { const str = inp.value; const v = evalExpr(str); if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal' || id === 'pmFromOff')) {
     if (obj) { if (hasIdent(str)) obj.exprs = { ...obj.exprs, [key]: str.trim() }; else if (obj.exprs) { delete obj.exprs[key]; if (!Object.keys(obj.exprs).length) delete obj.exprs; } }
     const shown = onset(v); inp.value = obj?.exprs?.[key] ?? fmt(shown ?? v, 4); } else { inp.value = ex ?? fmt(val, 4); toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
   inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } });
@@ -4976,6 +5006,10 @@ function renderPM() {
   const body = h('div', { class: 'pm' }, pmHeader(isExt ? (f.mode === 'cut' ? 'Вытянутый вырез' : 'Вытянутая бобышка') : (f.mode === 'cut' ? 'Повёрнутый вырез' : 'Повёрнутая бобышка'), isExt ? (f.mode === 'cut' ? ICON.cut : ICON.extrude) : ICON.revolve));
   body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Операция'), seg([['add', 'Добавить'], ['cut', 'Вырезать']], f.mode, (v) => { f.mode = v; if (isExt && v === 'cut' && f.end === 'blind' && !pm.touchedEnd) f.end = 'through'; if (isExt) f.dir = v === 'cut' ? guessCutDir(sf, reg, f) : S.body ? guessAddDir(sf, reg, f) : 1; refresh(); })));
   if (isExt) {
+    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Начало'),
+      seg([['sketch', 'От эскиза'], ['offset', 'Смещение'], ['face', 'От грани']], f.from || 'sketch', (v) => { f.from = v === 'sketch' ? undefined : v; pm.pickFrom = v === 'face' && !f.fromTarget; refresh(); }),
+      f.from === 'offset' ? numField('Смещение', 'pmFromOff', f.fromOffset || 0, (v) => { f.fromOffset = v; schedulePreview(); }) : null,
+      f.from === 'face' ? h('button', { class: 'rel pickbox' + (pm.pickFrom ? ' on' : ''), onclick: () => { pm.pickFrom = true; pm.pickTarget = false; renderSide(); } }, h('b', {}, '▱'), f.fromTarget ? (f.fromTarget.label || 'Грань') : 'щёлкните грань или плоскость') : null));
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Направление 1'),
       seg([['blind', 'На глубину'], ['mid', 'Симметр.'], ['next', 'До след.'], ['through', 'Насквозь'], ['face', 'До грани']], f.end, (v) => { f.end = v; pm.touchedEnd = true; pm.pickTarget = v === 'face' && !f.target; refresh(); }),
       f.end === 'face' ? h('button', { class: 'rel pickbox' + (pm.pickTarget ? ' on' : ''), onclick: () => { pm.pickTarget = true; renderSide(); } }, h('b', {}, '▱'), f.target ? (f.target.label || 'Грань') : 'щёлкните грань или плоскость') : null,
