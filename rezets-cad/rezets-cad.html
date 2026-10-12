@@ -310,6 +310,7 @@ import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { toCreasedNormals, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Brush, Evaluator, ADDITION, SUBTRACTION, INTERSECTION } from 'three-bvh-csg';
+import { MeshBVH } from 'three-mesh-bvh';
 
 // ============================================================================================
 // Small helpers
@@ -4131,6 +4132,7 @@ function asmPick(ev) {
 }
 function drawMatePicks() {
   if (S.measure) { drawMeasure(); return; }
+  if (S.pm?.kind === 'interf') { drawInterference(); return; }
   groups.measure.clear(); const asm = S.doc; if (S.mode !== 'asm') return;
   const show = (ref, col) => {
     const c = asm.comps.find((x) => x.id === ref.comp); if (!c) return; const inf = docInfo(c.doc);
@@ -4417,21 +4419,27 @@ function asmInterference(asm) {
   const out = [];
   for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
     const A = items[i], B = items[j]; const ba = A.g.boundingBox.clone().expandByScalar(-1e-4); if (!ba.intersectsBox(B.g.boundingBox)) continue;
-    // Both parts are first cut down to the overlap of their boxes: each of those booleans meets a
-    // 12-triangle box, and the final one only sees the material near the overlap. On a big imported
-    // part this is the difference between a frozen page and a fraction of a second. The margin is an
-    // odd number so the box never lies on a face of either part.
-    const ov = A.g.boundingBox.clone().intersect(B.g.boundingBox).expandByScalar(0.3137); const sz = ov.getSize(new THREE.Vector3()), ct = ov.getCenter(new THREE.Vector3());
-    const box = cleanGeo(new THREE.BoxGeometry(sz.x, sz.y, sz.z).translate(ct.x, ct.y, ct.z));
-    const a2 = boolean(A.g, box, INTERSECTION), b2 = boolean(B.g, box, INTERSECTION); if (!a2.getAttribute('position').count || !b2.getAttribute('position').count) continue;
     // Touching faces are coplanar, which the boolean resolves very slowly and unreliably. One part is
     // nudged by 0.1 µm along an odd direction both ways: a touch leaves a sliver on one side and
     // nothing on the other, a real overlap barely changes, so the smaller result is the answer.
     const vol = (g) => (g.getAttribute('position').count ? geoVolume(g) : 0); let r = null, v = Infinity;
-    for (const s of [1, -1]) { const b3 = b2.clone().translate(s * 5.77e-5, s * 6.21e-5, s * 5.31e-5); const g = boolean(a2, b3, INTERSECTION); const w = vol(g); if (w < v) { v = w; r = g; } }
-    if (v > 1e-3) out.push({ a: A.c.id, b: B.c.id, vol: v, geo: r });
+    for (const s of [1, -1]) { const b3 = B.g.clone().translate(s * 5.77e-5, s * 6.21e-5, s * 5.31e-5); const g = boolean(A.g, b3, INTERSECTION); const w = vol(g); if (w < v) { v = w; r = g; } }
+    if (v > 1e-3) out.push({ a: A.c.id, b: B.c.id, vol: v, geo: solidPart(r, A.g, B.g) });
   }
   return out;
+}
+// Where two parts touch, the boolean also returns a flat layer with no volume; drawn, it looks like
+// the touch counts. A triangle is kept only if the material of both parts lies just behind it.
+function solidPart(g, ga, gb) {
+  const inside = (bvh) => (p) => bvh.raycast(new THREE.Ray(p, new THREE.Vector3(0.5773, 0.5774, 0.5775).normalize()), THREE.DoubleSide).length % 2 === 1;
+  const inA = inside(new MeshBVH(ga, { indirect: true })), inB = inside(new MeshBVH(gb, { indirect: true })); const pos = g.getAttribute('position'); const keep = [];
+  const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(), n = new THREE.Vector3(), p = new THREE.Vector3();
+  for (let t = 0; t < pos.count / 3; t++) {
+    A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); n.crossVectors(B.clone().sub(A), C.clone().sub(A)); if (n.lengthSq() < 1e-24) continue; n.normalize();
+    p.copy(A).add(B).add(C).divideScalar(3).addScaledVector(n, -1e-3); if (inA(p) && inB(p)) keep.push(t);
+  }
+  const out = new Float32Array(keep.length * 9); keep.forEach((t, i) => { for (let k = 0; k < 9; k++) out[9 * i + k] = pos.array[9 * t + k]; });
+  const r = new THREE.BufferGeometry(); r.setAttribute('position', new THREE.BufferAttribute(out, 3)); r.computeVertexNormals(); return r;
 }
 function cmdInterference() {
   if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; }
@@ -4516,7 +4524,7 @@ function asmMove(ev) {
   if (!down) {
     const p = asmPick(ev);
     if (S.pm?.kind === 'mate') { const ep = asmEdgePick(ev); const hv = ep || (p?.ent ? { comp: p.comp, ...p.ent } : null); if (JSON.stringify(hv) !== JSON.stringify(S.pm.hover)) { S.pm.hover = hv; drawMatePicks(); } return; }
-    const hc = p?.comp || null; if (hc !== S.asmHover?.comp) { S.asmHover = p; asmRefresh(); }
+    const hc = p?.comp || null; if (!S.pm && hc !== S.asmHover?.comp) { S.asmHover = p; asmRefresh(); }
   }
 }
 function asmUp(ev, d) {
@@ -5147,5 +5155,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
