@@ -4311,6 +4311,7 @@ function refExists(ref, inf) {
   const P = V3(ref.p), D = V3(ref.d || [0, 0, 1]).normalize(); const tol = 1e-4;
   const onAxis = (p, d, r) => Math.abs(D.dot(d)) > 1 - 1e-6 && (ref.r == null || r == null || Math.abs(r - ref.r) < tol) && P.clone().sub(p).cross(d).length() < tol * Math.max(1, d.length());
   if (ref.kind === 'point') return edgeTopology(inf.geo, inf.cyls).verts.findIndex((v) => v.distanceTo(P) < tol) >= 0 ? -2 : -1;
+  if (ref.edge?.t === 'line') return edgeTopology(inf.geo, inf.cyls).lines.some(([a, b]) => { const d = b.clone().sub(a); return d.lengthSq() > 1e-12 && onAxis(a, d.normalize(), null); }) ? -2 : -1;
   if (ref.edge) return edgeTopology(inf.geo, inf.cyls).circles.some((c) => onAxis(c.c, c.n.clone().normalize(), c.r)) || inf.ents.some((e) => e.kind === 'axis' && onAxis(e.p, e.d.clone().normalize(), e.r)) ? -2 : -1;
   return inf.ents.findIndex((e) => e.kind === ref.kind && (ref.kind === 'plane' ? e.n.dot(D) > 1 - 1e-6 && Math.abs(e.n.dot(e.p) - D.dot(P)) < tol : onAxis(e.p, e.d.clone().normalize(), e.r)));
 }
