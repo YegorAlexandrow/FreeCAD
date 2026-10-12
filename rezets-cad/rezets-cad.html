@@ -4244,6 +4244,9 @@ function mateResiduals(m, A, B) {
 // Faces and axes from STEP files are parallel only to about 1e-8, so a mate that repeats what
 // two others already fix leaves a remainder of that size and must not count as a new constraint.
 const ASM_TOL = 1e-6;
+// The solver stops near 5e-8; a repeated mate then leaves a remainder in the elimination about a
+// thousand times its residual. The rank threshold follows the residual the assembly is actually at.
+const rankTol = (sys) => Math.min(1e-3, Math.max(ASM_TOL, 2e3 * maxAbs(residual(sys, new Float64Array(sys.n)))));
 // Mates keep the face, axis or vertex they were made on as coordinates in the part. After the part
 // is edited, a reference whose geometry is gone would hold the component at the old place without
 // any error. Each reference is looked up again: found as is, it stays; when the part kept the same
@@ -4329,7 +4332,7 @@ function asmSolve(asm, weights, extra) {
 function asmAnalyze(asm) {
   const sys = asmSystem(asm); const X = new Float64Array(sys.n);
   if (!sys.n) { const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > 1e-6) bad.add(e.cid); return { dof: 0, free: new Set(), redundant: bad }; }
-  const rows = jacobian(sys, X, 1e-5); const { basis, dependent } = eliminate(rows, sys.n, ASM_TOL);
+  const rows = jacobian(sys, X, 1e-5); const { basis, dependent } = eliminate(rows, sys.n, rankTol(sys));
   for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < sys.n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
   const piv = new Set(basis.map((b) => b.piv)); const freeCols = [...Array(sys.n).keys()].filter((k) => !piv.has(k)); const free = new Set(freeCols);
   for (const b of basis) if (freeCols.some((f) => Math.abs(b.vec[f]) > 1e-7)) free.add(b.piv);
@@ -4353,7 +4356,7 @@ function tryAddMate(asm, m) {
   if (deps.length) {
     const sys2 = asmSystem(asm); const rows2 = jacobian(sys2, new Float64Array(sys2.n), 1e-5); const own2 = rows2.filter((r) => r.cid === m.id), oth2 = rows2.filter((r) => r.cid !== m.id);
     // Partly overlapping mates are fine (concentric after a coincident face); one that adds nothing is not.
-    if (eliminate([...oth2, ...own2], sys2.n, ASM_TOL).dependent.filter((d) => d.ri >= oth2.length).length === own2.length) { asm.mates.pop(); restorePoses(asm, before); return { status: 'redundant', group: [...group] }; }
+    if (eliminate([...oth2, ...own2], sys2.n, rankTol(sys2)).dependent.filter((d) => d.ri >= oth2.length).length === own2.length) { asm.mates.pop(); restorePoses(asm, before); return { status: 'redundant', group: [...group] }; }
   }
   return { status: 'ok' };
 }
@@ -4825,8 +4828,8 @@ function asmDown(ev) {
   S.asmDrag = { comp: c, plane, start: p.point.clone(), pose0: poseOf(c), all0: snapPoses(S.doc), rotate: ev.shiftKey, sx: ev.clientX, sy: ev.clientY };
 }
 // Null space of constraint rows: the motions the mates still allow.
-function nullSpace(rows, n) {
-  const { basis } = eliminate(rows, n, ASM_TOL);
+function nullSpace(rows, n, tol = ASM_TOL) {
+  const { basis } = eliminate(rows, n, tol);
   for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
   const piv = new Set(basis.map((b) => b.piv));
   return [...Array(n).keys()].filter((k) => !piv.has(k)).map((f) => { const v = new Float64Array(n); v[f] = 1; for (const b of basis) v[b.piv] = -b.vec[f] / b.vec[b.piv]; return v; });
@@ -4838,7 +4841,7 @@ function dragFollow(asm, c, D, T) {
   const miss = () => { const p = poseOf(c); return T.clone().sub(Lp.clone().applyQuaternion(p.q).add(p.t)); };
   for (let it = 0; it < 12; it++) {
     const sys = asmSystem(asm); const n = sys.n; const i = sys.idx.get(c.id); if (i === undefined) return false;
-    const N = nullSpace(jacobian(sys, new Float64Array(n), 1e-5), n); if (!N.length) return false;
+    const N = nullSpace(jacobian(sys, new Float64Array(n), 1e-5), n, rankTol(sys)); if (!N.length) return false;
     const p = poseOf(c); const r = Lp.clone().applyQuaternion(p.q); const res = miss(); const base = res.length(); if (base < 1e-4 * compSize(c)) break;
     const col = (j) => { const e = new THREE.Vector3(); e.setComponent(j % 3, 1); return j < 3 ? e.cross(r) : e; };
     const M = N.map((v) => { const s = new THREE.Vector3(); for (let j = 0; j < 6; j++) s.addScaledVector(col(j), v[6 * i + j]); return s; });
