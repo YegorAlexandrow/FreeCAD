@@ -4670,6 +4670,31 @@ function asmDown(ev) {
   const n = camera.getWorldDirection(new THREE.Vector3()); const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, p.point);
   S.asmDrag = { comp: c, plane, start: p.point.clone(), pose0: poseOf(c), all0: snapPoses(S.doc), rotate: ev.shiftKey, sx: ev.clientX, sy: ev.clientY };
 }
+// Null space of constraint rows: the motions the mates still allow.
+function nullSpace(rows, n) {
+  const { basis } = eliminate(rows, n);
+  for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
+  const piv = new Set(basis.map((b) => b.piv));
+  return [...Array(n).keys()].filter((k) => !piv.has(k)).map((f) => { const v = new Float64Array(n); v[f] = 1; for (const b of basis) v[b.piv] = -b.vec[f] / b.vec[b.piv]; return v; });
+}
+// Dragging a part: the grabbed point follows the cursor as far as the mates let it, so a part left
+// only a turn about an axis turns, and one that can slide along a rail slides.
+function dragFollow(asm, c, D, T) {
+  const Lp = D.start.clone().sub(D.pose0.t).applyQuaternion(D.pose0.q.clone().invert());
+  for (let it = 0; it < 12; it++) {
+    const sys = asmSystem(asm); const n = sys.n; const i = sys.idx.get(c.id); if (i === undefined) return false;
+    const N = nullSpace(jacobian(sys, new Float64Array(n)), n); if (!N.length) return false;
+    const p = poseOf(c); const r = Lp.clone().applyQuaternion(p.q); const res = T.clone().sub(r.clone().add(p.t)); if (res.length() < 1e-4 * compSize(c)) break;
+    const col = (j) => { const e = new THREE.Vector3(); e.setComponent(j % 3, 1); return j < 3 ? e.cross(r) : e; };
+    const M = N.map((v) => { const s = new THREE.Vector3(); for (let j = 0; j < 6; j++) s.addScaledVector(col(j), v[6 * i + j]); return s; });
+    const A = M.map((a) => M.map((b) => a.dot(b))); A.forEach((row, k) => (row[k] += 1e-9)); const a = solveLinear(A, M.map((m) => m.dot(res))); if (!a) return false;
+    const dx = new Float64Array(n); N.forEach((v, k) => { for (let j = 0; j < n; j++) dx[j] += a[k] * v[j]; });
+    // Big turns are taken in steps, each put back onto the mates.
+    const rot = Math.hypot(dx[6 * i], dx[6 * i + 1], dx[6 * i + 2]); if (rot > 0.3) for (let j = 0; j < n; j++) dx[j] *= 0.3 / rot;
+    sys.commit(dx); if (!asmSolve(asm)) return false;
+  }
+  return true;
+}
 function asmMove(ev) {
   const D = S.asmDrag;
   if (D && !D.fixed && down?.moved) {
@@ -4680,7 +4705,8 @@ function asmMove(ev) {
       const t = D.pose0.t.clone().sub(D.start).applyQuaternion(q).add(D.start); setPose(c, t, q.multiply(D.pose0.q.clone()));
     } else {
       const hit = new THREE.Vector3(); if (!rayFromEvent(ev).ray.intersectPlane(D.plane, hit)) return;
-      setPose(c, D.pose0.t.clone().add(hit.sub(D.start)), D.pose0.q.clone());
+      if (dragFollow(asm, c, D, hit)) { asmRefresh(); return; }
+      restorePoses(asm, D.all0); setPose(c, D.pose0.t.clone().add(hit.sub(D.start)), D.pose0.q.clone());
     }
     const L = compSize(c); const ok = asmSolve(asm, (sys) => { const i = sys.idx.get(c.id); return i === undefined ? [] : [0, 1, 2, 3, 4, 5].map((k) => [6 * i + k, k < 3 ? 1e-8 / (L * L) : 1e-4]); });
     if (!ok) restorePoses(asm, D.all0);
