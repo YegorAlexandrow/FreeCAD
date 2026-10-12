@@ -3230,7 +3230,7 @@ function renderSweepLoftPM() {
   else { const g = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Сечения: ${f.sketches.length}`));
     for (const sf of closedSketches(idx)) g.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.sketches.includes(sf.id), onchange: (e) => { f.sketches = e.target.checked ? S.doc.features.filter((x) => x.id === sf.id || f.sketches.includes(x.id)).map((x) => x.id) : f.sketches.filter((x) => x !== sf.id); f.sketch = f.sketches[0]; renderSide(); schedulePreview(); } }), sf.name));
     g.append(h('div', { class: 'note' }, 'Сечения соединяются в порядке дерева. Через три и больше проходит плавная поверхность.')); body.append(g); }
-  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  if (err) body.append(pmErr(err));
   side.append(body);
 }
 
@@ -3824,6 +3824,9 @@ function cmdHole() {
   openPM({ kind: 'feature', feature: f, isNew: true });
 }
 function holePointsCount(sf) { try { return holePoints(sf).length; } catch { return 0; } }
+// A feature waiting for a pick ("Выберите грань…") is not in error: that line reads as the next step.
+const isAsk = (err) => /^(Выберите|Щёлкните|Укажите)/.test(err || '');
+const pmErr = (err) => h('div', { class: 'grp' }, h('div', { class: 'note', style: isAsk(err) ? 'color:var(--accent)' : 'color:var(--bad)' }, err));
 function renderHolePM() {
   const pm = S.pm; const f = pm.feature; const err = S.errors[f.id]; const sf = featById(f.sketch);
   const refresh = () => { renderSide(); schedulePreview(); };
@@ -3842,7 +3845,7 @@ function renderHolePM() {
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление')));
   body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Положение'), h('div', { class: 'note' }, `${sf?.name || '?'}: ${sf ? holePointsCount(sf) : 0} ${plural(sf ? holePointsCount(sf) : 0, 'точка', 'точки', 'точек')}. Положение задаётся размерами в эскизе.`),
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const s2 = featById(f.sketch); closePM(true); startSketch(s2.plane, s2); setTool('point'); } }, 'Редактировать точки'))));
-  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  if (err) body.append(pmErr(err));
   side.append(body);
 }
 
@@ -3917,7 +3920,7 @@ function renderShellPM() {
     h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Толщина'), numField('Стенка', 'pmThick', f.t, (v) => { f.t = v; schedulePreview(); })),
     h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Удаляемые грани: ${f.faces.length}`), h('div', { class: 'note' }, 'Щёлкайте плоские грани, которые нужно открыть. Без граней получится закрытая полость.'),
       f.faces.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { f.faces = []; renderSide(); drawShellFaces(); schedulePreview(); } }, 'Очистить')) : null));
-  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  if (err) body.append(pmErr(err));
   side.append(body);
 }
 
@@ -4018,7 +4021,7 @@ function cmdPattern(type) {
 }
 function openPatternPM(f, isNew) {
   const idx = isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id); const base = computeBody(S.doc.features.slice(0, idx));
-  openPM({ kind: 'feature', feature: f, isNew, pattern: true, topo: base.body ? edgeTopology(base.body, base.cyls) : { lines: [], circles: [] }, pickFor: f.type === 'mirror' ? 'plane' : f.type === 'lpattern' ? 'dir' : 'axis' });
+  openPM({ kind: 'feature', feature: f, isNew, pattern: true, topo: base.body ? edgeTopology(base.body, base.cyls) : { lines: [], circles: [] }, pickFor: isNew ? 'feats' : f.type === 'mirror' ? 'plane' : f.type === 'lpattern' ? 'dir' : 'axis' });
   drawPatternRefs();
 }
 function axisLabel(spec) { if (!spec) return '—'; if (spec.axis) return AXIS_NAMES[spec.axis]; return spec.edge.t === 'line' ? 'Прямое ребро' : 'Ось окружности ⌀' + fmt(2 * spec.edge.r); }
@@ -4033,6 +4036,13 @@ function drawPatternRefs() {
 }
 function patternPick(ev, click) {
   const pm = S.pm; const f = pm.feature;
+  if (pm.pickFor === 'feats') {
+    const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); return; } if (!p?.face) return;
+    const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id); const steps = solidSteps().filter((st) => S.doc.features.indexOf(st.f) < idx);
+    // The window shows the preview with the copies; a face of a copy is not on the part before the pattern.
+    const sm = faceSample(p.face); if (!steps.length || !sm || !onSurface(steps.at(-1).body, sm.p, sm.n)) return;
+    const by = faceCreator({ ...p.face, creator: undefined }, steps); togglePatternSeed(by); return;
+  }
   if (pm.pickFor === 'plane') {
     const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); } return; }
     if (p?.plane) f.plane = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; else if (p?.face) f.plane = { face: planeFromFace(p.face, p.point) }; else return;
@@ -4044,6 +4054,10 @@ function patternPick(ev, click) {
   if (pm.pickFor === 'dir') f.dir = spec; else if (pm.pickFor === 'dir2') f.dir2 = spec; else f.axis = spec;
   pm.hoverEdge = null; renderSide(); drawPatternRefs(); schedulePreview();
 }
+function togglePatternSeed(id) {
+  const f = S.pm.feature; const c = featById(id); if (!c || !['extrude', 'revolve', 'hole'].includes(c.type)) { if (c) toast(`«${c.name}» нельзя скопировать массивом`, 'info'); return; }
+  f.feats = f.feats.includes(id) ? f.feats.filter((x) => x !== id) : [...f.feats, id]; renderSide(); schedulePreview();
+}
 function renderPatternPM() {
   const pm = S.pm; const f = pm.feature; const err = S.errors[f.id];
   const title = { lpattern: 'Линейный массив', cpattern: 'Круговой массив', mirror: 'Зеркальное отражение' }[f.type];
@@ -4052,7 +4066,14 @@ function renderPatternPM() {
   const cands = S.doc.features.slice(0, idx).filter((x) => (x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole') && !x.suppressed);
   const seeds = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Копировать элементы'));
   if (f.type === 'mirror') seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !f.feats.length, onchange: (e) => { if (e.target.checked) f.feats = []; renderSide(); schedulePreview(); } }), 'Всё тело'));
-  for (const c of cands) seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.feats.includes(c.id), onchange: (e) => { f.feats = e.target.checked ? [...f.feats, c.id] : f.feats.filter((x) => x !== c.id); renderSide(); schedulePreview(); } }), c.name));
+  // Features are picked like in SolidWorks: a click on a face in the window or on the row in the tree;
+  // the full list stays folded below for when the face is hard to reach.
+  seeds.append(h('button', { class: 'rel pickbox' + (pm.pickFor === 'feats' ? ' on' : ''), onclick: () => { pm.pickFor = 'feats'; renderSide(); } }, h('b', {}, '↗'), f.feats.length ? `Выбрано: ${f.feats.length}` : 'Щёлкните грань операции'));
+  for (const id of f.feats) { const c = featById(id); if (c) seeds.append(h('div', { class: 'rel' }, h('span', {}, c.name), h('button', { class: 'x', title: 'Убрать', onclick: () => { f.feats = f.feats.filter((x) => x !== id); renderSide(); schedulePreview(); } }, '✕'))); }
+  if (pm.pickFor === 'feats') seeds.append(h('div', { class: 'note' }, 'Щёлкните грань в окне или операцию в дереве: она добавится или уберётся'));
+  const all = h('details', {}, h('summary', { class: 'note', style: 'cursor:pointer' }, 'Список операций'));
+  for (const c of cands) all.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.feats.includes(c.id), onchange: (e) => { f.feats = e.target.checked ? [...f.feats, c.id] : f.feats.filter((x) => x !== c.id); renderSide(); schedulePreview(); } }), c.name));
+  seeds.append(all);
   body.append(seeds);
   const pickRow = (label, key, spec, set) => h('div', { class: 'grp' + (pm.pickFor === key ? ' active' : '') }, h('div', { class: 'lbl' }, label),
     h('button', { class: 'rel pickbox' + (pm.pickFor === key ? ' on' : ''), onclick: () => { pm.pickFor = key; renderSide(); } }, h('b', {}, '↗'), axisLabel(spec)),
@@ -4077,7 +4098,7 @@ function renderPatternPM() {
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('div', { class: 'rel' }, h('b', {}, '▱'), name), h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне'),
       h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.plane = { std: k }; renderSide(); schedulePreview(); } }, p.label)))));
   }
-  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  if (err) body.append(pmErr(err));
   side.append(body);
 }
 
@@ -4756,20 +4777,33 @@ function renderExplodePM() {
   side.append(box);
 }
 // Interference: the common volume of every pair of components whose boxes overlap.
-function asmInterference(asm) {
-  const items = allComps(asm).map((c) => { const inf = docInfo(c.doc); if (!inf || inf.empty) return null; const g = inf.geo.clone(); g.applyMatrix4(new THREE.Matrix4().fromArray(c.T)); g.computeBoundingBox(); return { c, g }; }).filter(Boolean);
-  const out = [];
-  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
-    const A = items[i], B = items[j]; const ba = A.g.boundingBox.clone().expandByScalar(-1e-4); if (!ba.intersectsBox(B.g.boundingBox)) continue;
-    // Touching faces are coplanar, which the boolean resolves very slowly and unreliably. One part is
-    // nudged by 0.1 µm along an odd direction both ways: a touch leaves a sliver on one side and
-    // nothing on the other, a real overlap barely changes, so the smaller result is the answer.
-    const vol = (g) => (g.getAttribute('position').count ? geoVolume(g) : 0); let r = null, v = Infinity;
-    for (const s of [1, -1]) { const b3 = B.g.clone().translate(s * 5.77e-5, s * 6.21e-5, s * 5.31e-5); const g = boolean(A.g, b3, INTERSECTION); const w = vol(g); if (w < v) { v = w; r = g; } }
-    if (v > 1e-3) out.push({ a: A.c.id, b: B.c.id, vol: v, geo: solidPart(r, A.g, B.g) });
-  }
-  return out;
+// Interference needs only the volume and a shape to draw: the plain CSG result, without the clean-up the
+// part booleans do, which on a 170k-triangle STEP part takes seconds.
+function csgIntersect(a, b) { try { const A = new Brush(a), B = new Brush(b); A.updateMatrixWorld(); B.updateMatrixWorld(); return closeCracks(cleanGeo(csg.evaluate(A, B, INTERSECTION).geometry)); } catch (e) { console.warn('interference', e); return new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3)); } }
+// Pairs whose surfaces never cross and neither holds the other cannot interfere; the BVH says so in
+// milliseconds where the boolean of a 120k-triangle STEP part takes seconds.
+function mayOverlap(A, B) {
+  const bvhA = new MeshBVH(A.g, { indirect: true }); const gb = new THREE.BufferGeometry(); gb.setAttribute('position', B.g.getAttribute('position')); gb.setIndex(new THREE.BufferAttribute(Uint32Array.from({ length: B.g.getAttribute('position').count }, (_, i) => i), 1));
+  gb.boundsTree = new MeshBVH(gb); if (bvhA.intersectsGeometry(gb, new THREE.Matrix4())) return true;
+  const inside = (bvh, p) => bvh.raycast(new THREE.Ray(p, new THREE.Vector3(0.5773, 0.5774, 0.5775).normalize()), THREE.DoubleSide).length % 2 === 1;
+  const first = (g) => new THREE.Vector3().fromBufferAttribute(g.getAttribute('position'), 0);
+  return inside(bvhA, first(B.g)) || inside(new MeshBVH(B.g, { indirect: true }), first(A.g));
 }
+function interferencePairs(asm) {
+  const items = allComps(asm).map((c) => { const inf = docInfo(c.doc); if (!inf || inf.empty) return null; const g = inf.geo.clone(); g.applyMatrix4(new THREE.Matrix4().fromArray(c.T)); g.computeBoundingBox(); return { c, g }; }).filter(Boolean);
+  const pairs = []; for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) { const A = items[i], B = items[j]; const ba = A.g.boundingBox.clone().expandByScalar(-1e-4); if (ba.intersectsBox(B.g.boundingBox)) pairs.push([A, B]); }
+  return pairs;
+}
+function interferenceOf(A, B) {
+  if (!mayOverlap(A, B)) return null;
+  // Touching faces are coplanar, which the boolean resolves very slowly and unreliably. One part is
+  // nudged by 0.1 µm along an odd direction: a touch leaves a sliver on one side and nothing on the
+  // other, a real overlap barely changes. The other side is tried only when the first gave a sliver.
+  const vol = (g) => (g.getAttribute('position').count ? geoVolume(g) : 0); let r = null, v = Infinity;
+  for (const s of [1, -1]) { const b3 = B.g.clone().translate(s * 5.77e-5, s * 6.21e-5, s * 5.31e-5); const g = csgIntersect(A.g, b3); const w = vol(g); if (w < v) { v = w; r = g; } if (v > 0.05) break; }
+  return v > 0.01 ? { a: A.c.id, b: B.c.id, vol: v, geo: solidPart(r, A.g, B.g) } : null;
+}
+function asmInterference(asm) { return interferencePairs(asm).map(([A, B]) => interferenceOf(A, B)).filter(Boolean); }
 // Where two parts touch, the boolean also returns a flat layer with no volume; drawn, it looks like
 // the touch counts. A triangle is kept only if the material of both parts lies just behind it.
 function solidPart(g, ga, gb) {
@@ -4785,8 +4819,15 @@ function solidPart(g, ga, gb) {
 }
 function cmdInterference() {
   if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; }
-  const t0 = performance.now(); const res = asmInterference(S.doc); S.asmSel = null;
-  openPM({ kind: 'interf', res, sel: null, ms: performance.now() - t0 }); drawInterference();
+  // Pair by pair, with the window kept alive in between: a big STEP part takes seconds per pair.
+  const t0 = performance.now(); const pairs = interferencePairs(S.doc); const res = []; S.asmSel = null; const doc = S.doc;
+  openPM({ kind: 'interf', res, sel: null, ms: 0, busy: { done: 0, of: pairs.length } }); drawInterference();
+  const step = (k) => {
+    if (S.doc !== doc || S.pm?.kind !== 'interf') return;
+    if (k >= pairs.length) { S.pm.busy = null; S.pm.ms = performance.now() - t0; renderSide(); drawInterference(); return; }
+    const r = interferenceOf(...pairs[k]); if (r) res.push(r); S.pm.busy = { done: k + 1, of: pairs.length }; renderSide(); drawInterference(); setTimeout(() => step(k + 1), 0);
+  };
+  setTimeout(() => step(0), 30);
 }
 function drawInterference() {
   groups.measure.clear(); const pm = S.pm; if (pm?.kind !== 'interf') { requestRender(); return; }
@@ -4810,9 +4851,10 @@ function renderAsmPM() {
     const cname = (id) => S.doc.comps.find((c) => c.id === id)?.name || '?';
     const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.interf), h('span', {}, 'Проверка пересечений'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
     const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Пересечения: ${pm.res.length}`));
-    if (!pm.res.length) grp.append(h('div', { class: 'note', style: 'color:var(--good)' }, 'Компоненты не пересекаются.'));
+    if (pm.busy) grp.append(h('div', { class: 'note' }, `Считаю: пара ${pm.busy.done} из ${pm.busy.of}`));
+    else if (!pm.res.length) grp.append(h('div', { class: 'note', style: 'color:var(--good)' }, 'Компоненты не пересекаются'));
     pm.res.forEach((r, i) => { const row = h('button', { class: 'rel pickbox' + (pm.sel === i ? ' on' : ''), onclick: () => { pm.sel = pm.sel === i ? null : i; renderSide(); drawInterference(); } }, h('b', {}, '✕'), `${cname(r.a)} ↔ ${cname(r.b)}: ${fmt(r.vol, 2)} мм³`); grp.append(row); });
-    grp.append(h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const sel = pm.sel; S.pm.res = asmInterference(S.doc); S.pm.sel = sel != null && sel < S.pm.res.length ? sel : null; renderSide(); drawInterference(); } }, 'Пересчитать')));
+    grp.append(h('div', { class: 'chips' }, pm.busy ? null : h('button', { class: 'chip', onclick: () => cmdInterference() }, 'Пересчитать')));
     box.append(grp); side.append(box); return;
   }
   if (pm.kind === 'insert') {
@@ -5032,6 +5074,7 @@ function renderTree() {
     const r = h('div', { class: 'row' + (S.selectedTree === key ? ' sel' : '') + (S.faceOrigin && key === 'feat:' + S.faceOrigin ? ' origin' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
       svg(icon), h('span', { class: 'nm' }, name), opts.meta ? h('span', { class: 'meta' }, opts.meta) : null);
     r.addEventListener('click', () => {
+      if (S.pm?.pattern && S.pm.pickFor === 'feats' && key.startsWith('feat:')) { togglePatternSeed(key.slice(5)); return; }
       if (S.pickSketch && key.startsWith('feat:')) { const g = featById(key.slice(5)); const sf = g?.type === 'sketch' ? g : g?.sketch ? featById(g.sketch) : null; if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; } }
       S.selectedTree = key; S.faceOrigin = null; buildPlanes(); renderTree(); updateSketchVisuals(); showFeatureFaces(key.startsWith('feat:') ? key.slice(5) : null); opts.onSelect?.(); });
     if (opts.onOpen) r.addEventListener('dblclick', opts.onOpen);
@@ -5168,7 +5211,7 @@ function renderPM() {
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Размер'), isF ? numField('Радиус', 'pmRadius', f.r, (v) => { f.r = v; schedulePreview(); }) : numField('Расстояние', 'pmDist', f.d, (v) => { f.d = v; schedulePreview(); })),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Рёбра: ${f.edges.length}`), h('div', { class: 'note' }, 'Щёлкайте рёбра модели, повторный щелчок убирает ребро.'),
         f.edges.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { f.edges.length = 0; renderSide(); drawEdgeSelection(); schedulePreview(); } }, 'Очистить')) : null));
-    if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+    if (err) body.append(pmErr(err));
     side.append(body); return;
   }
   const f = pm.feature; const sf = featById(f.sketch); const reg = sketchRegions(sf); const ids = selectedRegionIds(f, reg);
@@ -5202,7 +5245,7 @@ function renderPM() {
   body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные контуры'),
     h('div', { class: 'note' }, `${sf.name}: выбрано ${ids.size} из ${reg.faces.length}. Щёлкайте области в окне, чтобы добавить или убрать их.`),
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { f.regions = reg.faces.map((r) => r.id); refresh(); drawRegions(); } }, 'Все'), h('button', { class: 'chip', onclick: () => { f.regions = null; refresh(); drawRegions(); } }, 'По умолчанию'))));
-  if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
+  if (err) body.append(pmErr(err));
   side.append(body);
 }
 // Each extra relation is listed with the ones it repeats; a click shows them all on the sketch.
@@ -5601,5 +5644,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>

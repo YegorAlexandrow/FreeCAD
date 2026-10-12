@@ -8,7 +8,7 @@ const proj = fs.readFileSync(__dirname + '/../testdata/big/servo_proj4.json', 'u
     const t = performance.now(); const res = R.asmInterference(R.S.doc);
     return ['ms ' + Math.round(performance.now() - t), ...res.map((r) => [r.a, r.b, r.vol.toFixed(3)].join(' ')), 'screw head exact ' + (Math.PI * 2.9 * 2.9 * 0.6).toFixed(3)].join('\n'); }, proj));
   await p.click('[data-view="iso"]'); await p.waitForTimeout(300); await p.keyboard.press('f'); await p.waitForTimeout(300);
-  await p.evaluate(() => window.__rezets.cmdInterference()); await p.waitForTimeout(300);
+  await p.evaluate(() => window.__rezets.cmdInterference()); await p.waitForFunction(() => window.__rezets.S.pm?.kind === 'interf' && !window.__rezets.S.pm.busy, null, { timeout: 60000 });
   const n0 = await p.evaluate(() => window.__rezets.groups.measure.children.length);
   for (let i = 0; i < 20; i++) { await p.mouse.move(400 + i * 40, 300 + i * 15); await p.waitForTimeout(40); }
   console.log('drawn before/after hovering', n0, await p.evaluate(() => window.__rezets.groups.measure.children.length));
