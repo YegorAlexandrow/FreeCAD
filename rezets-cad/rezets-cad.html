@@ -1229,9 +1229,19 @@ const fid = () => 'f' + (S.doc.nid++);
 function rollbackIndex() { const n = (S.doc.features || []).length; return S.doc.rollback == null ? n : S.doc.rollback; }
 // Reference planes: a standard plane, a planar face or another reference plane, offset along
 // its normal. Sketches on them follow the plane when its offset changes.
+function basePlane(b, features, depth) { if (!b) return null; if (b.std) return PLANES[b.std]; if (b.face) return b.face; if (b.plane && depth < 20) { const g = features.find((x) => x.id === b.plane); return g ? refPlane(g, features, depth + 1) : null; } return null; }
+// A middle plane lies halfway between two parallel planes or faces; for two that meet it bisects the angle.
+function midPlane(f, B1, B2) {
+  const n1 = V3(B1.n).normalize(), n2 = V3(B2.n).normalize(); const o1 = V3(B1.o), o2 = V3(B2.o);
+  if (Math.abs(n1.dot(n2)) > 1 - 1e-9) { const o = o1.clone().addScaledVector(n1, n1.dot(o2.clone().sub(o1)) / 2); return { label: f.name, o: o.toArray(), x: [...B1.x], y: [...B1.y], n: n1.toArray(), ref: f.id }; }
+  const dir = n1.clone().cross(n2).normalize(); const n = (n1.dot(n2) < 0 ? n1.clone().sub(n2) : n1.clone().add(n2)).normalize();
+  // A point on both planes: least squares along n1, n2 from the midpoint of the two origins.
+  const p = o1.clone().add(o2).multiplyScalar(0.5); for (let i = 0; i < 60; i++) { p.addScaledVector(n1, n1.dot(o1) - n1.dot(p)); p.addScaledVector(n2, n2.dot(o2) - n2.dot(p)); }
+  const x = dir, y = n.clone().cross(x); return { label: f.name, o: p.toArray(), x: x.toArray(), y: y.toArray(), n: n.toArray(), ref: f.id };
+}
 function refPlane(f, features = S.doc.features, depth = 0) {
-  const b = f.base || { std: 'top' }; let B;
-  if (b.std) B = PLANES[b.std]; else if (b.face) B = b.face; else if (b.plane && depth < 20) { const g = features.find((x) => x.id === b.plane); B = g ? refPlane(g, features, depth + 1) : PLANES.top; } else B = PLANES.top;
+  if (f.mid) { const B1 = basePlane(f.base, features, depth) || PLANES.top, B2 = basePlane(f.base2, features, depth) || B1; return midPlane(f, B1, B2); }
+  const B = basePlane(f.base || { std: 'top' }, features, depth) || PLANES.top;
   const s = (f.flip ? -1 : 1) * (f.d || 0); const n = B.n;
   return { label: f.name, o: [B.o[0] + n[0] * s, B.o[1] + n[1] * s, B.o[2] + n[2] * s], x: [...B.x], y: [...B.y], n: [...n], ref: f.id };
 }
@@ -1986,7 +1996,7 @@ function partClick(ev) {
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) toggleRegion(r.id); return; }
   const p = partPickAt(ev, !S.pm);
-  if (S.pm?.feature?.type === 'plane') { const f = S.pm.feature; if (p?.plane) f.base = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; else if (p?.face) f.base = { face: planeFromFace(p.face, p.point) }; else return; renderSide(); rebuild(); return; }
+  if (S.pm?.feature?.type === 'plane') { const f = S.pm.feature; const key = S.pm.slot || 'base'; if (p?.plane) { if (p.plane === 'f:' + f.id) return; f[key] = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; } else if (p?.face) f[key] = { face: planeFromFace(p.face, p.point) }; else return; if (f.mid && key === 'base' && !f.base2) S.pm.slot = 'base2'; renderSide(); rebuild(); return; }
   if (S.pm?.kind === 'pickPlane') { if (p?.plane) startSketch(planeByKey(p.plane)); else if (p?.face) startSketch(planeFromFace(p.face, p.point)); return; }
   if (p?.plane) { S.selectedTree = p.plane.startsWith('f:') ? 'feat:' + p.plane.slice(2) : 'plane:' + p.plane; S.pickedFace = null; }
   else if (p?.face) {
@@ -5089,7 +5099,7 @@ function renderTree() {
   const featRow = (f, i, child) => {
     const off = i >= rb || f.suppressed; const err = S.errors[f.id];
     const icon = f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
-    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'next' ? 'до следующей' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
+    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'next' ? 'до следующей' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? (f.mid ? 'средняя' : fmt(f.d) + ' мм') : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
@@ -5149,7 +5159,7 @@ function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? nu
 function editFeature(f) { if (!f) return; if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
-  if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; } }
+  if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; } }
   for (const g of S.doc.features) if (Array.isArray(g.feats)) g.feats = g.feats.filter((x) => x !== f.id);
   const dependents = S.doc.features.filter((g) => g.sketch === f.id);
   S.doc.features = S.doc.features.filter((g) => g !== f && !dependents.includes(g));
@@ -5197,12 +5207,16 @@ function renderPM() {
   if (pm.feature?.type === 'sweep' || pm.feature?.type === 'loft') { renderSweepLoftPM(); return; }
   if (pm.shell) { renderShellPM(); return; }
   if (pm.feature?.type === 'plane') {
-    const f = pm.feature; const b = f.base; const baseName = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
+    const f = pm.feature; const nameOf = (b) => !b ? 'не выбрана' : b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
+    const slot = pm.slot || 'base';
+    const box = (key, label) => h('div', { class: 'grp' }, h('div', { class: 'lbl' }, label), h('button', { class: 'rel pickbox' + (slot === key ? ' on' : ''), onclick: () => { pm.slot = key; renderSide(); } }, h('b', {}, '▱'), nameOf(f[key])),
+      slot === key ? h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне') : null,
+      slot === key ? h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f[key] = { std: k }; if (f.mid && key === 'base') pm.slot = 'base2'; renderPM(); rebuild(); } }, p.label))) : null);
     side.append(h('div', { class: 'pm' }, pmHeader('Плоскость', ICON.plane),
-      h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Исходная плоскость'), h('div', { class: 'rel' }, h('b', {}, '▱'), baseName), h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне, чтобы сменить.'),
-        h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.base = { std: k }; renderPM(); rebuild(); } }, p.label)))),
-      h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), numField('Расстояние', 'pmDist', f.d, (v) => { f.d = v; rebuild(); }),
-        h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; rebuild(); } }), 'В другую сторону'))));
+      h('div', { class: 'grp' }, seg([['off', 'Со смещением'], ['mid', 'Средняя']], f.mid ? 'mid' : 'off', (v) => { f.mid = v === 'mid'; if (f.mid && !f.base2) pm.slot = 'base2'; else pm.slot = 'base'; renderSide(); rebuild(); })),
+      f.mid ? [box('base', 'Первая плоскость или грань'), box('base2', 'Вторая плоскость или грань'), h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Посередине между параллельными, по биссектрисе между пересекающимися'))]
+        : [box('base', 'Исходная плоскость'), h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), numField('Расстояние', 'pmDist', f.d, (v) => { f.d = v; rebuild(); }),
+          h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; rebuild(); } }), 'В другую сторону'))]));
     return;
   }
   if (pm.edgePick) {
@@ -5644,5 +5658,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
