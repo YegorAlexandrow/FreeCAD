@@ -4945,10 +4945,17 @@ function renderTree() {
   side.append(tree);
   if (!S.doc.features.length) side.append(h('div', { class: 'empty-tree' }, 'Деталь пустая. Выберите плоскость «Сверху» и нажмите «Эскиз», нарисуйте прямоугольник и вытяните его.'));
 }
+// The bar moves among the rows while dragging and the model is rebuilt once, on release:
+// a rebuild redraws the tree, and a heavy part would lag behind the mouse.
 function startRollDrag(ev) {
-  ev.preventDefault(); const rows = [...side.querySelectorAll('.row[data-index]')];
-  const mv = (e) => { let idx = S.doc.features.length; for (const r of rows) { const b = r.getBoundingClientRect(); if (e.clientY < b.top + b.height / 2) { idx = +r.dataset.index; break; } } if (idx !== rollbackIndex()) setRollback(idx, true); };
-  const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); pushUndo(); };
+  ev.preventDefault(); const bar = ev.currentTarget; const tree = bar.parentElement; let idx = rollbackIndex();
+  const mv = (e) => {
+    const rows = [...tree.querySelectorAll('.row[data-index]')]; let at = null; idx = S.doc.features.length;
+    for (const r of rows) { const b = r.getBoundingClientRect(); if (e.clientY < b.top + b.height / 2) { idx = +r.dataset.index; at = rows.find((x) => +x.dataset.index === idx); break; } }
+    if (at) tree.insertBefore(bar, at); else tree.append(bar);
+    rows.forEach((r) => r.classList.toggle('off', +r.dataset.index >= idx));
+  };
+  const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); if (idx !== rollbackIndex()) setRollback(idx); else renderSide(); };
   window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
 }
 function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? null : i; rebuild(); if (!live) pushUndo(); }
