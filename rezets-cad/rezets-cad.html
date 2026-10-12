@@ -2103,7 +2103,7 @@ const circleSegs = (cx, cy, r, a0, sw) => { const N = 64, out = []; for (let i =
 function drawClick(m) {
   const sk = editSk(); if (!S.draw || !S.draw.sn) drawMove(m);
   const D = S.draw; const sn = D.sn; const t = S.tool; const pending = [];
-  if (t === 'point') { const id = snapToPoint(sk, sn.kind === 'pt' ? { ...sn, kind: null } : sn, pending); sk.pts[id].free = true; addRelations(sk, pending); commitSketch(); return; }
+  if (t === 'point') { const id = snapToPoint(sk, sn.kind === 'pt' ? { ...sn, kind: null } : sn, pending); sk.pts[id].free = true; sk.pts[id].hole = true; addRelations(sk, pending); commitSketch(); return; }
   if (t === 'line') {
     if (D.stage === 0) { D.start = snapToPoint(sk, sn, pending); D.first = D.start; D.newPts = [D.start]; D.pending = pending; addRelations(sk, pending); D.stage = 1; refreshSketch(true); return; }
     const a = gp(sk, D.start); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6) return;
@@ -2624,7 +2624,7 @@ function startSketch(plane, existing) {
 function exitSketch() {
   if (!S.editing) return; const f = editF(); S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
   setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo();
-  if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } }
+  if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
   const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. Нажмите «Вытянуть» или «Повернуть».`);
 }
 const plural = (n, a, b, c) => { const m = n % 10, m2 = n % 100; return m === 1 && m2 !== 11 ? a : m >= 2 && m <= 4 && (m2 < 10 || m2 >= 20) ? b : c; };
@@ -3749,7 +3749,10 @@ function holePoints(sf) {
   for (const e of Object.values(sk.ents)) if (e.t === 'circle' && !e.constr && !e.ext) { out.push(gp(sk, e.c)); used.add(e.c); }
   // Model vertices brought in for snapping are references, not hole positions; a point snapped onto
   // one sits at the same place, and two holes there would leave coincident walls for the boolean.
-  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed && !used.has(id)) out.push(p);
+  // A point put with the Point tool on a model vertex or circle centre is that reference itself; it is
+  // marked, and older sketches are read by the rule that a reference nothing else uses was put there.
+  const taken = new Set([...Object.values(sk.ents).flatMap((e) => entPts(e)), ...Object.values(sk.cons).flatMap((c) => c.refs || [])]);
+  for (const [id, p] of Object.entries(sk.pts)) if (p.free && (!p.fixed || p.hole || !taken.has(id)) && !used.has(id)) out.push(p);
   const uniq = []; for (const p of out) if (!uniq.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 1e-6)) uniq.push(p);
   return uniq.map((p) => toWorld(sf.plane, p.x, p.y));
 }
