@@ -974,7 +974,49 @@ function orientedGeometry(tris) {
 }
 function boolean(a, b, op) {
   const A = new Brush(a), B = new Brush(b); A.updateMatrixWorld(); B.updateMatrixWorld();
-  const R = csg.evaluate(A, B, op); return cleanGeo(R.geometry);
+  const R = csg.evaluate(A, B, op); return closeCracks(cleanGeo(R.geometry));
+}
+// The boolean sometimes leaves thin cracks: slivers of a wall with no triangles. Directed edges
+// without a reversed twin are split at every such edge's end that lies on them (T-junctions then
+// cancel out); what remains bounds real gaps, which are chained into loops and triangulated.
+function closeCracks(g) {
+  const pos = g.getAttribute('position'); const nT = pos.count / 3; if (!nT) return g;
+  const q = 1e-5; const P = []; const ids = new Map(); const vid = (i) => { const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i); const k = Math.round(x / q) + ',' + Math.round(y / q) + ',' + Math.round(z / q); let id = ids.get(k); if (id === undefined) { id = P.length; ids.set(k, id); P.push(new THREE.Vector3(x, y, z)); } return id; };
+  const cnt = new Map(); const ek = (a, b) => a + '>' + b;
+  for (let t = 0; t < nT; t++) { const v = [vid(3 * t), vid(3 * t + 1), vid(3 * t + 2)]; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; if (a !== b) cnt.set(ek(a, b), (cnt.get(ek(a, b)) || 0) + 1); } }
+  let open = []; for (const [k, n] of cnt) { const [a, b] = k.split('>').map(Number); const r = cnt.get(ek(b, a)) || 0; if (n > r) open.push([a, b]); }
+  if (!open.length) return g;
+  // Split open edges at open-edge vertices lying on them (grid over the vertices involved).
+  const vs = [...new Set(open.flat())]; const cell = 0.5; const grid = new Map(); const gk = (x, y, z) => x + ',' + y + ',' + z;
+  for (const v of vs) { const p = P[v]; const k = gk(Math.floor(p.x / cell), Math.floor(p.y / cell), Math.floor(p.z / cell)); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(v); }
+  const seg = new THREE.Line3(), tmp = new THREE.Vector3(); const pieces = [];
+  for (const [a, b] of open) {
+    const A = P[a], B = P[b]; const lo = A.clone().min(B), hi = A.clone().max(B); const on = [];
+    for (let x = Math.floor(lo.x / cell); x <= Math.floor(hi.x / cell); x++) for (let y = Math.floor(lo.y / cell); y <= Math.floor(hi.y / cell); y++) for (let z = Math.floor(lo.z / cell); z <= Math.floor(hi.z / cell); z++) for (const v of grid.get(gk(x, y, z)) || []) {
+      if (v === a || v === b) continue; seg.set(A, B); const t = seg.closestPointToPointParameter(P[v], true); if (t <= 1e-9 || t >= 1 - 1e-9) continue; seg.at(t, tmp); if (tmp.distanceToSquared(P[v]) < 1e-10) on.push([t, v]); }
+    if ((hi.x - lo.x) / cell * (hi.y - lo.y) / cell * (hi.z - lo.z) / cell > 1e5) { pieces.push([a, b]); continue; }
+    on.sort((x, y) => x[0] - y[0]); let prev = a; for (const [, v] of on) { pieces.push([prev, v]); prev = v; } pieces.push([prev, b]);
+  }
+  const pc = new Map(); for (const [a, b] of pieces) pc.set(ek(a, b), (pc.get(ek(a, b)) || 0) + 1);
+  const rest = []; for (const [k, n] of pc) { const [a, b] = k.split('>').map(Number); const r = pc.get(ek(b, a)) || 0; for (let i = 0; i < n - r; i++) rest.push([a, b]); }
+  if (!rest.length) return g;
+  // Chain the remaining edges into loops and fill each one, facing the way its neighbours do.
+  const next = new Map(); for (const [a, b] of rest) { if (!next.has(a)) next.set(a, []); next.get(a).push(b); }
+  const add = []; let guard = 0;
+  for (const [a0] of rest) {
+    if (!next.get(a0)?.length) continue; const loop = [a0]; let cur = next.get(a0).pop();
+    while (cur !== a0 && next.get(cur)?.length && loop.length < 5000 && guard++ < 1e6) { loop.push(cur); cur = next.get(cur).pop(); }
+    if (cur !== a0 || loop.length < 3) continue;
+    const nrm = new THREE.Vector3(); for (let i = 0; i < loop.length; i++) { const p = P[loop[i]], r = P[loop[(i + 1) % loop.length]]; nrm.x += (p.y - r.y) * (p.z + r.z); nrm.y += (p.z - r.z) * (p.x + r.x); nrm.z += (p.x - r.x) * (p.y + r.y); }
+    if (nrm.lengthSq() < 1e-20) continue; nrm.normalize(); const u = new THREE.Vector3().crossVectors(nrm, Math.abs(nrm.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(nrm, u);
+    const pts2 = loop.map((i) => new THREE.Vector2(P[i].dot(u), P[i].dot(w))); const tris = THREE.ShapeUtils.triangulateShape(pts2, []);
+    // The loop runs along the boundary of the existing surface; the patch runs against it.
+    const cw = THREE.ShapeUtils.isClockWise(pts2);
+    for (const [i, j, k] of tris) { const [x, y, z] = cw ? [i, j, k] : [i, k, j]; for (const v of [loop[x], loop[y], loop[z]]) add.push(P[v].x, P[v].y, P[v].z); }
+  }
+  if (!add.length) return g;
+  const arr = new Float32Array(pos.array.length + add.length); arr.set(pos.array); arr.set(add, pos.array.length);
+  const out = new THREE.BufferGeometry(); out.setAttribute('position', new THREE.BufferAttribute(arr, 3)); out.computeVertexNormals(); return out;
 }
 // Feature edges: creases between faces. Edges that only exist on one side (T-junctions left by
 // the boolean) are kept only when they sit on a crease, so flat faces stay clean.
@@ -1371,17 +1413,27 @@ function updateBodyMesh0() {
   const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : base, vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
   bodyMeshObj = new THREE.Mesh(shaded, mat); groups.body.add(bodyMeshObj);
   groups.body.add(segLines(edgeTopology(S.body, S.cyls).display, lineMat(colors.edge, 1.4)));
-  // Planar faces: triangles grouped by plane, for picking a face to sketch on.
+  // Faces for picking: triangles grouped by plane, and every cylinder wall as one face. A wall
+  // triangle has its three corners on the cylinder and spans along the axis; its own normal is not
+  // trusted, since booleans leave slivers whose normals are noise.
   const pos = S.body.getAttribute('position'); const map = new Map();
+  const cyls = []; for (const cy of S.cyls || []) if (!cyls.some((q) => q.r === cy.r && Math.abs(Math.abs(q.dir.dot(cy.dir)) - 1) < 1e-9 && q.p.clone().sub(cy.p).cross(q.dir).length() < 1e-6)) cyls.push(cy);
+  const sign = new Float64Array(cyls.length); const triCyl = new Int32Array(pos.count / 3).fill(-1);
+  const wallOf = (a, b, c) => { for (let i = 0; i < cyls.length; i++) { const cy = cyls[i]; const ax = (v) => v.clone().sub(cy.p).dot(cy.dir); const on = (v) => { const w = v.clone().sub(cy.p); return Math.abs(w.addScaledVector(cy.dir, -w.dot(cy.dir)).length() - cy.r) < 5e-3; }; if (on(a) && on(b) && on(c) && Math.max(ax(a), ax(b), ax(c)) - Math.min(ax(a), ax(b), ax(c)) > 1e-4) return i; } return -1; };
   for (let t = 0; t < pos.count / 3; t++) {
     const a = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), b = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2);
-    const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)); if (n.length() < 1e-9) continue; n.normalize();
-    // A cylinder is one face, not a fan of flat strips.
-    const fk = faceKeyOfTri(a, b, c, S.cyls);
-    if (fk?.kind === 'cyl') { const k = `c${fk.r.toFixed(4)},${fk.dir.map((x) => Math.round(Math.abs(x) * 1e4)).join()},${V3(fk.p).projectOnPlane(V3(fk.dir)).toArray().map((x) => Math.round(x * 1e3)).join()}`; if (!map.has(k)) map.set(k, { cyl: fk, n: null, d: 0, tris: [] }); map.get(k).tris.push(t); continue; }
+    const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a));
+    const ci = wallOf(a, b, c);
+    if (ci >= 0) { triCyl[t] = ci; const cy = cyls[ci]; const m = a.clone().add(b).add(c).divideScalar(3).sub(cy.p).projectOnPlane(cy.dir).normalize(); sign[ci] += n.dot(m); const k = 'c' + ci; if (!map.has(k)) map.set(k, { cyl: { kind: 'cyl', p: cy.p.toArray(), dir: cy.dir.toArray(), r: cy.r }, ci, n: null, d: 0, tris: [] }); map.get(k).tris.push(t); continue; }
+    if (n.length() < 1e-9) continue; n.normalize();
     const d = n.dot(a); const k = `${Math.round(n.x * 1e4)},${Math.round(n.y * 1e4)},${Math.round(n.z * 1e4)},${Math.round(d * 1e3)}`;
     if (!map.has(k)) map.set(k, { n, d, tris: [] }); map.get(k).tris.push(t);
   }
+  // Cylinder walls are shaded with the true radial normals (outward for a boss, inward for a hole).
+  { const nrm = shaded.getAttribute('normal'); const v = new THREE.Vector3();
+    for (let t = 0; t < triCyl.length; t++) { const ci = triCyl[t]; if (ci < 0) continue; const cy = cyls[ci]; const sg = sign[ci] < 0 ? -1 : 1;
+      for (let k = 0; k < 3; k++) { v.fromBufferAttribute(pos, 3 * t + k).sub(cy.p).projectOnPlane(cy.dir).normalize().multiplyScalar(sg); nrm.setXYZ(3 * t + k, v.x, v.y, v.z); } }
+    nrm.needsUpdate = true; for (const f of map.values()) if (f.cyl) f.cyl.sign = sign[f.ci] < 0 ? -1 : 1; }
   for (const v of map.values()) { let area = 0; for (const t of v.tris) { const a = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), b = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2); area += new THREE.Vector3().crossVectors(b.sub(a), c.sub(a)).length() / 2; } v.area = area; if (area > 1e-3) faceIndex.push(v); }
   buildPlanes();
 }
@@ -1426,7 +1478,7 @@ function showFaceHover(face) {
   groups.hover.clear(); if (!face || !S.body) { requestRender(); return; }
   const pos = S.body.getAttribute('position'); const arr = [];
   const cp = face.cyl && V3(face.cyl.p), cd = face.cyl && V3(face.cyl.dir);
-  const off = (v) => (face.cyl ? v.clone().sub(cp).projectOnPlane(cd).normalize() : face.n);
+  const off = (v) => (face.cyl ? v.clone().sub(cp).projectOnPlane(cd).normalize().multiplyScalar(face.cyl.sign || 1) : face.n);
   for (const t of face.tris) for (let k = 0; k < 3; k++) { const v = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k); v.addScaledVector(off(v), 0.02); arr.push(v.x, v.y, v.z); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
   groups.hover.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors['geo-hover'], transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }))); requestRender();
@@ -5268,5 +5320,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
