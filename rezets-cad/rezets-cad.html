@@ -593,12 +593,12 @@ function solveLinear(A, b) {
 const maxAbs = (F) => F.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
 // Weighted minimum-norm Gauss-Newton: keeps unconstrained geometry where it is and moves the
 // variables with a low weight (e.g. a dragged point) as little as possible.
-function solveSystem(sys, X, weights) {
+function solveSystem(sys, X, weights, tol = 1e-10) {
   const n = X.length; if (!sys.eqs.length) return true;
   const D = new Float64Array(n).fill(1); if (weights) for (const [i, w] of weights) D[i] = w;
   let F = residual(sys, X);
   for (let it = 0; it < 60; it++) {
-    const err = maxAbs(F); if (err < 1e-10) break;
+    const err = maxAbs(F); if (err < tol) break;
     const J = jacobian(sys, X).map((r) => r.row); const m = J.length;
     const A = Array.from({ length: m }, () => new Float64Array(m)); let tr = 0;
     for (let i = 0; i < m; i++) for (let j = i; j < m; j++) { let s = 0; const a = J[i], b = J[j]; for (let k = 0; k < n; k++) if (a[k] && b[k]) s += a[k] * D[k] * b[k]; A[i][j] = A[j][i] = s; if (i === j) tr += s; }
@@ -4157,11 +4157,18 @@ const MATE_GLYPH = { coincident: '◆', parallel: '∥', perpendicular: '⊥', d
 const COMP_COLORS = ['#b9c3cf', '#c9b79b', '#9fb8a5', '#b3a7c7', '#c2a2a2', '#9eb4c9'];
 // Geometry and recognisable faces of the document a component shows.
 const infoCache = new WeakMap();
+// The assembly solver asks for parts many times a frame; an unchanged part is not rebuilt.
+// The key is taken after the build, since sketches on faces settle their planes during it.
 function docInfo(docId) {
+  const ent = docEntry(docId); if (ent?.kind !== 'part') return docInfo0(docId);
+  const key = () => JSON.stringify([ent.data.features, ent.data.rollback, ent.data.vars]);
+  if (ent._info && ent._infoKey === key()) return ent._info;
+  const info = docInfo0(docId); Object.defineProperty(ent, '_info', { value: info, writable: true, configurable: true }); Object.defineProperty(ent, '_infoKey', { value: key(), writable: true, configurable: true }); return info;
+}
+function docInfo0(docId) {
   const ent = docEntry(docId); if (!ent) return null; let geo, cyls, faceTris = null;
   if (ent.kind === 'import') { geo = importGeometry(ent); cyls = importCyls(ent); faceTris = ent.data.faces; }
   else if (ent.kind === 'part') {
-    // Feature lookups go through S.doc, so the part is made current while it is computed.
     const feats = ent.data.features.slice(0, ent.data.rollback == null ? ent.data.features.length : ent.data.rollback); const prev = S.doc; S.doc = ent.data;
     try { const r = computeBody(feats); geo = r.body; cyls = r.cyls || []; } finally { S.doc = prev; }
   }
@@ -4310,8 +4317,8 @@ function asmWeights(asm, sys) { const w = []; for (const [id, i] of sys.idx) { c
 function asmSolve(asm, weights, extra) {
   for (let outer = 0; outer < 30; outer++) {
     const sys = asmSystem(asm, extra); if (!sys.eqs.length || !sys.n) return true;
-    const X = new Float64Array(sys.n); const F = residual(sys, X); if (maxAbs(F) < 1e-9) return true;
-    const ok = solveSystem({ eqs: sys.eqs }, X, [...asmWeights(asm, sys), ...(weights ? weights(sys) : [])]); sys.commit(X);
+    const X = new Float64Array(sys.n); const F = residual(sys, X); if (maxAbs(F) < 1e-9 || (outer === 0 && !weights && maxAbs(F) < 1e-8)) return true;
+    const ok = solveSystem({ eqs: sys.eqs }, X, [...asmWeights(asm, sys), ...(weights ? weights(sys) : [])], ASM_TOL * 0.05); sys.commit(X);
     if (ok) { const s2 = asmSystem(asm, extra); if (maxAbs(residual(s2, new Float64Array(s2.n))) < 1e-7) return true; }
   }
   const sys = asmSystem(asm, extra); return maxAbs(residual(sys, new Float64Array(sys.n))) < 1e-6;
@@ -4825,31 +4832,41 @@ function nullSpace(rows, n) {
 // only a turn about an axis turns, and one that can slide along a rail slides.
 function dragFollow(asm, c, D, T) {
   const Lp = D.start.clone().sub(D.pose0.t).applyQuaternion(D.pose0.q.clone().invert());
+  const miss = () => { const p = poseOf(c); return T.clone().sub(Lp.clone().applyQuaternion(p.q).add(p.t)); };
   for (let it = 0; it < 12; it++) {
     const sys = asmSystem(asm); const n = sys.n; const i = sys.idx.get(c.id); if (i === undefined) return false;
     const N = nullSpace(jacobian(sys, new Float64Array(n), 1e-5), n); if (!N.length) return false;
-    const p = poseOf(c); const r = Lp.clone().applyQuaternion(p.q); const res = T.clone().sub(r.clone().add(p.t)); if (res.length() < 1e-4 * compSize(c)) break;
+    const p = poseOf(c); const r = Lp.clone().applyQuaternion(p.q); const res = miss(); const base = res.length(); if (base < 1e-4 * compSize(c)) break;
     const col = (j) => { const e = new THREE.Vector3(); e.setComponent(j % 3, 1); return j < 3 ? e.cross(r) : e; };
     const M = N.map((v) => { const s = new THREE.Vector3(); for (let j = 0; j < 6; j++) s.addScaledVector(col(j), v[6 * i + j]); return s; });
-    const A = M.map((a) => M.map((b) => a.dot(b))); A.forEach((row, k) => (row[k] += 1e-9)); const a = solveLinear(A, M.map((m) => m.dot(res))); if (!a) return false;
+    const A = M.map((a) => M.map((b) => a.dot(b))); A.forEach((row, k) => (row[k] += 1e-9)); const a = solveLinear(A, M.map((m) => m.dot(res))); if (!a) return it > 0;
     const dx = new Float64Array(n); N.forEach((v, k) => { for (let j = 0; j < n; j++) dx[j] += a[k] * v[j]; });
     // Big turns are taken in steps, each put back onto the mates.
     const rot = Math.hypot(dx[6 * i], dx[6 * i + 1], dx[6 * i + 2]); if (rot > 0.3) for (let j = 0; j < n; j++) dx[j] *= 0.3 / rot;
-    sys.commit(dx); if (!asmSolve(asm)) return false;
+    // A step is kept only when it brings the grabbed point nearer the cursor; otherwise it is halved.
+    // Without this a target off the part's path made it swing back and forth by whole steps.
+    const keep = snapPoses(asm); let done = false;
+    let now = base;
+    for (let h = 0; h < 3 && !done; h++) { sys.commit(dx); if (asmSolve(asm) && (now = miss().length()) < base - 1e-6 * compSize(c)) done = true; else { restorePoses(asm, keep); for (let j = 0; j < n; j++) dx[j] *= 0.5; } }
+    // The cursor is often off the path the part can take: once a step gains little, the part is as near as it gets.
+    if (!done || now > 0.97 * base) break;
   }
   return true;
 }
 function asmMove(ev) {
   const D = S.asmDrag;
   if (D && !D.fixed && down?.moved) {
-    const asm = S.doc; restorePoses(asm, D.all0); const c = D.comp;
+    const asm = S.doc; const c = D.comp;
+    // Following the mates goes on from the last frame, so a long drag costs no more than a short one.
+    if (!D.rotate && D.last) { restorePoses(asm, D.last); const hit = new THREE.Vector3(); if (rayFromEvent(ev).ray.intersectPlane(D.plane, hit) && dragFollow(asm, c, D, hit)) { D.last = snapPoses(asm); asmRefresh(); return; } restorePoses(asm, D.last); asmRefresh(); return; }
+    restorePoses(asm, D.all0);
     if (D.rotate) {
       const dx = (ev.clientX - D.sx) * 0.01, dy = (ev.clientY - D.sy) * 0.01; const up = camera.up.clone(), right = new THREE.Vector3().crossVectors(camera.getWorldDirection(new THREE.Vector3()), up).normalize();
       const q = new THREE.Quaternion().setFromAxisAngle(up, dx).multiply(new THREE.Quaternion().setFromAxisAngle(right, dy));
       const t = D.pose0.t.clone().sub(D.start).applyQuaternion(q).add(D.start); setPose(c, t, q.multiply(D.pose0.q.clone()));
     } else {
       const hit = new THREE.Vector3(); if (!rayFromEvent(ev).ray.intersectPlane(D.plane, hit)) return;
-      if (dragFollow(asm, c, D, hit)) { asmRefresh(); return; }
+      if (dragFollow(asm, c, D, hit)) { D.last = snapPoses(asm); asmRefresh(); return; }
       restorePoses(asm, D.all0); setPose(c, D.pose0.t.clone().add(hit.sub(D.start)), D.pose0.q.clone());
     }
     const L = compSize(c); const ok = asmSolve(asm, (sys) => { const i = sys.idx.get(c.id); return i === undefined ? [] : [0, 1, 2, 3, 4, 5].map((k) => [6 * i + k, k < 3 ? 1e-8 / (L * L) : 1e-4]); });
