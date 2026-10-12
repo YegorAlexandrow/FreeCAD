@@ -11,6 +11,6 @@ const proj = fs.readFileSync(__dirname + '/../testdata/big/servo_proj5.json', 'u
     const out = { status: pm.result?.status, why: pm.result?.why, suggest: pm.suggest?.e };
     const btn = [...document.querySelectorAll('#side .chip')].find((x) => x.textContent === 'Взять подсвеченную'); out.button = !!btn; btn?.click();
     out.after = R.S.pm.result?.status; R.okPM(); out.mates = asm.mates.length; out.dof = R.S.asmAnalysis.dof; return out; }, proj);
-  console.log(JSON.stringify(r, null, 1), '\nexpect conflict explained (29.84 vs 28.5), suggest servo axis 48, after ok, 5 mates, dof 6 (only the second servo free)');
+  console.log(JSON.stringify(r, null, 1), '\nexpect conflict explained (29.84 vs 28.5), suggest servo axis 48, after ok, 5 mates, dof 7 (ARM2 turns on its pivot with the first servo, the second servo is free)');
   console.log(logs.join('\n')); await b.close();
 })();
