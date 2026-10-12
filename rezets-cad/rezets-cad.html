@@ -982,7 +982,7 @@ function featureEdges(geo, angleDeg = 28) {
   const pos = geo.getAttribute('position'); const nT = pos.count / 3; const cos = Math.cos(angleDeg * Math.PI / 180);
   const V = (i) => new THREE.Vector3().fromBufferAttribute(pos, i);
   const q = 1e-4; const kv = (v) => `${Math.round(v.x / q)},${Math.round(v.y / q)},${Math.round(v.z / q)}`;
-  const normals = []; const map = new Map(); const out = [];
+  const normals = []; const map = new Map(); const out = []; const tris = [];
   for (let t = 0; t < nT; t++) {
     const a = V(3 * t), b = V(3 * t + 1), c = V(3 * t + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a));
     // Needles left by booleans (height of microns) have meaningless normals: they take no part.
@@ -992,7 +992,7 @@ function featureEdges(geo, angleDeg = 28) {
   }
   const lonely = [];
   for (const e of map.values()) {
-    if (e.t.length >= 2) { const n1 = normals[e.t[0]], n2 = normals[e.t[1]]; if (n1.dot(n2) < cos) out.push(e.a, e.b); }
+    if (e.t.length >= 2) { const n1 = normals[e.t[0]], n2 = normals[e.t[1]]; if (n1.dot(n2) < cos) { out.push(e.a, e.b); tris.push([e.t[0], e.t[1]]); } }
     else lonely.push(e);
   }
   if (lonely.length) {
@@ -1014,23 +1014,24 @@ function featureEdges(geo, angleDeg = 28) {
     }
     const tmp = new THREE.Vector3(), seg = new THREE.Line3();
     for (const e of lonely) {
-      const m = e.a.clone().add(e.b).multiplyScalar(0.5); const own = normals[e.t[0]]; let crease = false, found = false;
+      const m = e.a.clone().add(e.b).multiplyScalar(0.5); const own = normals[e.t[0]]; let crease = false, found = false, other = -1;
       for (const idx of grid.get(ck(ci(m.x), ci(m.y), ci(m.z))) || []) {
         const [p, r, t] = triEdges[idx]; if (t === e.t[0]) continue;
         seg.set(p, r); seg.closestPointToPoint(m, true, tmp);
-        if (tmp.distanceToSquared(m) < 1e-8) { found = true; if (normals[t].dot(own) < cos) { crease = true; break; } }
+        if (tmp.distanceToSquared(m) < 1e-8) { found = true; if (normals[t].dot(own) < cos) { crease = true; other = t; break; } }
       }
       if (!found) {
         const tri = new THREE.Triangle();
         for (const t of [...(grid.get('t' + ck(ci(m.x), ci(m.y), ci(m.z))) || []), ...bigTris]) {
           if (t === e.t[0]) continue; tri.set(V(3 * t), V(3 * t + 1), V(3 * t + 2)); tri.closestPointToPoint(m, tmp);
-          if (tmp.distanceToSquared(m) < 4e-6) { found = true; if (normals[t].dot(own) < cos) { crease = true; break; } }
+          if (tmp.distanceToSquared(m) < 4e-6) { found = true; if (normals[t].dot(own) < cos) { crease = true; other = t; break; } }
         }
       }
-      if (crease || !found) out.push(e.a, e.b);
+      if (crease || !found) { out.push(e.a, e.b); tris.push([e.t[0], other]); }
     }
   }
-  const arr = []; for (const v of out) arr.push(v.x, v.y, v.z); return arr;
+  // Each segment keeps the two triangles it lies between (-1 when the other side is unknown).
+  const arr = []; for (const v of out) arr.push(v.x, v.y, v.z); arr.tris = tris; return arr;
 }
 
 
@@ -2582,6 +2583,14 @@ const topoCache = new WeakMap();
 function edgeTopology(body, cyls) {
   if (topoCache.has(body)) return topoCache.get(body);
   const e = featureEdges(body); const segs = []; for (let i = 0; i < e.length; i += 6) segs.push(e.slice(i, i + 6));
+  // A crease between two triangles of one cylinder is a sliver left by a boolean, not an edge.
+  { const pos = body.getAttribute('position'); const memo = new Map(); const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+    const cylOf = (t) => { if (memo.has(t)) return memo.get(t); A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); const k = faceKeyOfTri(A, B, C, cyls); const i = k?.kind === 'cyl' ? (cyls || []).findIndex((cy) => sameFace(k, { kind: 'cyl', p: cy.p.toArray(), dir: cy.dir.toArray(), r: cy.r })) : -1; memo.set(t, i); return i; };
+    // A cylinder wall split by a boolean also leaves T-junctions with no visible neighbour; a segment
+    // running across the wall of its own cylinder (not around it like a rim) is one of those.
+    const across = (sg, c) => { const cy = cyls[c]; const ax = (k) => (sg[k] - cy.p.x) * cy.dir.x + (sg[k + 1] - cy.p.y) * cy.dir.y + (sg[k + 2] - cy.p.z) * cy.dir.z; const on = (k) => { const w = new THREE.Vector3(sg[k], sg[k + 1], sg[k + 2]).sub(cy.p); return Math.abs(w.addScaledVector(cy.dir, -w.dot(cy.dir)).length() - cy.r) < 5e-3; }; return on(0) && on(3) && Math.abs(ax(0) - ax(3)) > 1e-3; };
+    const keep = segs.map((sg, i) => { const tt = e.tris?.[i]; if (!tt || tt[0] < 0) return true; const c = cylOf(tt[0]); if (c < 0) return true; if (tt[1] < 0) return !across(sg, c); return c !== cylOf(tt[1]); });
+    for (let i = segs.length - 1; i >= 0; i--) if (!keep[i]) segs.splice(i, 1); }
   const onCircle = new Array(segs.length).fill(false); const circles = [];
   for (const cy of cyls || []) {
     const groups2 = new Map();
