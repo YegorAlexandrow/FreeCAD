@@ -431,12 +431,12 @@ function curvePts(sk, e, per = 20) {
 }
 const isCurve = (e) => e.t === 'spline' || e.t === 'ellipse';
 
-const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd']);
+const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd', 'rgap']);
 const CON_NAMES = {
   coincident: 'Совпадение', horizontal: 'Горизонтальность', vertical: 'Вертикальность', hpts: 'Горизонтальность точек', vpts: 'Вертикальность точек',
   online: 'Точка на прямой', oncircle: 'Точка на окружности', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
   equal: 'Равенство', tangent: 'Касание', concentric: 'Концентричность', fix: 'Фиксация', collinear: 'Коллинеарность',
-  symmetric: 'Симметрия', offset: 'Смещение', offd: 'Смещение',
+  symmetric: 'Симметрия', offset: 'Смещение', offd: 'Смещение', rgap: 'Зазор',
   dist: 'Расстояние', dx: 'Расстояние по X', dy: 'Расстояние по Y', pldist: 'Расстояние до прямой', rad: 'Радиус', diam: 'Диаметр', angle: 'Угол',
 };
 const REL_KEYS = { coincident: 'C', horizontal: 'H', hpts: 'H', vertical: 'V', vpts: 'V', parallel: 'P', perpendicular: 'N', equal: 'E', tangent: 'T', concentric: 'K', midpoint: 'M', online: 'O', oncircle: 'O', fix: 'F', collinear: 'J', symmetric: 'S' };
@@ -544,6 +544,8 @@ function buildSystem(sk, opts = {}) {
         break;
       }
       case 'offd': break;
+      // Radial gap between two concentric circles or arcs (a wall thickness); the sign keeps which one is outside.
+      case 'rgap': { const r1 = R(r[0]), r2 = R(r[1]); add(cid, [r1, r2], (x) => [(c.s || 1) * (r1.g(x) - r2.g(x)) - c.v], 1); break; }
       case 'dist': { const a = P(r[0]), b = P(r[1]); add(cid, [a, b], (x) => [len(dir(a.g(x), b.g(x))) - c.v], 1); break; }
       case 'dx': case 'dy': { const a = P(r[0]), b = P(r[1]); const k = c.t === 'dx' ? 0 : 1; add(cid, [a, b], (x) => [(c.s || 1) * (b.g(x)[k] - a.g(x)[k]) - c.v], 1); break; }
       case 'pldist': { const p = P(r[0]); const [a, b] = L(r[1]); add(cid, [p, a, b], (x) => { const A = a.g(x), u = dir(A, b.g(x)); return [(c.s || 1) * cross(u, dir(A, p.g(x))) / len(u) - c.v]; }, 1); break; }
@@ -665,6 +667,7 @@ function measure(sk, c) {
     case 'pldist': { const e = ge(sk, r[1]); const a = P(e.p1), b = P(e.p2), p = P(r[0]); const ux = b.x - a.x, uy = b.y - a.y; return Math.abs(ux * (p.y - a.y) - uy * (p.x - a.x)) / (Math.hypot(ux, uy) || 1); }
     case 'rad': return ge(sk, r[0]).r;
     case 'offd': return offsetDistance(sk, r[0], r[1]);
+    case 'rgap': return Math.abs(ge(sk, r[0]).r - ge(sk, r[1]).r);
     case 'diam': return 2 * ge(sk, r[0]).r;
     case 'angle': { const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const u = [P(e1.p2).x - P(e1.p1).x, P(e1.p2).y - P(e1.p1).y], v = [P(e2.p2).x - P(e2.p1).x, P(e2.p2).y - P(e2.p1).y]; return Math.abs(Math.atan2(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1])) * 180 / Math.PI; }
   }
@@ -1604,7 +1607,7 @@ function dimGeometry(sk, c) {
     case 'pldist': { const p = P(r[0]); const e = ge(sk, r[1]); const a = P(e.p1), b = P(e.p2); const dx = b.x - a.x, dy = b.y - a.y; const l = dx * dx + dy * dy || 1; const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l; const f = { x: a.x + t * dx, y: a.y + t * dy };
       if (t < 0 || t > 1) { const q = t < 0 ? a : b; lines.push([q.x, q.y, f.x, f.y]); }
       label = linear(f, p, pos); break; }
-    case 'offd': {
+    case 'rgap': case 'offd': {
       const n = ge(sk, r[0]), o = ge(sk, r[1]);
       if (n.t === 'line') { const a = P(o.p1), b = P(o.p2); const q = pos || { x: (P(n.p1).x + P(n.p2).x) / 2, y: (P(n.p1).y + P(n.p2).y) / 2 }; const dx = b.x - a.x, dy = b.y - a.y; const l = dx * dx + dy * dy || 1; const t = ((q.x - a.x) * dx + (q.y - a.y) * dy) / l; const f = { x: a.x + t * dx, y: a.y + t * dy };
         const na = P(n.p1), nb = P(n.p2); const ndx = nb.x - na.x, ndy = nb.y - na.y; const nl = ndx * ndx + ndy * ndy || 1; const t2 = ((q.x - na.x) * ndx + (q.y - na.y) * ndy) / nl; const g = { x: na.x + t2 * ndx, y: na.y + t2 * ndy };
@@ -2022,7 +2025,10 @@ function makeDim(sk, picks, m) {
   }
   const line = [a, b].find((x) => x.e?.t === 'line'); const other = [a, b].find((x) => x !== line);
   if (line && other) { const p = ptOf(other); if (p) return { t: 'pldist', refs: [p, line.id] }; return null; }
-  const pa = ptOf(a), pb = ptOf(b); if (pa && pb && pa !== pb) return place(pa, pb);
+  const pa = ptOf(a), pb = ptOf(b); const round = (x) => x.e && x.e.t !== 'line' && x.e.r != null && x.e.t !== 'ellipse';
+  // Two circles on one centre: the gap between them, like a wall thickness.
+  if (round(a) && round(b) && pa && pb && (pa === pb || Math.hypot(gp(sk, pa).x - gp(sk, pb).x, gp(sk, pa).y - gp(sk, pb).y) < 1e-6)) return { t: 'rgap', refs: [a.id, b.id], s: Math.sign(a.e.r - b.e.r) || 1 };
+  if (pa && pb && pa !== pb) return place(pa, pb);
   return null;
 }
 
@@ -5187,5 +5193,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
