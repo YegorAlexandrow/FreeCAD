@@ -975,8 +975,24 @@ function orientedGeometry(tris) {
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.computeVertexNormals(); return g;
 }
 function boolean(a, b, op) {
-  const A = new Brush(a), B = new Brush(b); A.updateMatrixWorld(); B.updateMatrixWorld();
-  const R = csg.evaluate(A, B, op); return closeCracks(cleanGeo(R.geometry));
+  const run = (bb) => { const A = new Brush(a), B = new Brush(bb); A.updateMatrixWorld(); B.updateMatrixWorld(); return closeCracks(cleanGeo(csg.evaluate(A, B, op).geometry)); };
+  // Coincident solids (a boss drawn exactly over another) can make the boolean trip on a
+  // degenerate triangle; then the tool is moved by 10 nm along an odd direction and tried again.
+  // Most of the tool lying on the body's own faces (a solid drawn over another) also makes it crawl
+  // for seconds before it trips, so that case takes the nudge at once.
+  const nudged = () => b.clone().translate(5.77e-6, 6.21e-6, 5.31e-6);
+  if (mostlyOnSurface(b, a)) return run(nudged());
+  try { return run(b); } catch (e) { console.warn('boolean retry', e); return run(nudged()); }
+}
+function mostlyOnSurface(tool, body) {
+  const pos = tool.getAttribute('position'); const nT = pos.count / 3; if (!nT || !body.getAttribute('position').count) return false;
+  const bvh = bvhOf(body); const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(); let on = 0, all = 0;
+  const step = Math.max(1, Math.floor(nT / 400));
+  for (let t = 0; t < nT; t += step) {
+    A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); const ar = B.clone().sub(A).cross(C.clone().sub(A)).length() / 2; if (ar < 1e-12) continue;
+    all += ar; const hit = bvh.closestPointToPoint(A.clone().add(B).add(C).divideScalar(3)); if (hit && hit.distance < 1e-6) on += ar;
+  }
+  return all > 0 && on / all > 0.5;
 }
 // The boolean sometimes leaves thin cracks: slivers of a wall with no triangles. Directed edges
 // without a reversed twin are split at every such edge's end that lies on them (T-junctions then
