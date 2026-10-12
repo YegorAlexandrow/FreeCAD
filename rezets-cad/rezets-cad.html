@@ -655,10 +655,11 @@ function analyzeSketch(sk) {
   const pivots = new Set(basis.map((b) => b.piv)); const free = new Set();
   for (let k = 0; k < n; k++) if (!pivots.has(k)) free.add(k);
   for (const b of basis) for (const f of pivots.size < n ? [...Array(n).keys()].filter((k) => !pivots.has(k)) : []) if (Math.abs(b.vec[f]) > 1e-7) { free.add(b.piv); break; }
-  const redundant = new Set(); for (const d of dependent) redundant.add(rows[d.ri].cid);
+  const redundant = new Set(); const repeats = new Map();
+  for (const d of dependent) { const cid = rows[d.ri].cid; redundant.add(cid); const w = repeats.get(cid) || new Set(); for (const [k, v] of d.comb) if (k !== d.ri && Math.abs(v) > 1e-6 && rows[k].cid !== cid) w.add(rows[k].cid); repeats.set(cid, w); }
   // Null space: one vector per free column, the motions the sketch still allows.
   const nullvecs = [...Array(n).keys()].filter((k) => !pivots.has(k)).map((f) => { const v = new Float64Array(n); v[f] = 1; for (const b of basis) v[b.piv] = -b.vec[f] / b.vec[b.piv]; return v; });
-  return { dof: n - basis.length, free, sys, redundant, nullvecs };
+  return { dof: n - basis.length, free, sys, redundant, repeats, nullvecs };
 }
 function measure(sk, c) {
   const P = (id) => gp(sk, id); const r = c.refs;
@@ -1813,14 +1814,14 @@ function layoutOverlay() {
     for (const c of Object.values(sk.cons)) {
       if (DIM_TYPES.has(c.t)) {
         const g = dimGeometry(sk, c); const s = sScreen(g.label.x, g.label.y);
-        const el = h('div', { class: 'dimlbl' + (c.driven ? ' driven' : '') + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) ? ' bad' : ''), style: `left:${s.x}px;top:${s.y}px`, title: CON_NAMES[c.t] + (c.driven ? ' (справочный)' : '') }, dimText(sk, c));
+        const el = h('div', { class: 'dimlbl' + (c.driven ? ' driven' : '') + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${s.x}px;top:${s.y}px`, title: CON_NAMES[c.t] + (c.driven ? ' (справочный)' : '') }, dimText(sk, c));
         el.addEventListener('pointerdown', (ev) => startDimDrag(ev, c));
         el.addEventListener('dblclick', (ev) => { ev.stopPropagation(); openDimEditor(c); });
         overlay.append(el);
       } else if (S.showRel !== false && CON_GLYPH[c.t]) {
         const at = glyphAnchor(sk, c); if (!at) continue; const s = sScreen(at.x, at.y);
         const stack = (glyphAnchor.count[at.key] = (glyphAnchor.count[at.key] || 0) + 1) - 1;
-        const el = h('div', { class: 'glyph' + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) ? ' bad' : ''), style: `left:${s.x + 12 + stack * 19}px;top:${s.y - 12}px`, title: CON_NAMES[c.t] }, CON_GLYPH[c.t]);
+        const el = h('div', { class: 'glyph' + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${s.x + 12 + stack * 19}px;top:${s.y - 12}px`, title: CON_NAMES[c.t] }, CON_GLYPH[c.t]);
         el.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); if (!ev.shiftKey && !ev.ctrlKey) S.sel.clear(); S.sel.add('c:' + c.id); refreshSketch(); });
         overlay.append(el);
       }
@@ -5053,6 +5054,15 @@ function renderPM() {
   if (err) body.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, err)));
   side.append(body);
 }
+// Each extra relation is listed with the ones it repeats; a click shows them all on the sketch.
+function redundantList(sk, a) {
+  const show = (ids) => { S.sel = new Set(ids.map((id) => 'c:' + id)); refreshSketch(); };
+  return [h('div', { class: 'note', style: 'color:var(--bad);margin-top:6px' }, 'Лишние взаимосвязи отмечены красным. Удалите одну из каждой группы'),
+    ...[...a.redundant].map((cid) => { const w = [...(a.repeats?.get(cid) || [])].filter((x) => sk.cons[x]);
+      return h('div', { class: 'rel bad', style: 'cursor:pointer', title: 'Показать на эскизе', onclick: () => show([cid, ...w]) }, h('b', {}, CON_GLYPH[sk.cons[cid]?.t] || '↔'),
+        h('span', {}, conLabel(sk, cid) + (w.length ? ' повторяет ' + w.map((x) => conLabel(sk, x)).join(', ') : '')),
+        h('button', { class: 'x', title: 'Удалить взаимосвязь', onclick: (ev) => { ev.stopPropagation(); delete sk.cons[cid]; S.sel.delete('c:' + cid); commitSketch(); } }, '✕')); })];
+}
 function renderSketchPanel() {
   side.textContent = ''; const f = editF(); const sk = f.sk; const a = S.analysis;
   const state = !a ? 'under' : a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under';
@@ -5061,7 +5071,7 @@ function renderSketchPanel() {
   pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dof ? h('span', { class: 'note' }, `  свободно: ${a.dof} ${plural(a.dof, 'степень', 'степени', 'степеней')}`) : null),
     a && a.dof ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
     ...(a && a.dof ? explainFree(sk, a).slice(0, 5).map((t) => h('div', { class: 'note', style: 'margin-top:4px' }, t)) : []),
-    a && a.redundant.size ? h('div', { class: 'note', style: 'color:var(--bad)' }, 'Лишние взаимосвязи: ' + [...a.redundant].map((c) => conLabel(sk, c)).join(', ')) : null));
+    ...(a && a.redundant.size ? redundantList(sk, a) : [])));
   const topt = toolOptionsPanel(); if (topt) pmEl.append(topt);
   const sel = [...S.sel];
   if (sel.length) {
@@ -5439,5 +5449,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
