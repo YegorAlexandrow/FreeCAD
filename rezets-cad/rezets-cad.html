@@ -99,6 +99,7 @@ button { font: inherit; color: inherit; }
 .row { display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 5px; cursor: pointer; user-select: none; position: relative; min-width: 0; }
 .row:hover { background: var(--panel-2); }
 .row.sel { background: var(--accent-soft); color: var(--accent); }
+.row.origin { box-shadow: inset 3px 0 0 var(--accent); color: var(--accent); }
 .row.off { opacity: .45; }
 .row.err .nm { color: var(--bad); }
 .row.child { padding-left: 26px; }
@@ -1362,7 +1363,7 @@ let bodyMeshObj = null, faceIndex = [];
 function updateBodyMesh() { updateBodyMesh0(); if (S.section || secGroup.children.length) applySection(); requestRender(); }
 function updateBodyMesh0() {
   if (S.measure) { S.measure.picks = []; S.measure.result = null; groups.measure.clear(); }
-  groups.body.clear(); bodyMeshObj = null; faceIndex = [];
+  groups.body.clear(); bodyMeshObj = null; faceIndex = []; originGroup.clear();
   if (!S.body) { buildPlanes(); return; }
   const shaded = toCreasedNormals(S.body.clone(), 30 * Math.PI / 180);
   const base = partColor(S.doc) || ('#' + colors.body.getHexString()); const vc = bodyColors(S.body, S.doc, S.cyls, base); if (vc) shaded.setAttribute('color', new THREE.BufferAttribute(vc, 3));
@@ -1374,17 +1375,58 @@ function updateBodyMesh0() {
   for (let t = 0; t < pos.count / 3; t++) {
     const a = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), b = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2);
     const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)); if (n.length() < 1e-9) continue; n.normalize();
+    // A cylinder is one face, not a fan of flat strips.
+    const fk = faceKeyOfTri(a, b, c, S.cyls);
+    if (fk?.kind === 'cyl') { const k = `c${fk.r.toFixed(4)},${fk.dir.map((x) => Math.round(Math.abs(x) * 1e4)).join()},${V3(fk.p).projectOnPlane(V3(fk.dir)).toArray().map((x) => Math.round(x * 1e3)).join()}`; if (!map.has(k)) map.set(k, { cyl: fk, n: null, d: 0, tris: [] }); map.get(k).tris.push(t); continue; }
     const d = n.dot(a); const k = `${Math.round(n.x * 1e4)},${Math.round(n.y * 1e4)},${Math.round(n.z * 1e4)},${Math.round(d * 1e3)}`;
     if (!map.has(k)) map.set(k, { n, d, tris: [] }); map.get(k).tris.push(t);
   }
   for (const v of map.values()) { let area = 0; for (const t of v.tris) { const a = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), b = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2); area += new THREE.Vector3().crossVectors(b.sub(a), c.sub(a)).length() / 2; } v.area = area; if (area > 1e-3) faceIndex.push(v); }
   buildPlanes();
 }
+// ---------------- which operation made which face ----------------
+// Walking back from the finished body, a face is traced through the body after each earlier
+// operation for as long as its point stays on that body's surface with the same normal; the
+// operation where the trace stops is the one that made it.
+const bvhCache = new WeakMap(); const bvhOf = (g) => { if (!bvhCache.has(g)) bvhCache.set(g, new MeshBVH(g, { indirect: true })); return bvhCache.get(g); };
+function solidSteps() {
+  const feats = S.doc.features.slice(0, rollbackIndex()); const out = [];
+  feats.forEach((f, i) => { if (f.suppressed || f.type === 'sketch' || f.type === 'plane') return; const r = computeBody(feats.slice(0, i + 1)); if (r.body && !r.errors[f.id]) out.push({ f, body: r.body }); });
+  return out;
+}
+function onSurface(g, p, n) {
+  const hit = bvhOf(g).closestPointToPoint(p); if (!hit || hit.distance > 2e-3) return false;
+  const pos = g.getAttribute('position'); const t = hit.faceIndex; const a = V3([pos.getX(3 * t), pos.getY(3 * t), pos.getZ(3 * t)]), b = V3([pos.getX(3 * t + 1), pos.getY(3 * t + 1), pos.getZ(3 * t + 1)]), c = V3([pos.getX(3 * t + 2), pos.getY(3 * t + 2), pos.getZ(3 * t + 2)]);
+  const tn = b.sub(a).cross(c.sub(a)); return tn.lengthSq() < 1e-20 || tn.normalize().dot(n) > 0.95;
+}
+function faceSample(face) {
+  const pos = S.body.getAttribute('position'); let best = null, ba = -1;
+  for (const t of face.tris) { const a = V3([pos.getX(3 * t), pos.getY(3 * t), pos.getZ(3 * t)]), b = V3([pos.getX(3 * t + 1), pos.getY(3 * t + 1), pos.getZ(3 * t + 1)]), c = V3([pos.getX(3 * t + 2), pos.getY(3 * t + 2), pos.getZ(3 * t + 2)]); const n = b.clone().sub(a).cross(c.clone().sub(a)); const ar = n.length(); if (ar > ba) { ba = ar; best = { p: a.add(b).add(c).divideScalar(3), n: n.normalize() }; } }
+  return best;
+}
+function faceCreator(face, steps = solidSteps()) {
+  if (face.creator !== undefined) return face.creator; const sm = faceSample(face); let k = steps.length - 1; if (!sm || k < 0) return (face.creator = null);
+  while (k > 0 && onSurface(steps[k - 1].body, sm.p, sm.n)) k--;
+  return (face.creator = steps[k].f.id);
+}
+const originGroup = new THREE.Group(); scene.add(originGroup);
+// The faces a tree operation left on the finished part, drawn in the accent colour.
+function showFeatureFaces(fid) {
+  originGroup.clear(); if (!fid || !S.body || S.mode !== 'part') { requestRender(); return; }
+  const f = featById(fid); if (!f || f.type === 'sketch' || f.type === 'plane') { requestRender(); return; }
+  const steps = solidSteps(); const pos = S.body.getAttribute('position'); const arr = []; let n = 0;
+  for (const face of faceIndex) if (faceCreator(face, steps) === fid) { n++; for (const t of face.tris) for (let k = 0; k < 3; k++) arr.push(pos.getX(3 * t + k), pos.getY(3 * t + k), pos.getZ(3 * t + k)); }
+  if (arr.length) { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors['geo-sel'], transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })); m.renderOrder = 12; originGroup.add(m); }
+  setHint(n ? `«${f.name}»: ${n} ${plural(n, 'грань', 'грани', 'граней')} на детали, ${n === 1 ? 'подсвечена' : 'подсвечены'}` : `От «${f.name}» на детали не осталось граней: их срезали более поздние операции или операция ничего не изменила`);
+  requestRender();
+}
 function faceForTriangle(t) { return faceIndex.find((f) => f.tris.includes(t)); }
 function showFaceHover(face) {
   groups.hover.clear(); if (!face || !S.body) { requestRender(); return; }
   const pos = S.body.getAttribute('position'); const arr = [];
-  for (const t of face.tris) for (let k = 0; k < 3; k++) { const v = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k).addScaledVector(face.n, 0.02); arr.push(v.x, v.y, v.z); }
+  const cp = face.cyl && V3(face.cyl.p), cd = face.cyl && V3(face.cyl.dir);
+  const off = (v) => (face.cyl ? v.clone().sub(cp).projectOnPlane(cd).normalize() : face.n);
+  for (const t of face.tris) for (let k = 0; k < 3; k++) { const v = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k); v.addScaledVector(off(v), 0.02); arr.push(v.x, v.y, v.z); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
   groups.hover.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors['geo-hover'], transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }))); requestRender();
 }
@@ -1776,9 +1818,9 @@ canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
 // ---------------- part mode ----------------
 function rayFromEvent(ev) { const r = canvas.getBoundingClientRect(); const ndc = new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1); const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); return rc; }
-function partPickAt(ev) {
+function partPickAt(ev, anyFace) {
   const rc = rayFromEvent(ev);
-  if (bodyMeshObj) { const hit = keptHit(rc.intersectObject(bodyMeshObj)); if (hit) { const face = faceForTriangle(hit.faceIndex); if (face) return { face, point: hit.point }; } }
+  if (bodyMeshObj) { const hit = keptHit(rc.intersectObject(bodyMeshObj)); if (hit) { const face = faceForTriangle(hit.faceIndex); if (face && (anyFace || !face.cyl)) return { face, point: hit.point }; if (face) return null; } }
   if (groups.planes.visible) { const hit = rc.intersectObjects(groups.planes.children.filter((o) => o.userData.plane && (o.visible || !S.body || S.pm?.kind === 'pickPlane')))[0]; if (hit) return { plane: hit.object.userData.plane }; }
   if (S.pm?.regionsOf) return null; return null;
 }
@@ -1796,7 +1838,7 @@ function partHover(ev) {
   if (S.pm?.edgePick) { S.pm.hoverEdge = pickEdge(ev, S.pm.topo); drawEdgeSelection(); return; }
   if (S.measure) { S.measure.hover = measurePick(ev); drawMeasure(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); S.hoverRegion = r ? r.id : null; drawRegions(); return; }
-  const p = partPickAt(ev); const wantFace = S.pm?.kind === 'pickPlane' || S.pm?.feature?.type === 'plane' || !S.pm;
+  const p = partPickAt(ev, !S.pm); const wantFace = S.pm?.kind === 'pickPlane' || S.pm?.feature?.type === 'plane' || !S.pm;
   showFaceHover(p?.face && wantFace ? p.face : null);
   const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); }
 }
@@ -1807,12 +1849,16 @@ function partClick(ev) {
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) toggleRegion(r.id); return; }
-  const p = partPickAt(ev);
+  const p = partPickAt(ev, !S.pm);
   if (S.pm?.feature?.type === 'plane') { const f = S.pm.feature; if (p?.plane) f.base = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; else if (p?.face) f.base = { face: planeFromFace(p.face, p.point) }; else return; renderSide(); rebuild(); return; }
   if (S.pm?.kind === 'pickPlane') { if (p?.plane) startSketch(planeByKey(p.plane)); else if (p?.face) startSketch(planeFromFace(p.face, p.point)); return; }
   if (p?.plane) { S.selectedTree = p.plane.startsWith('f:') ? 'feat:' + p.plane.slice(2) : 'plane:' + p.plane; S.pickedFace = null; }
-  else if (p?.face) { S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); setHint('Грань выбрана: «Эскиз» (S) начнёт эскиз на ней'); }
-  else { S.selectedTree = null; S.pickedFace = null; }
+  else if (p?.face) {
+    const by = featById(faceCreator(p.face)); S.faceOrigin = by?.id || null; originGroup.clear();
+    if (p.face.cyl) { S.selectedTree = null; S.pickedFace = null; setHint(`Цилиндрическая грань ⌀${fmt(2 * p.face.cyl.r)}${by ? `, создана операцией «${by.name}»` : ''}`); }
+    else { S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); setHint(`Грань${by ? ` создана операцией «${by.name}»` : ''}. «Эскиз» (S) начнёт эскиз на ней`); }
+  }
+  else { S.selectedTree = null; S.pickedFace = null; S.faceOrigin = null; }
   buildPlanes(); renderTree(); requestRender();
 }
 
@@ -2582,7 +2628,7 @@ function measurePick(ev) {
   for (const [a, b] of T.lines) { const sa = toScreen(a), sb = toScreen(b); const d = distSeg(mx, my, sa, sb); if (d < 8) { const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1))); take({ kind: 'edge', a: a.clone(), b: b.clone(), p: a.clone().lerp(b, t) }, d); } }
   if (best) return best;
   const hit = rayFromEvent(ev).intersectObject(bodyMeshObj)[0];
-  if (hit) { const face = faceForTriangle(hit.faceIndex); if (face) return { kind: 'face', n: face.n.clone(), d: face.d, area: face.area, p: hit.point.clone(), face }; return { kind: 'surf', p: hit.point.clone() }; }
+  if (hit) { const face = faceForTriangle(hit.faceIndex); if (face?.cyl) { const c0 = V3(face.cyl.p), n = V3(face.cyl.dir); const c = c0.addScaledVector(n, hit.point.clone().sub(c0).dot(n)); return { kind: 'circle', c, r: face.cyl.r, n, p: hit.point.clone() }; } if (face) return { kind: 'face', n: face.n.clone(), d: face.d, area: face.area, p: hit.point.clone(), face }; return { kind: 'surf', p: hit.point.clone() }; }
   return null;
 }
 // The tape in an assembly: the same picks as for mates, taken to world coordinates.
@@ -4706,9 +4752,9 @@ function renderTree() {
   side.append(h('div', { class: 'sec-h' }, h('span', {}, S.doc.name), h('span', { class: 'meta' }, S.body ? 'тело' : 'нет тела')));
   const tree = h('div', { class: 'tree', role: 'tree' });
   const row = (key, icon, name, opts = {}) => {
-    const r = h('div', { class: 'row' + (S.selectedTree === key ? ' sel' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
+    const r = h('div', { class: 'row' + (S.selectedTree === key ? ' sel' : '') + (S.faceOrigin && key === 'feat:' + S.faceOrigin ? ' origin' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
       svg(icon), h('span', { class: 'nm' }, name), opts.meta ? h('span', { class: 'meta' }, opts.meta) : null);
-    r.addEventListener('click', () => { S.selectedTree = key; buildPlanes(); renderTree(); updateSketchVisuals(); requestRender(); opts.onSelect?.(); });
+    r.addEventListener('click', () => { S.selectedTree = key; S.faceOrigin = null; buildPlanes(); renderTree(); updateSketchVisuals(); showFeatureFaces(key.startsWith('feat:') ? key.slice(5) : null); opts.onSelect?.(); });
     if (opts.onOpen) r.addEventListener('dblclick', opts.onOpen);
     r.addEventListener('keydown', (e) => { if (e.key === 'Enter') opts.onOpen?.(); });
     if (opts.menu) r.addEventListener('contextmenu', (e) => { e.preventDefault(); S.selectedTree = key; renderTree(); openMenu(e.clientX, e.clientY, opts.menu); });
