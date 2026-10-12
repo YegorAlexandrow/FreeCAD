@@ -4796,17 +4796,55 @@ function renderExplodePM() {
 function csgIntersect(a, b) { try { const A = new Brush(a), B = new Brush(b); A.updateMatrixWorld(); B.updateMatrixWorld(); return closeCracks(cleanGeo(csg.evaluate(A, B, INTERSECTION).geometry)); } catch (e) { console.warn('interference', e); return new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3)); } }
 // Pairs whose surfaces never cross and neither holds the other cannot interfere; the BVH says so in
 // milliseconds where the boolean of a 120k-triangle STEP part takes seconds.
+// Each part's trees are built once per check and shared by all its pairs.
+const itemBvh = (it) => it.bvh || (it.bvh = new MeshBVH(it.g, { indirect: true }));
+function itemIndexed(it) {
+  if (it.gi) return it.gi; const gi = new THREE.BufferGeometry(); gi.setAttribute('position', it.g.getAttribute('position')); gi.setIndex(new THREE.BufferAttribute(Uint32Array.from({ length: it.g.getAttribute('position').count }, (_, i) => i), 1)); gi.boundsTree = new MeshBVH(gi); return (it.gi = gi);
+}
 function mayOverlap(A, B) {
-  const bvhA = new MeshBVH(A.g, { indirect: true }); const gb = new THREE.BufferGeometry(); gb.setAttribute('position', B.g.getAttribute('position')); gb.setIndex(new THREE.BufferAttribute(Uint32Array.from({ length: B.g.getAttribute('position').count }, (_, i) => i), 1));
-  gb.boundsTree = new MeshBVH(gb); if (bvhA.intersectsGeometry(gb, new THREE.Matrix4())) return true;
+  // The smaller part is tested against the tree of the bigger one; the bigger one's indexed tree is never needed.
+  const [Big, Small] = A.g.getAttribute('position').count >= B.g.getAttribute('position').count ? [A, B] : [B, A];
+  if (itemBvh(Big).intersectsGeometry(itemIndexed(Small), new THREE.Matrix4())) return true;
   const inside = (bvh, p) => bvh.raycast(new THREE.Ray(p, new THREE.Vector3(0.5773, 0.5774, 0.5775).normalize()), THREE.DoubleSide).length % 2 === 1;
   const first = (g) => new THREE.Vector3().fromBufferAttribute(g.getAttribute('position'), 0);
-  return inside(bvhA, first(B.g)) || inside(new MeshBVH(B.g, { indirect: true }), first(A.g));
+  return inside(itemBvh(Big), first(Small.g)) || inside(itemBvh(Small), first(Big.g));
 }
 function interferencePairs(asm) {
   const items = allComps(asm).map((c) => { const inf = docInfo(c.doc); if (!inf || inf.empty) return null; const g = inf.geo.clone(); g.applyMatrix4(new THREE.Matrix4().fromArray(c.T)); g.computeBoundingBox(); return { c, g }; }).filter(Boolean);
   const pairs = []; for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) { const A = items[i], B = items[j]; const ba = A.g.boundingBox.clone().expandByScalar(-1e-4); if (ba.intersectsBox(B.g.boundingBox)) pairs.push([A, B]); }
   return pairs;
+}
+// The boolean for interference runs in a worker, so a 120k-triangle STEP part does not freeze the
+// window. Where workers or the CDN modules are unavailable, it runs here as before.
+const CSG_WORKER_SRC = `import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/+esm';
+import { Brush, Evaluator, INTERSECTION } from 'https://cdn.jsdelivr.net/npm/three-bvh-csg@0.0.16/+esm';
+const ev = new Evaluator(); ev.attributes = ['position']; ev.useGroups = false;
+const geo = (a) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(a, 3)); return g; };
+self.onmessage = (e) => { const { id, a, b } = e.data; try { const A = new Brush(geo(a)), B = new Brush(geo(b)); A.updateMatrixWorld(); B.updateMatrixWorld();
+  const out = new Float32Array(ev.evaluate(A, B, INTERSECTION).geometry.getAttribute('position').array); self.postMessage({ id, pos: out }, [out.buffer]); } catch (err) { self.postMessage({ id, error: String(err) }); } };
+self.postMessage({ ready: true });`;
+let csgWorkerP = null;
+function csgWorker() {
+  if (csgWorkerP) return csgWorkerP;
+  csgWorkerP = new Promise((resolve) => {
+    let w; try { w = new Worker(URL.createObjectURL(new Blob([CSG_WORKER_SRC], { type: 'text/javascript' })), { type: 'module' }); } catch (e) { console.warn('csg worker', e); resolve(null); return; }
+    const t = setTimeout(() => { console.warn('csg worker: no start'); w.terminate(); resolve(null); }, 20000);
+    w.onerror = (e) => { clearTimeout(t); console.warn('csg worker', e.message); resolve(null); };
+    w.onmessage = (e) => { if (e.data?.ready) { clearTimeout(t); w.onerror = null; w.pending = new Map(); w.seq = 0; w.onmessage = (m) => { const cb = w.pending.get(m.data.id); w.pending.delete(m.data.id); cb?.(m.data); }; resolve(w); } };
+  });
+  return csgWorkerP;
+}
+async function csgIntersectAsync(a, b) {
+  const w = await csgWorker(); if (!w) return csgIntersect(a, b);
+  const r = await new Promise((res) => { const id = ++w.seq; w.pending.set(id, res); w.postMessage({ id, a: new Float32Array(a.getAttribute('position').array), b: new Float32Array(b.getAttribute('position').array) }); });
+  if (r.error) { console.warn('csg worker', r.error); return csgIntersect(a, b); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(r.pos, 3)); return closeCracks(cleanGeo(g));
+}
+async function interferenceOfAsync(A, B) {
+  if (!mayOverlap(A, B)) return null;
+  const vol = (g) => (g.getAttribute('position').count ? geoVolume(g) : 0); let r = null, v = Infinity;
+  for (const s of [1, -1]) { const b3 = B.g.clone().translate(s * 5.77e-5, s * 6.21e-5, s * 5.31e-5); const g = await csgIntersectAsync(A.g, b3); const w = vol(g); if (w < v) { v = w; r = g; } if (v > 0.05) break; }
+  return v > 0.01 ? { a: A.c.id, b: B.c.id, vol: v, geo: solidPart(r, A.g, B.g, itemBvh(A), itemBvh(B)) } : null;
 }
 function interferenceOf(A, B) {
   if (!mayOverlap(A, B)) return null;
@@ -4820,9 +4858,9 @@ function interferenceOf(A, B) {
 function asmInterference(asm) { return interferencePairs(asm).map(([A, B]) => interferenceOf(A, B)).filter(Boolean); }
 // Where two parts touch, the boolean also returns a flat layer with no volume; drawn, it looks like
 // the touch counts. A triangle is kept only if the material of both parts lies just behind it.
-function solidPart(g, ga, gb) {
+function solidPart(g, ga, gb, bvhA, bvhB) {
   const inside = (bvh) => (p) => bvh.raycast(new THREE.Ray(p, new THREE.Vector3(0.5773, 0.5774, 0.5775).normalize()), THREE.DoubleSide).length % 2 === 1;
-  const inA = inside(new MeshBVH(ga, { indirect: true })), inB = inside(new MeshBVH(gb, { indirect: true })); const pos = g.getAttribute('position'); const keep = [];
+  const inA = inside(bvhA || new MeshBVH(ga, { indirect: true })), inB = inside(bvhB || new MeshBVH(gb, { indirect: true })); const pos = g.getAttribute('position'); const keep = [];
   const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(), n = new THREE.Vector3(), p = new THREE.Vector3();
   for (let t = 0; t < pos.count / 3; t++) {
     A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); n.crossVectors(B.clone().sub(A), C.clone().sub(A)); if (n.lengthSq() < 1e-24) continue; n.normalize();
@@ -4836,10 +4874,10 @@ function cmdInterference() {
   // Pair by pair, with the window kept alive in between: a big STEP part takes seconds per pair.
   const t0 = performance.now(); const pairs = interferencePairs(S.doc); const res = []; S.asmSel = null; const doc = S.doc;
   openPM({ kind: 'interf', res, sel: null, ms: 0, busy: { done: 0, of: pairs.length } }); drawInterference();
-  const step = (k) => {
-    if (S.doc !== doc || S.pm?.kind !== 'interf') return;
+  const step = async (k) => {
+    if (S.doc !== doc || S.pm?.kind !== 'interf' || S.pm.res !== res) return;
     if (k >= pairs.length) { S.pm.busy = null; S.pm.ms = performance.now() - t0; renderSide(); drawInterference(); return; }
-    const r = interferenceOf(...pairs[k]); if (r) res.push(r); S.pm.busy = { done: k + 1, of: pairs.length }; renderSide(); drawInterference(); setTimeout(() => step(k + 1), 0);
+    const r = await interferenceOfAsync(...pairs[k]); if (S.pm?.res !== res) return; if (r) res.push(r); S.pm.busy = { done: k + 1, of: pairs.length }; renderSide(); drawInterference(); setTimeout(() => step(k + 1), 0);
   };
   setTimeout(() => step(0), 30);
 }
@@ -5688,5 +5726,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
