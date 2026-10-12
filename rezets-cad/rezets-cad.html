@@ -392,7 +392,7 @@ const IDENT_RE = /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*/g;
 const hasIdent = (s) => /[A-Za-zА-Яа-яЁё_]/.test(String(s));
 function evalWith(str, vals) {
   let bad = false; let s = String(str).trim(); if (!s) return NaN;
-  s = s.replace(/(\d),(\d)/g, '$1.$2').replace(IDENT_RE, (w) => { if (w in vals) return '(' + vals[w] + ')'; if (w in EXPR_FN) return EXPR_FN[w]; bad = true; return w; });
+  s = s.replace(/(\d),(\d)/g, '$1.$2').replace(/(^|[^\d)]),(\d)/g, '$10.$2').replace(/(\d)[.,](?=\s*$)/, '$1').replace(IDENT_RE, (w) => { if (w in vals) return '(' + vals[w] + ')'; if (w in EXPR_FN) return EXPR_FN[w]; bad = true; return w; });
   if (bad) return NaN; const chk = s.replace(/Math\.[a-zA-Z]+|__sin|__cos|__tan/g, ''); if (!/^[0-9+\-*/().,\seE]*$/.test(chk)) return NaN;
   try { const d = Math.PI / 180; const v = Function('__sin', '__cos', '__tan', '"use strict";return (' + s + ')')((x) => Math.sin(x * d), (x) => Math.cos(x * d), (x) => Math.tan(x * d)); return Number.isFinite(v) ? v : NaN; } catch { return NaN; }
 }
@@ -4246,6 +4246,19 @@ function refExists(ref, inf) {
   if (ref.edge) return edgeTopology(inf.geo, inf.cyls).circles.some((c) => onAxis(c.c, c.n.clone().normalize(), c.r)) || inf.ents.some((e) => e.kind === 'axis' && onAxis(e.p, e.d.clone().normalize(), e.r)) ? -2 : -1;
   return inf.ents.findIndex((e) => e.kind === ref.kind && (ref.kind === 'plane' ? e.n.dot(D) > 1 - 1e-6 && Math.abs(e.n.dot(e.p) - D.dot(P)) < tol : onAxis(e.p, e.d.clone().normalize(), e.r)));
 }
+// Which operation of the part made an entity: traced back through the bodies after each operation,
+// like faceCreator in the part. A mate remembers it, so after a height change the face it was made
+// on is found again among the faces that operation made, wherever they moved.
+function entCreator(c, inf, k) {
+  const ent = docEntry(c.doc); if (ent?.kind !== 'part') return null;
+  if (!inf.steps) { const feats = ent.data.features.slice(0, ent.data.rollback == null ? ent.data.features.length : ent.data.rollback); const prev = S.doc; S.doc = ent.data; inf.steps = [];
+    try { feats.forEach((f, i) => { if (f.suppressed || f.type === 'sketch' || f.type === 'plane') return; const r = computeBody(feats.slice(0, i + 1)); if (r.body && !r.errors[f.id]) inf.steps.push({ f, body: r.body }); }); } finally { S.doc = prev; } }
+  const pos = inf.geo.getAttribute('position'); let best = null, ba = -1; const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+  for (const t of inf.ents[k].tris) { A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); const n = B.clone().sub(A).cross(C.clone().sub(A)); const ar = n.length(); if (ar > ba) { ba = ar; best = { p: A.clone().add(B).add(C).divideScalar(3), n: n.normalize() }; } }
+  const steps = inf.steps; let i = steps.length - 1; if (!best || i < 0) return null;
+  while (i > 0 && onSurface(steps[i - 1].body, best.p, best.n)) i--;
+  return steps[i].f.id;
+}
 function checkMateRefs(asm) {
   let moved = false;
   for (const m of asm.mates) {
@@ -4253,9 +4266,20 @@ function checkMateRefs(asm) {
     for (const ref of [m.a, m.b]) {
       const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
       const k = refExists(ref, inf);
-      if (k >= 0) { ref.e = k; ref.n = inf.ents.length; continue; } if (k === -2) continue;
-      const e = ref.e != null && ref.n === inf.ents.length ? inf.ents[ref.e] : null;
-      if (e && e.kind === ref.kind && (e.n || e.d).clone().normalize().dot(V3(ref.d)) > 1 - 1e-6 && (ref.kind !== 'axis' || Math.abs(e.r - ref.r) < 1e-4)) { ref.p = e.p.toArray(); moved = true; continue; }
+      if (k >= 0) { ref.e = k; ref.n = inf.ents.length; if (ref.by === undefined) ref.by = entCreator(c, inf, k); continue; }
+      // A vertex is kept by the planes through it: they are found again and the vertex is where they meet now.
+      const P0 = V3(ref.p); const through = () => inf.ents.map((x, i) => [x, i]).filter(([x]) => x.kind === 'plane' && Math.abs(x.n.dot(P0) - x.n.dot(x.p)) < 1e-4);
+      if (k === -2) { if (ref.kind === 'point' && !ref.planes) ref.planes = through().map(([x, i]) => ({ n: x.n.toArray(), by: entCreator(c, inf, i) })); continue; }
+      if (ref.kind === 'point' && ref.planes?.length) {
+        const X = P0.clone(); const pl = ref.planes.map((q) => { const n = V3(q.n); const cs = inf.ents.map((x, i) => [x, i]).filter(([x, i]) => x.kind === 'plane' && x.n.dot(n) > 1 - 1e-6 && entCreator(c, inf, i) === q.by).sort((a, b) => Math.abs(a[0].n.dot(a[0].p) - n.dot(P0)) - Math.abs(b[0].n.dot(b[0].p) - n.dot(P0))); return cs.length ? { n, d: cs[0][0].n.dot(cs[0][0].p) } : null; });
+        if (pl.every(Boolean)) { for (let it = 0; it < 50; it++) for (const q of pl) X.addScaledVector(q.n, q.d - q.n.dot(X));
+          const v = edgeTopology(inf.geo, inf.cyls).verts.find((w) => w.distanceTo(X) < 1e-3); if (v) { ref.p = v.toArray(); moved = true; continue; } }
+      }
+      const D = V3(ref.d).normalize(); const same = (e) => e.kind === ref.kind && (e.n || e.d).clone().normalize().dot(D) > (ref.kind === 'axis' ? 1 - 1e-6 : 1 - 1e-6) && (ref.kind !== 'axis' || Math.abs(e.r - ref.r) < 1e-4);
+      let e = null;
+      if (ref.by) { const P = V3(ref.p); const cands = inf.ents.map((x, i) => [x, i]).filter(([x, i]) => same(x) && entCreator(c, inf, i) === ref.by); cands.sort((a, b) => a[0].p.distanceTo(P) - b[0].p.distanceTo(P)); if (cands.length) { e = cands[0][0]; ref.e = cands[0][1]; } }
+      if (!e && ref.e != null && ref.n === inf.ents.length && inf.ents[ref.e] && same(inf.ents[ref.e])) e = inf.ents[ref.e];
+      if (e) { ref.p = e.p.toArray(); moved = true; continue; }
       broken = `${c.name || inf.ent?.name}: ${ref.kind === 'plane' ? 'грани' : ref.kind === 'axis' ? 'оси' : 'вершины'} сопряжения больше нет на детали`;
     }
     if (broken) m.broken = broken; else delete m.broken;
@@ -5505,5 +5529,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
