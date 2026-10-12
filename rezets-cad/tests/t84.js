@@ -1,5 +1,5 @@
 // Interference on the user's latest servo assembly (testdata/big/servo_proj9.json, not in git): pairs that
-// cannot touch are skipped, the check runs pair by pair with progress, and the window stays responsive.
+// cannot touch are skipped, the boolean runs in a worker pair by pair with progress, the window stays responsive.
 const open = require('./harness.js'); const fs = require('fs');
 const proj = fs.readFileSync(__dirname + '/../testdata/big/servo_proj9.json', 'utf8');
 (async () => { const { b, p, logs } = await open();
