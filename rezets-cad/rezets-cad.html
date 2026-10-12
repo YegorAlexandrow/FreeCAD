@@ -1964,7 +1964,20 @@ function partHover(ev) {
   showFaceHover(p?.face && wantFace ? p.face : null);
   const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); }
 }
+// The sketch whose curves pass nearest the cursor, among those before the rollback bar.
+function sketchAt(ev) {
+  const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; let best = null;
+  for (const f of S.doc.features.slice(0, rollbackIndex())) { if (f.type !== 'sketch' || !sketchRegions(f).faces.length) continue;
+    for (const e of Object.values(f.sk.ents)) { if (e.constr || e.ext) continue; const sk = f.sk; let uv;
+      if (e.t === 'line') uv = [gp(sk, e.p1), gp(sk, e.p2)];
+      else if (e.t === 'circle' || e.t === 'arc') { const c = gp(sk, e.c); uv = Array.from({ length: 49 }, (_, i) => ({ x: c.x + e.r * Math.cos(i / 48 * TAU), y: c.y + e.r * Math.sin(i / 48 * TAU) })); }
+      else uv = curvePts(sk, e);
+      const pts = uv.filter(Boolean).map((q) => toScreen(toWorld(f.plane, q.x, q.y)));
+      for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i]; const dx = b.x - a.x, dy = b.y - a.y; const t = Math.max(0, Math.min(1, ((mx - a.x) * dx + (my - a.y) * dy) / (dx * dx + dy * dy || 1))); const d = Math.hypot(a.x + t * dx - mx, a.y + t * dy - my); if (d < 10 && (!best || d < best.d)) best = { d, f }; } } }
+  return best?.f || null;
+}
 function partClick(ev) {
+  if (S.pickSketch) { const sf = sketchAt(ev); if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); } return; }
   if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.shell) { shellClick(ev); return; }
   if (S.pm?.pickFrom) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.fromTarget = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.fromTarget = planeByKey(p.plane); else return; S.pm.pickFrom = false; showFaceHover(null); renderSide(); schedulePreview(); return; }
@@ -2639,7 +2652,13 @@ function pickSketchForFeature() {
 }
 function cmdFeature(type, mode) {
   if (S.measure) closeMeasure();
-  const sf = pickSketchForFeature(); if (!sf) { toast('Сначала нарисуйте замкнутый эскиз: «Эскиз» → выберите плоскость → нарисуйте контур', 'warn'); return; }
+  const sf = pickSketchForFeature();
+  if (!sf) {
+    // Every sketch can feed more than one feature: with no unused one, the user picks one, in the tree or in the window.
+    if (!S.doc.features.slice(0, rollbackIndex()).some((g) => g.type === 'sketch' && sketchRegions(g).faces.length)) { toast('Сначала нарисуйте замкнутый эскиз: «Эскиз» → выберите плоскость → нарисуйте контур', 'warn'); return; }
+    S.pickSketch = { type, mode }; S.selectedTree = null; updateSketchVisuals(); renderSide(); setHint('Щёлкните эскиз в дереве или его линии в окне. Esc: отмена'); requestRender(); return;
+  }
+  S.pickSketch = null;
   const reg = sketchRegions(sf); if (!reg.faces.length) { toast(`В «${sf.name}» нет замкнутых контуров. Проверьте, что концы линий соединены.`, 'warn'); return; }
   const f = type === 'extrude'
     ? { id: fid(), type: 'extrude', name: nextName(mode === 'cut' ? 'Вырез' : 'Бобышка'), sketch: sf.id, mode, end: mode === 'cut' ? 'through' : 'blind', depth: 20, dir: 1, regions: null }
@@ -5012,7 +5031,9 @@ function renderTree() {
   const row = (key, icon, name, opts = {}) => {
     const r = h('div', { class: 'row' + (S.selectedTree === key ? ' sel' : '') + (S.faceOrigin && key === 'feat:' + S.faceOrigin ? ' origin' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
       svg(icon), h('span', { class: 'nm' }, name), opts.meta ? h('span', { class: 'meta' }, opts.meta) : null);
-    r.addEventListener('click', () => { S.selectedTree = key; S.faceOrigin = null; buildPlanes(); renderTree(); updateSketchVisuals(); showFeatureFaces(key.startsWith('feat:') ? key.slice(5) : null); opts.onSelect?.(); });
+    r.addEventListener('click', () => {
+      if (S.pickSketch && key.startsWith('feat:')) { const g = featById(key.slice(5)); const sf = g?.type === 'sketch' ? g : g?.sketch ? featById(g.sketch) : null; if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; } }
+      S.selectedTree = key; S.faceOrigin = null; buildPlanes(); renderTree(); updateSketchVisuals(); showFeatureFaces(key.startsWith('feat:') ? key.slice(5) : null); opts.onSelect?.(); });
     if (opts.onOpen) r.addEventListener('dblclick', opts.onOpen);
     r.addEventListener('keydown', (e) => { if (e.key === 'Enter') opts.onOpen?.(); });
     if (opts.menu) r.addEventListener('contextmenu', (e) => { e.preventDefault(); S.selectedTree = key; renderTree(); openMenu(e.clientX, e.clientY, opts.menu); });
@@ -5412,7 +5433,7 @@ function updateRelBar() {
 }
 function updateSketchVisuals() {
   groups.sketch.clear();
-  for (const f of (S.doc.features || []).slice(0, rollbackIndex())) if (f.type === 'sketch' && f.id !== S.editing && (sketchVisible(f) || S.selectedTree === 'feat:' + f.id) && !S.pm?.regionsOf) drawSketchObjects(f, false);
+  for (const f of (S.doc.features || []).slice(0, rollbackIndex())) if (f.type === 'sketch' && f.id !== S.editing && (sketchVisible(f) || S.selectedTree === 'feat:' + f.id || (S.pickSketch && sketchRegions(f).faces.length)) && !S.pm?.regionsOf) drawSketchObjects(f, false);
   const e = editF(); if (e) drawSketchObjects(e, true);
   updateRelBar(); requestRender();
 }
@@ -5523,6 +5544,7 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'Escape' && S.pickSketch) { S.pickSketch = null; updateSketchVisuals(); setHint(); requestRender(); return; }
   if (e.key === 'Escape') {
     // Esc never leaves the sketch: it ends the current tool action, then clears the selection.
     if (!$('modal').hidden) return closeModal();
