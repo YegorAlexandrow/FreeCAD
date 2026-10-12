@@ -59,8 +59,9 @@ button { font: inherit; color: inherit; }
 .brand { font-weight: 600; letter-spacing: .02em; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .brand svg { width: 20px; height: 20px; color: var(--accent); }
 .filebtns { display: flex; gap: 2px; margin-left: 4px; overflow-x: auto; min-width: 0; flex: 0 0 auto; }
-.doctabs { display: flex; gap: 2px; margin-left: 12px; overflow-x: auto; min-width: 0; flex: 0 1 auto; }
-.doctab { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; border: 1px solid transparent; background: none; cursor: pointer; color: var(--fg-2); white-space: nowrap; max-width: 220px; }
+.doctabs { display: flex; gap: 2px; margin-left: 6px; overflow-x: auto; min-width: 0; flex: 1 1 0; scrollbar-width: none; }
+.doctabs::-webkit-scrollbar { display: none; }
+.doctab { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 6px; border: 1px solid transparent; background: none; cursor: pointer; color: var(--fg-2); white-space: nowrap; max-width: 170px; flex: 0 0 auto; }
 .doctab svg { width: 15px; height: 15px; flex: 0 0 15px; }
 .doctab span { overflow: hidden; text-overflow: ellipsis; }
 .doctab:hover { background: var(--panel-2); color: var(--fg); }
@@ -253,14 +254,15 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
       <button class="tbtn" id="sideToggle" aria-label="Дерево построения">☰</button>
       <div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20 14 10M14 10l3-6 3 3-6 3M4 20l3-1-2-2z"/></svg>Резец CAD</div>
       <button class="tbtn projbtn" id="bProjects" hidden title="Проекты на сервере">Проект ▾</button>
-      <div class="doctabs" id="docTabs" role="tablist" aria-label="Документы проекта"></div>
-      <button class="tbtn addtab" id="bAdd" title="Новый документ или импорт" aria-label="Добавить документ">＋</button>
-      <div class="filebtns">
+      <button class="tbtn" id="bFile" title="Открыть, сохранить, экспорт">Файл ▾</button>
+      <div class="filebtns" hidden>
         <button class="tbtn" id="bImport">Открыть…</button>
         <button class="tbtn" id="bExport">Сохранить…</button>
         <button class="tbtn wide" id="bStl">STL…</button>
       </div>
-      <div class="spacer"></div>
+      <div class="doctabs" id="docTabs" role="tablist" aria-label="Документы проекта"></div>
+      <button class="tbtn alldocs" id="bDocs" title="Все документы проекта" aria-label="Все документы">▾</button>
+      <button class="tbtn addtab" id="bAdd" title="Новый документ или импорт" aria-label="Добавить документ">＋</button>
       <span id="saveState" class="savest" data-state="local">В браузере</span>
       <button class="tbtn" id="bUndo" title="Отменить (Ctrl+Z)">↶</button>
       <button class="tbtn" id="bRedo" title="Повторить (Ctrl+Y)">↷</button>
@@ -5117,6 +5119,7 @@ function renderDocTabs() {
     b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Переименовать', () => renameDoc(d, b)], ['Дублировать', () => addDoc(d.kind, d.name, clone(d.data), false)], ...(SRV.on ? [['Прежние версии…', () => serverVersionsMenu(d, e.clientX, e.clientY)]] : CLOUD.db ? [['Прежние версии…', () => docVersionsMenu(d, e.clientX, e.clientY)]] : []), null, ['Удалить', () => deleteDoc(d)]]); };
     box.append(b);
   }
+  box.querySelector('[aria-selected="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
 }
 function renameDoc(d, btn) {
   const inp = h('input', { type: 'text', value: d.name, 'aria-label': 'Имя документа' }); btn.replaceChildren(svg(ICON[KIND_ICON[d.kind]]), inp); inp.focus(); inp.select();
@@ -5132,6 +5135,14 @@ function deleteDoc(d) {
   if (wasActive) { S.project.active = S.project.docs[0].id; S.mode = null; enterDoc(); } else renderDocTabs();
   saveProjectSoon(); toast(`Документ «${d.name}» удалён`, 'info');
 }
+// The tab strip scrolls; the full list is one click away, and file commands live in one menu.
+$('docTabs').addEventListener('wheel', (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.currentTarget.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
+$('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()]]); };
+$('bDocs').onclick = (e) => {
+  const r = e.currentTarget.getBoundingClientRect(); const items = [];
+  for (const kind of ['part', 'asm', 'import', 'drw']) { const ds = S.project.docs.filter((d) => d.kind === kind); if (!ds.length) continue; if (items.length) items.push(null); for (const d of ds) items.push([(d.id === S.project.active ? '● ' : '') + KIND_NAME[kind] + ': ' + d.name, () => switchDoc(d.id)]); }
+  openMenu(r.left, r.bottom + 4, items);
+};
 $('bAdd').onclick = (e) => {
   const r = e.currentTarget.getBoundingClientRect();
   openMenu(r.left, r.bottom + 4, [
