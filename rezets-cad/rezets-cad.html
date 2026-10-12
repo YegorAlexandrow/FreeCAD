@@ -192,7 +192,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #sectionBar input[type=range] { width: 160px; } #sectionBar .num { width: 64px; font-family: var(--font-num); }
 #sectionBar button { border: 1px solid var(--line); background: var(--bg); color: var(--fg-2); border-radius: 5px; padding: 2px 8px; cursor: pointer; } #sectionBar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 #viewbar button:hover { background: var(--panel-2); color: var(--fg); }
-#toasts { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; width: min(560px, calc(100% - 32px)); }
+#toasts { position: absolute; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: none; width: min(380px, calc(100% - 32px)); }
 .toast { pointer-events: auto; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 8px 12px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); display: flex; gap: 10px; align-items: center; line-height: 1.4; width: 100%; }
 .toast.warn { border-left-color: var(--warn); } .toast.err { border-left-color: var(--bad); }
 .toast .acts { display: flex; gap: 6px; margin-left: auto; }
@@ -1239,6 +1239,25 @@ function buildTool(f, body, cyls = []) {
       else { body?.computeBoundingBox(); const sph = body ? body.boundingBox.getBoundingSphere(new THREE.Sphere()) : new THREE.Sphere(C, 100); const Rr = sph.radius + sph.center.distanceTo(C) + Math.abs(sAlong) + 10; d = 2 * Rr;
         const ns = nt.clone(); if (ns.dot(C.clone().sub(Q)) < 0) ns.negate(); clip = halfSpaceBox(Q.clone().addScaledVector(ns, off), nt, C, Rr); }
     }
+    // "Up to next": rays from the profile along the extrusion find where the material next ends (a cut,
+    // which then stops at the far side of the wall it starts in) or next begins (a boss).
+    if (f.end === 'next') {
+      if (!body) throw new Error('«До следующей» нужна деталь, в которую упереться');
+      const D = new THREE.Vector3(...sf.plane.n).multiplyScalar(f.dir === -1 ? -1 : 1); const m = bodyMesh(body); const rc = new THREE.Raycaster();
+      const pts = []; for (const l of loops) for (const ring of [l.pts, ...l.holes]) { const step = Math.max(1, Math.floor(ring.length / 24)); for (let i = 0; i < ring.length; i += step) pts.push(ring[i]); }
+      const ids = selectedRegionIds(f, reg); for (const r of reg.faces) if (ids.has(r.id)) pts.push(r.sample);
+      let best = f.mode === 'cut' ? 0 : Infinity, room = 0.05;
+      for (const [u, v] of pts) {
+        const o = toWorld(sf.plane, u, v).addScaledVector(D, -1e-3); rc.set(o, D); const hits = rc.intersectObject(m).map((x) => x.distance - 1e-3).filter((t) => t > 1e-4);
+        const startIn = isInside(body, o.clone().addScaledVector(D, 2e-3));
+        if (f.mode === 'cut') { const k = startIn ? 0 : 1; const exit = hits[k]; if (exit != null) { best = Math.max(best, exit); if (hits[k + 1] != null) room = Math.min(room, (hits[k + 1] - exit) / 2); } }
+        else if (!startIn && hits.length) best = Math.min(best, hits[0]);
+      }
+      if (!(best > 1e-6 && best < Infinity)) throw new Error(f.mode === 'cut' ? 'Впереди нет материала, который можно прорезать' : 'Впереди нет грани, до которой вытягивать');
+      // A cut ends a little past the wall (a tool face on the wall's face would be coplanar), but
+      // never as far as the next material.
+      d = best + (f.mode === 'cut' ? Math.max(room, 0.002) : 0);
+    }
     // "Through all" only needs to clear the body; a huge tool loses precision in the boolean.
     if (f.end === 'through') { if (body) { body.computeBoundingBox(); const sph = body.boundingBox.getBoundingSphere(new THREE.Sphere()); d = 2 * (sph.radius + sph.center.distanceTo(new THREE.Vector3(...sf.plane.o))) + 10; } else d = 1000; }
     let z0, z1;
@@ -1792,7 +1811,7 @@ function partClick(ev) {
   if (S.pm?.feature?.type === 'plane') { const f = S.pm.feature; if (p?.plane) f.base = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; else if (p?.face) f.base = { face: planeFromFace(p.face, p.point) }; else return; renderSide(); rebuild(); return; }
   if (S.pm?.kind === 'pickPlane') { if (p?.plane) startSketch(planeByKey(p.plane)); else if (p?.face) startSketch(planeFromFace(p.face, p.point)); return; }
   if (p?.plane) { S.selectedTree = p.plane.startsWith('f:') ? 'feat:' + p.plane.slice(2) : 'plane:' + p.plane; S.pickedFace = null; }
-  else if (p?.face) { S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); toast('Грань выбрана. Нажмите «Эскиз», чтобы рисовать на ней.', 'info', [{ label: 'Эскиз', act: () => cmdSketch() }]); }
+  else if (p?.face) { S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); setHint('Грань выбрана: «Эскиз» (S) начнёт эскиз на ней'); }
   else { S.selectedTree = null; S.pickedFace = null; }
   buildPlanes(); renderTree(); requestRender();
 }
@@ -4702,7 +4721,7 @@ function renderTree() {
   const featRow = (f, i, child) => {
     const off = i >= rb || f.suppressed; const err = S.errors[f.id];
     const icon = f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
-    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
+    const meta = f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'next' ? 'до следующей' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? fmt(f.d) + ' мм' : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
@@ -4802,7 +4821,7 @@ function renderPM() {
   body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Операция'), seg([['add', 'Добавить'], ['cut', 'Вырезать']], f.mode, (v) => { f.mode = v; if (isExt && v === 'cut' && f.end === 'blind' && !pm.touchedEnd) f.end = 'through'; if (isExt) f.dir = v === 'cut' ? guessCutDir(sf, reg, f) : S.body ? guessAddDir(sf, reg, f) : 1; refresh(); })));
   if (isExt) {
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Направление 1'),
-      seg([['blind', 'На глубину'], ['mid', 'Симметр.'], ['through', 'Насквозь'], ['face', 'До грани']], f.end, (v) => { f.end = v; pm.touchedEnd = true; pm.pickTarget = v === 'face' && !f.target; refresh(); }),
+      seg([['blind', 'На глубину'], ['mid', 'Симметр.'], ['next', 'До след.'], ['through', 'Насквозь'], ['face', 'До грани']], f.end, (v) => { f.end = v; pm.touchedEnd = true; pm.pickTarget = v === 'face' && !f.target; refresh(); }),
       f.end === 'face' ? h('button', { class: 'rel pickbox' + (pm.pickTarget ? ' on' : ''), onclick: () => { pm.pickTarget = true; renderSide(); } }, h('b', {}, '▱'), f.target ? (f.target.label || 'Грань') : 'щёлкните грань или плоскость') : null,
       f.end === 'face' ? numField('Не доходя', 'pmOffset', f.offset || 0, (v) => { f.offset = v; schedulePreview(); }) : null,
       f.end === 'blind' || f.end === 'mid' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
@@ -4907,7 +4926,8 @@ document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.cont
 // Toasts
 function toast(text, kind = 'info', actions = []) {
   const box = $('toasts'); const el = h('div', { class: 'toast ' + kind, role: 'status' }, h('span', {}, text), actions.length ? h('div', { class: 'acts' }, actions.map((a) => h('button', { onclick: () => { el.remove(); a.act(); } }, a.label))) : null);
-  box.append(el); while (box.children.length > 3) box.firstChild.remove(); setTimeout(() => el.remove(), kind === 'err' ? 9000 : 5000); return el;
+  for (const old of [...box.children]) if (old.firstChild?.textContent === text) old.remove();
+  box.append(el); while (box.children.length > 2) box.firstChild.remove(); setTimeout(() => el.remove(), kind === 'err' ? 9000 : 5000); return el;
 }
 
 
