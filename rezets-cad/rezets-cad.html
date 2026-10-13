@@ -2363,6 +2363,11 @@ function explainFree(sk, a) {
     } else for (const p of entPts(e)) { if (seen.has(p)) continue; seen.add(p); const m = how(p); if (m) out.push(`Кривая: точка ${xy(p)} ${m}`); }
   }
   for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed && !seen.has(id)) { const m = how(id); if (m) out.push(`Точка ${xy(id)} ${m}`); }
+  // Construction geometry counts too: its free ends are what is left when the profile itself is defined.
+  for (const e of Object.values(sk.ents)) {
+    if (!e.constr || e.t !== 'line') continue; const m1 = seen.has(e.p1) ? null : how(e.p1), m2 = seen.has(e.p2) ? null : how(e.p2); if (!m1 && !m2) continue;
+    out.push(`Вспомогательная линия ${xy(e.p1)} → ${xy(e.p2)}: ${m1 && m2 ? 'оба конца свободны' : 'конец свободен'} (${m1 || m2}). Задайте её длину или привяжите концы, либо удалите, если она не нужна`);
+  }
   return out;
 }
 function showUnderDefined() {
@@ -2370,6 +2375,9 @@ function showUnderDefined() {
   for (const e of Object.values(sk.ents)) if (entState(sk, e) === 'under') S.sel.add('e:' + e.id);
   for (const id of Object.keys(sk.pts)) if (ptState(id) === 'under' && !Object.values(sk.ents).some((e) => !e.constr && entState(sk, e) === 'under' && entPts(e).includes(id))) S.sel.add('p:' + id);
   setTool('select'); refreshSketch();
+  // What is selected may lie off screen (the end of a long construction line): bring it into view.
+  const f = editF(); const r = canvas.getBoundingClientRect(); const ids = [...S.sel].flatMap((k) => k.startsWith('p:') ? [k.slice(2)] : sk.ents[k.slice(2)] ? entPts(sk.ents[k.slice(2)]) : []);
+  if (ids.some((id) => { const q = gp(sk, id); if (!q) return false; const s2 = toScreen(toWorld(f.plane, q.x, q.y)); return s2.x < 0 || s2.y < 0 || s2.x > r.width || s2.y > r.height; })) fitView();
   const why = explainFree(sk, S.analysis);
   toast(`Не определено: ${S.sel.size} ${plural(S.sel.size, 'объект', 'объекта', 'объектов')}, они выделены. ${why[0] || ''}`, 'info');
 }
