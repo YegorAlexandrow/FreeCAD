@@ -5421,11 +5421,14 @@ function setHint(text) {
 }
 // Menu
 const menu = $('menu');
+// An item may carry a third element, called with true while the pointer is over it and false after.
 function openMenu(x, y, items) {
-  menu.textContent = ''; for (const it of items) { if (!it) { menu.append(h('hr')); continue; } menu.append(h('button', { onclick: () => { closeMenu(); it[1](); } }, it[0])); }
+  menu.textContent = ''; menu.onHover = null;
+  for (const it of items) { if (!it) { menu.append(h('hr')); continue; } const b = h('button', { onclick: () => { closeMenu(); it[1](); } }, it[0]);
+    if (it[2]) { b.addEventListener('pointerenter', () => { menu.onHover?.(false); menu.onHover = it[2]; it[2](true); }); b.addEventListener('pointerleave', () => { it[2](false); menu.onHover = null; }); } menu.append(b); }
   menu.hidden = false; const r = menu.getBoundingClientRect(); menu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px'; menu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
 }
-function closeMenu() { menu.hidden = true; }
+function closeMenu() { menu.hidden = true; menu.onHover?.(false); menu.onHover = null; }
 document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target)) closeMenu(); });
 
 // Toasts
@@ -5655,7 +5658,12 @@ function splitBodies(geo) {
   const groups = new Map(); for (let t = 0; t < nT; t++) { const r = find(t); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(t); }
   const mk = (tris) => { const out = new Float32Array(tris.length * 9); tris.forEach((t, i) => { for (let k = 0; k < 9; k++) out[9 * i + k] = pos.array[9 * t + k]; }); const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(out, 3)); return g; };
   let shells = [...groups.values()].map((tris) => { const g = mk(tris); return { tris, g, v: geoVolume(g) }; });
-  const solids = shells.filter((s) => s.v > 0).sort((a, b) => b.v - a.v);
+  // Booleans leave scraps: tiny loose patches of surface with next to no volume. They are not bodies;
+  // each goes with the nearest real one, so nothing is lost from the export.
+  const big = Math.max(0, ...shells.map((s) => s.v)); const minV = Math.max(0.5, big * 1e-3);
+  const solids = shells.filter((s) => s.v >= minV).sort((a, b) => b.v - a.v);
+  const centre = (s) => { s.g.computeBoundingBox(); return s.g.boundingBox.getCenter(new THREE.Vector3()); };
+  for (const s of shells.filter((s) => s.v > 0 && s.v < minV)) { const c = centre(s); const host = solids.slice().sort((a, b) => centre(a).distanceTo(c) - centre(b).distanceTo(c))[0]; if (host) host.tris.push(...s.tris); }
   for (const s of shells.filter((s) => s.v <= 0)) { const p = new THREE.Vector3().fromBufferAttribute(s.g.getAttribute('position'), 0); const host = solids.find((o) => isInside(o.g, p)) || solids[0]; if (host) host.tris.push(...s.tris); }
   return solids.map((s) => { const g = mk(s.tris); return { geo: g, vol: geoVolume(g) }; });
 }
@@ -5664,19 +5672,49 @@ function stlText(geo, name) {
   for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize(); lines.push(`facet normal ${n.x} ${n.y} ${n.z}`, ' outer loop', `  vertex ${a.x} ${a.y} ${a.z}`, `  vertex ${b.x} ${b.y} ${b.z}`, `  vertex ${c.x} ${c.y} ${c.z}`, ' endloop', 'endfacet'); }
   lines.push('endsolid'); return lines.join('\n');
 }
-async function saveStl(geo, name) {
-  const text = stlText(geo, name);
-  if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: name + '.stl', data: text }); return true; } catch (e) { if (e?.code === 'declined' || e?.code === 'cancelled') return false; console.warn('download', e); } }
-  showModal('Экспорт STL', `${name}: ASCII STL, ${geo.getAttribute('position').count / 3} треугольников, единицы мм. Скопируйте текст и сохраните в файл .stl.`, text, [['Копировать', copyText], ['Закрыть', closeModal]]); return false;
+// The body under the pointer in the STL menu is shown in the accent colour.
+function showBodyHighlight(geo) {
+  originGroup.clear();
+  if (geo) { const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: colors['geo-sel'], transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })); m.renderOrder = 12; originGroup.add(m); }
+  requestRender();
+}
+// Binary STL, and a zip (stored, no compression) to carry it: the page's file saving does not allow
+// the .stl extension, and a zip also takes every body in one download.
+function stlBinary(geo) {
+  const pos = geo.getAttribute('position'); const n = pos.count / 3; const buf = new ArrayBuffer(84 + 50 * n); const dv = new DataView(buf); dv.setUint32(80, n, true);
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), nn = new THREE.Vector3();
+  for (let t = 0; t < n; t++) { a.fromBufferAttribute(pos, 3 * t); b.fromBufferAttribute(pos, 3 * t + 1); c.fromBufferAttribute(pos, 3 * t + 2); nn.crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize();
+    let o = 84 + 50 * t; for (const v of [nn, a, b, c]) { dv.setFloat32(o, v.x, true); dv.setFloat32(o + 4, v.y, true); dv.setFloat32(o + 8, v.z, true); o += 12; } }
+  return new Uint8Array(buf);
+}
+const CRC_T = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
+const crc32 = (u8) => { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function zipFiles(files) {
+  const enc = new TextEncoder(); const parts = []; const central = []; let off = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name); const crc = crc32(f.data); const head = new DataView(new ArrayBuffer(30));
+    head.setUint32(0, 0x04034b50, true); head.setUint16(4, 20, true); head.setUint16(6, 0x0800, true); head.setUint32(14, crc, true); head.setUint32(18, f.data.length, true); head.setUint32(22, f.data.length, true); head.setUint16(26, name.length, true);
+    parts.push(new Uint8Array(head.buffer), name, f.data);
+    const cd = new DataView(new ArrayBuffer(46)); cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0x0800, true); cd.setUint32(16, crc, true); cd.setUint32(20, f.data.length, true); cd.setUint32(24, f.data.length, true); cd.setUint16(28, name.length, true); cd.setUint32(42, off, true);
+    central.push(new Uint8Array(cd.buffer), name); off += 30 + name.length + f.data.length;
+  }
+  const cdSize = central.reduce((s, x) => s + x.length, 0); const end = new DataView(new ArrayBuffer(22)); end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, cdSize, true); end.setUint32(16, off, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+async function saveStl(list, zipName) {
+  const blob = zipFiles(list.map((x) => ({ name: x.name + '.stl', data: stlBinary(x.geo) })));
+  if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: zipName + '.zip', data: blob }); return true; } catch (e) { if (e?.code === 'declined') return false; console.warn('download', e); } }
+  // Outside claude.ai (the local server or a plain file) the browser saves it directly.
+  const a = h('a', { href: URL.createObjectURL(blob), download: zipName + '.zip' }); document.body.append(a); a.click(); a.remove(); return true;
 }
 $('bStl').onclick = () => {
   if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
   const name = activeEntry()?.name || S.doc.name || 'Деталь'; const bodies = splitBodies(S.body);
-  if (bodies.length < 2) { saveStl(S.body, name); return; }
+  if (bodies.length < 2) { saveStl([{ name, geo: S.body }], name); return; }
   // The button lives in the «Файл» menu; the choice opens under that menu.
   const r = $('bFile').getBoundingClientRect();
-  openMenu(r.left, r.bottom + 4, [['Все тела одним файлом', () => saveStl(S.body, name)], ['Каждое тело отдельным файлом', async () => { for (let i = 0; i < bodies.length; i++) if (!(await saveStl(bodies[i].geo, `${name} тело${i + 1}`)) && !CLOUD.downloads) break; }], null,
-    ...bodies.map((bd, i) => [`Тело ${i + 1}: ${fmt(bd.vol, 0)} мм³`, () => saveStl(bd.geo, `${name} тело${i + 1}`)])]);
+  openMenu(r.left, r.bottom + 4, [['Все тела одним файлом', () => saveStl([{ name, geo: S.body }], name)], ['Каждое тело отдельным файлом', () => saveStl(bodies.map((bd, i) => ({ name: `${name} тело${i + 1}`, geo: bd.geo })), name + ' тела')], null,
+    ...bodies.map((bd, i) => [`Тело ${i + 1}: ${fmt(bd.vol, 0)} мм³`, () => saveStl([{ name: `${name} тело${i + 1}`, geo: bd.geo }], `${name} тело${i + 1}`), (on) => showBodyHighlight(on ? bd.geo : null)])]);
 };
 $('bImport').onclick = () => $('fileIn').click();
 $('fileIn').onchange = async (e) => {
@@ -5762,5 +5800,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
   } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
 })();
-window.__rezets = { S, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>

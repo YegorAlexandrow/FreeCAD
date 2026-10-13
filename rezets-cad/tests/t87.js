@@ -5,6 +5,8 @@ const doc = JSON.parse(fs.readFileSync(__dirname + '/../testdata/arm2_user5_m66.
   const r = await p.evaluate((d) => { const R = window.__rezets; R.loadDoc(d); const all = R.geoVolume(R.S.body); const bs = R.splitBodies(R.S.body);
     return { all: +all.toFixed(1), bodies: bs.map((x) => +x.vol.toFixed(1)), sum: +bs.reduce((s, x) => s + x.vol, 0).toFixed(1), stlHead: R.stlText(bs[0].geo, 'ARM2 тело1').slice(0, 30) }; }, doc);
   await p.evaluate(() => document.getElementById('bStl').click()); await p.waitForTimeout(200);
-  const menu = await p.evaluate(() => [...document.querySelectorAll('#menu button, #menu .item, #menu div')].map((x) => x.textContent).filter(Boolean).slice(0, 6));
-  console.log(JSON.stringify({ ...r, menu })); console.log('expect several bodies whose volumes sum to the whole, a menu with «Все тела одним файлом», «Каждое тело отдельным файлом» and one line per body');
+  const menu = await p.evaluate(() => [...document.querySelectorAll('#menu button')].map((x) => x.textContent));
+  const btn = (await p.$$('#menu button'))[2]; await btn.hover(); await p.waitForTimeout(100); const lit = await p.evaluate(() => window.__rezets.originCount());
+  await p.mouse.move(5, 500); await p.waitForTimeout(100); const off = await p.evaluate(() => window.__rezets.originCount());
+  console.log(JSON.stringify({ ...r, menu, lit, off })); console.log('expect several bodies whose volumes sum to the whole, a menu with «Все тела одним файлом», «Каждое тело отдельным файлом» and one line per body, no zero-volume scraps; hovering a body line lights it (lit 1), leaving clears it (off 0)');
   console.log(logs.join('\n')); await b.close(); })();
