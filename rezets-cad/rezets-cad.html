@@ -1270,6 +1270,7 @@ function computeBody(features) {
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
+    if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     key.push(JSON.stringify(f));
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
@@ -2949,6 +2950,25 @@ function edgeTool(body, edge, kind, size) {
   if (sec.some((p) => p[0] < 1e-6)) throw new Error('Размер больше радиуса кромки');
   const g = revolveGeometry([{ pts: sec, holes: [] }], [0, 0], [0, 1], 360);
   g.applyMatrix4(new THREE.Matrix4().makeBasis(rho, n, new THREE.Vector3().crossVectors(rho, n)).setPosition(c)); g.computeVertexNormals(); return { g, convex };
+}
+// Fillets and chamfers keep their edges as coordinates. After a dimension change an edge that is gone
+// is found again: a circle of the same radius on the same axis, or a straight edge of the same direction
+// and length (or on the same line), the nearest to where it was.
+function followEdges(f, body, cyls) {
+  const topo = edgeTopology(body, cyls); const tol = 1e-3;
+  f.edges = f.edges.map((e) => {
+    if (e.t === 'circle') {
+      const C = V3(e.c), N = V3(e.n || [0, 0, 1]).normalize(); const cs = topo.circles.filter((c) => Math.abs(c.r - e.r) < tol && Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6 && c.c.clone().sub(C).cross(N).length() < tol);
+      if (cs.some((c) => c.c.distanceTo(C) < tol) || !cs.length) return e;
+      const c = cs.sort((p, q) => p.c.distanceTo(C) - q.c.distanceTo(C))[0]; return { ...e, c: c.c.toArray(), n: c.n.toArray() };
+    }
+    const A = V3(e.a), B = V3(e.b); const dir = B.clone().sub(A); const len = dir.length(); if (len < 1e-9) return e; dir.normalize(); const M = A.clone().add(B).multiplyScalar(0.5);
+    if (topo.lines.some(([a, b]) => sameEdge(e, { t: 'line', a: a.toArray(), b: b.toArray() }))) return e;
+    const par = topo.lines.filter(([a, b]) => { const d = b.clone().sub(a); return d.length() > 1e-9 && Math.abs(d.clone().normalize().dot(dir)) > 1 - 1e-6; });
+    const near = (list) => list.sort((p, q) => p[0].clone().add(p[1]).multiplyScalar(0.5).distanceTo(M) - q[0].clone().add(q[1]).multiplyScalar(0.5).distanceTo(M))[0];
+    const hit = near(par.filter(([a, b]) => Math.abs(a.distanceTo(b) - len) < tol)) || near(par.filter(([a]) => a.clone().sub(A).cross(dir).length() < tol));
+    return hit ? { ...e, a: hit[0].toArray(), b: hit[1].toArray() } : e;
+  });
 }
 function applyEdgeFeature(f, body) {
   if (!body) throw new Error('Нет тела для обработки рёбер'); if (!f.edges?.length) throw new Error('Выберите рёбра');
