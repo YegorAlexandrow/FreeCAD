@@ -4675,7 +4675,11 @@ function previewMate() {
   // Distance keeps the side the parts are on now.
   if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = Math.abs(raw); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
   if (pm.type === 'angle') { if (pm.v == null) pm.v = Math.round(Math.acos(Math.min(1, Math.abs(A.d.dot(B.d)))) * 180 / Math.PI); m.v = pm.v; m.side = pm.flip ? -1 : 1; }
-  pm.result = tryAddMate(asm, m); if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; pm.suggest = null; if (pm.result.status === 'conflict') { const ex = explainConflict(asm, m, pm.result.group); if (ex?.text) { pm.result.why = ex.text; pm.suggest = ex.suggest; } else pm.result.why = ex; } }
+  pm.result = tryAddMate(asm, m);
+  // As in SolidWorks, when the faces cannot meet the way they face now (another mate holds the part's
+  // orientation), the other alignment is tried before calling it a conflict.
+  if (pm.result.status === 'conflict' && !pm.flipTouched && ['coincident', 'parallel', 'concentric', 'distance'].includes(m.type)) { restorePoses(asm, pm.before); const m2 = { ...m, flip: !m.flip }; const r2 = tryAddMate(asm, m2); if (r2.status === 'ok') { pm.flip = m2.flip; Object.assign(m, m2); pm.result = r2; } else restorePoses(asm, pm.before); }
+  if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; pm.suggest = null; if (pm.result.status === 'conflict') { const ex = explainConflict(asm, m, pm.result.group); if (ex?.text) { pm.result.why = ex.text; pm.suggest = ex.suggest; } else pm.result.why = ex; } }
   asmRefresh(true);
 }
 function okMate() {
@@ -5024,7 +5028,7 @@ function renderAsmPM() {
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
-      canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { if (sideFlip(a, b, pm.type)) pm.side = -(pm.side || 1); else pm.flip = !pm.flip; previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, sideFlip(a, b, pm.type) ? 'с другой стороны грани' : a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
+      canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Развернуть сопряжённую деталь на другую сторону', onclick: () => { if (sideFlip(a, b, pm.type)) pm.side = -(pm.side || 1); else { pm.flip = !pm.flip; pm.flipTouched = true; } previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, sideFlip(a, b, pm.type) ? 'с другой стороны грани' : a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
   }
   if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result)),
     pm.suggest ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const i = pm.picks.findIndex((r) => r.comp === pm.suggest.comp); if (i >= 0) pm.picks[i] = pm.suggest; pm.suggest = null; previewMate(); } }, 'Взять подсвеченную')) : null));
@@ -5113,7 +5117,7 @@ function asmUp(ev, d) {
     if (p?.point) { const c = S.doc.comps.find((x) => x.id === p.comp); if (c) ref.at = p.point.clone().applyMatrix4(new THREE.Matrix4().fromArray(c.T).invert()).toArray().map((v) => +v.toFixed(5)); }
     if (pm.picks.length >= 2) { pm.picks = []; pm.flip = null; pm.v = null; }
     if (pm.picks.length === 1 && pm.picks[0].comp === ref.comp) { toast('Выберите объект на другом компоненте', 'warn'); return; }
-    pm.picks.push(ref); pm.flip = null; pm.v = null; previewMate(); return;
+    pm.picks.push(ref); pm.flip = null; pm.flipTouched = false; pm.v = null; previewMate(); return;
   }
   if (d && !d.moved && !S.pm) { const p = asmPick(ev); S.asmSel = p?.comp || null; asmRefresh(); }
 }
