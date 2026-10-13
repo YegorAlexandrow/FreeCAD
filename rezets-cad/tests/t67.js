@@ -7,7 +7,9 @@ const proj = fs.readFileSync(__dirname + '/../testdata/big/servo_proj5.json', 'u
   const r = await p.evaluate((s) => { const R = window.__rezets; R.openProject(R.projectFromJSON(JSON.parse(s))); R.switchDoc('d2'); const asm = R.S.doc;
     const sv = R.docInfo('d5'), arm = R.docInfo('d7'); const c17 = asm.comps.find((c) => c.id === 'c17'), c21 = asm.comps.find((c) => c.id === 'c21');
     const ref = (c, inf, i) => { const e = inf.ents[i]; return { comp: c.id, kind: 'axis', p: e.p.toArray(), d: e.d.toArray(), r: e.r, e: i }; };
-    R.cmdMate(); const pm = R.S.pm; pm.picks = [ref(c21, sv, 45), ref(c17, arm, 9)]; pm.type = 'concentric'; R.previewMate();
+    R.cmdMate(); const pm = R.S.pm; // ARM2's hole axis at x = 19.95, picked by position: entity numbers follow the mesh, which depends on the boolean engine.
+    const k9 = arm.ents.map((e, i) => [e, i]).filter(([e]) => e.kind === 'axis' && Math.abs(e.p.x - 19.95) < 0.01).sort((a, b) => a[0].r - b[0].r)[0][1];
+    pm.picks = [ref(c21, sv, 45), ref(c17, arm, k9)]; pm.type = 'concentric'; R.previewMate();
     const out = { status: pm.result?.status, why: pm.result?.why, suggest: pm.suggest?.e };
     const btn = [...document.querySelectorAll('#side .chip')].find((x) => x.textContent === 'Взять подсвеченную'); out.button = !!btn; btn?.click();
     out.after = R.S.pm.result?.status; R.okPM(); out.mates = asm.mates.length; out.dof = R.S.asmAnalysis.dof; return out; }, proj);
