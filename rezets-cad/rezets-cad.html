@@ -4022,7 +4022,9 @@ function applyPattern(f, body, cyls, features) {
     if (!out.getAttribute('position').count) throw new Error('Результат пустой');
     return { body: out, cyls: added };
   }
-  const seeds = (f.feats || []).map((id) => features.find((x) => x.id === id)).filter((x) => x && !x.suppressed);
+  // Copies are made in tree order, whatever order they were picked in: a cut picked before its boss
+  // would otherwise cut empty space and then be covered by the boss copy.
+  const seeds = (f.feats || []).map((id) => features.find((x) => x.id === id)).filter((x) => x && !x.suppressed).sort((a, b) => features.indexOf(a) - features.indexOf(b));
   if (!seeds.length) throw new Error('Выберите элементы для копирования');
   let out = body;
   for (const sd of seeds) {
