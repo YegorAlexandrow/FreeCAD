@@ -1247,8 +1247,17 @@ function refPlane(f, features = S.doc.features, depth = 0) {
 }
 // A sketch on a face moves with that face: among the planar faces of the body with the same normal,
 // the one made by the same operation (traced back as in faceCreator) and nearest to the old position.
-function followFace(f, body, steps) {
-  const fc = f.plane.face; const n = V3(f.plane.n).normalize(); const pos = body.getAttribute('position'); const groups = new Map();
+function followFace(f, body, steps) { f.plane = followPlane(f.plane, body, steps); }
+// Any plane taken from a face (a sketch's, an extrude's «до грани» or «от грани», a mirror plane, a
+// reference plane's base) remembers the operation that made the face and follows it the same way.
+function followRefs(f, body, steps) {
+  const fp = (pl) => (pl?.face?.by ? followPlane(pl, body, steps) : pl);
+  if (f.target) f.target = fp(f.target); if (f.fromTarget) f.fromTarget = fp(f.fromTarget);
+  if (f.type === 'mirror' && f.plane?.face) f.plane = { ...f.plane, face: fp(f.plane.face) };
+  if (f.type === 'plane') { if (f.base?.face) f.base = { ...f.base, face: fp(f.base.face) }; if (f.base2?.face) f.base2 = { ...f.base2, face: fp(f.base2.face) }; }
+}
+function followPlane(pl, body, steps) {
+  const fc = pl.face; const n = V3(pl.n).normalize(); const pos = body.getAttribute('position'); const groups = new Map();
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
   for (let t = 0; t < pos.count / 3; t++) {
     a.fromBufferAttribute(pos, 3 * t); b.fromBufferAttribute(pos, 3 * t + 1); c.fromBufferAttribute(pos, 3 * t + 2); const nn = b.clone().sub(a).cross(c.clone().sub(a)); const ar = nn.length(); if (ar < 1e-9) continue; nn.divideScalar(ar);
@@ -1260,8 +1269,8 @@ function followFace(f, body, steps) {
     let k = steps.length - 1; if (k < 0) break; while (k > 0 && onSurface(steps[k - 1].body, g.p, n)) k--;
     if (steps[k].id === fc.by && (!best || Math.abs(g.d - fc.d) < Math.abs(best.d - fc.d))) best = g;
   }
-  if (!best || Math.abs(best.d - fc.d) < 1e-9) return;
-  const o = V3(f.plane.o).addScaledVector(n, best.d - fc.d); f.plane = { ...f.plane, o: o.toArray().map((v) => +v.toFixed(6)), face: { ...fc, d: best.d } };
+  if (!best || Math.abs(best.d - fc.d) < 1e-9) return pl;
+  const o = V3(pl.o).addScaledVector(n, best.d - fc.d); return { ...pl, o: o.toArray().map((v) => +v.toFixed(6)), face: { ...fc, d: best.d } };
 }
 function computeBody(features) {
   let body = null; const errors = {}; const key = []; let cyls = [];
@@ -1271,6 +1280,7 @@ function computeBody(features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
+    if (body && f.type !== 'sketch') followRefs(f, body, steps);
     key.push(JSON.stringify(f));
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
