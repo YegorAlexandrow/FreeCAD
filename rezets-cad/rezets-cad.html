@@ -4054,9 +4054,11 @@ function cmdPattern(type) {
   const okSeed = (x) => x && (x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole') && !x.suppressed;
   const last = [...S.doc.features.slice(0, rollbackIndex())].reverse().find(okSeed);
   const sel = S.selectedTree?.startsWith('feat:') ? featById(S.selectedTree.slice(5)) : null; const seed = okSeed(sel) ? sel : type === 'mirror' ? null : last;
+  // A mirror is most often made about a plane just built for it.
+  const lastPlane = [...S.doc.features.slice(0, rollbackIndex())].reverse().find((x) => x.type === 'plane' && !x.suppressed);
   const f = type === 'lpattern' ? { id: fid(), type, name: nextName('ЛинейныйМассив'), feats: seed ? [seed.id] : [], dir: { axis: 'x' }, n: 3, d: 20, flip: false, dir2: null, n2: 2, d2: 20, flip2: false }
     : type === 'cpattern' ? { id: fid(), type, name: nextName('КруговойМассив'), feats: seed ? [seed.id] : [], axis: { axis: 'y' }, n: 4, angle: 360, flip: false }
-      : { id: fid(), type, name: nextName('Зеркало'), feats: seed ? [seed.id] : [], plane: S.selectedTree === 'face' && S.pickedFace ? { face: clone(S.pickedFace) } : S.selectedTree?.startsWith('plane:') ? { std: S.selectedTree.slice(6) } : { std: 'right' } };
+      : { id: fid(), type, name: nextName('Зеркало'), feats: seed ? [seed.id] : [], plane: S.selectedTree === 'face' && S.pickedFace ? { face: clone(S.pickedFace) } : S.selectedTree?.startsWith('plane:') ? { std: S.selectedTree.slice(6) } : sel?.type === 'plane' ? { plane: sel.id } : lastPlane ? { plane: lastPlane.id } : { std: 'right' } };
   openPatternPM(f, true);
 }
 function openPatternPM(f, isNew) {
@@ -4139,7 +4141,9 @@ function renderPatternPM() {
   } else {
     const b = f.plane; const name = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'plane' ? ' on' : ''), onclick: () => { pm.pickFor = 'plane'; renderSide(); } }, h('b', {}, '▱'), name), pm.pickFor === 'plane' ? h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне') : h('div', { class: 'note' }, 'Щёлкните поле выше, чтобы выбрать её в окне, или справочную плоскость в окне'),
-      h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.plane = { std: k }; renderSide(); schedulePreview(); } }, p.label)))));
+      h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.plane = { std: k }; renderSide(); schedulePreview(); } }, p.label)),
+        // The part's own reference planes (a middle plane, say) are offered next to the standard ones.
+        S.doc.features.slice(0, idx).filter((x) => x.type === 'plane' && !x.suppressed).map((x) => h('button', { class: 'chip' + (f.plane.plane === x.id ? ' on' : ''), onclick: () => { f.plane = { plane: x.id }; renderSide(); schedulePreview(); } }, x.name)))));
   }
   if (err) body.append(pmErr(err));
   side.append(body);
