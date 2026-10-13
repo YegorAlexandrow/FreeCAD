@@ -4482,7 +4482,7 @@ function tryAddMate(asm, m) {
   const own = rows.filter((r) => r.cid === m.id), others = rows.filter((r) => r.cid !== m.id);
   const el = eliminate([...others, ...own], sys.n, ASM_TOL); const deps = el.dependent.filter((d) => d.ri >= others.length);
   const group = new Set(); for (const d of deps) for (const [k, v] of d.comb) if (k < others.length && Math.abs(v) > 1e-6) group.add(others[k].cid);
-  preAlign(asm, m);
+  preAlign(asm, m); alongAxis(asm, m);
   const ok = asmSolve(asm);
   if (!ok) { asm.mates.pop(); restorePoses(asm, before); return { status: 'conflict', group: [...group] }; }
   if (deps.length) {
@@ -4491,6 +4491,30 @@ function tryAddMate(asm, m) {
     if (eliminate([...oth2, ...own2], sys2.n, rankTol(sys2)).dependent.filter((d) => d.ri >= oth2.length).length === own2.length) { asm.mates.pop(); restorePoses(asm, before); return { status: 'redundant', group: [...group] }; }
   }
   return { status: 'ok' };
+}
+// A concentric mate fixes only the axis. Like SolidWorks, the moving part first slides along it so the
+// two picked cylinder faces (or circle edges) face each other; other mates may still move it after.
+function axialMid(ref, c) {
+  const inf = docInfo(c.doc); const e = ref.e != null && !ref.edge ? inf?.ents?.[ref.e] : null; const P = V3(ref.p), D = V3(ref.d).normalize();
+  if (!e || e.kind !== 'axis' || !e.tris?.length) return P;
+  const pos = inf.geo.getAttribute('position'); const v = new THREE.Vector3(); let tris = e.tris;
+  // One axis entity may hold several separate faces (the two rings of a fork); keep the one clicked.
+  if (ref.at) {
+    const key = (i) => `${Math.round(pos.getX(i) * 1e4)},${Math.round(pos.getY(i) * 1e4)},${Math.round(pos.getZ(i) * 1e4)}`; const par = new Map(); const find = (x) => { while (par.get(x) !== x) x = par.get(x); return x; };
+    const owner = new Map(); for (const t of tris) { par.set(t, t); for (let k = 0; k < 3; k++) { const kk = key(3 * t + k); const o = owner.get(kk); if (o === undefined) owner.set(kk, t); else par.set(find(t), find(o)); } }
+    const at = V3(ref.at); let best = null, bd = Infinity; for (const t of tris) { const c = new THREE.Vector3(); for (let k = 0; k < 3; k++) c.add(v.fromBufferAttribute(pos, 3 * t + k)); c.divideScalar(3); const d = c.distanceTo(at); if (d < bd) { bd = d; best = t; } }
+    const root = find(best); tris = tris.filter((t) => find(t) === root);
+  }
+  let lo = Infinity, hi = -Infinity;
+  for (const t of tris) for (let k = 0; k < 3; k++) { const s = v.fromBufferAttribute(pos, 3 * t + k).sub(P).dot(D); lo = Math.min(lo, s); hi = Math.max(hi, s); }
+  return P.addScaledVector(D, (lo + hi) / 2);
+}
+function alongAxis(asm, m) {
+  if (m.type !== 'concentric' || m.a.kind !== 'axis' || m.b.kind !== 'axis') return;
+  const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
+  const wa = axialMid(m.a, ca).applyMatrix4(new THREE.Matrix4().fromArray(ca.T)), wb = axialMid(m.b, cb).applyMatrix4(new THREE.Matrix4().fromArray(cb.T));
+  const fixedRef = mov === cb ? m.a : m.b; const fixedComp = mov === cb ? ca : cb; const axis = worldEnt(fixedRef, poseOf(fixedComp)).d.normalize();
+  const shift = axis.multiplyScalar((mov === cb ? wa.clone().sub(wb) : wb.clone().sub(wa)).dot(axis)); const pose = poseOf(mov); setPose(mov, pose.t.clone().add(shift), pose.q);
 }
 // Turns the moving component over first when the requested alignment is the far solution.
 function preAlign(asm, m) {
@@ -5085,6 +5109,8 @@ function asmUp(ev, d) {
   if (d && !d.moved && S.pm?.kind === 'explode') { explodeClick(ev); return; }
   if (d && !d.moved && S.pm?.kind === 'mate') {
     const ep = asmEdgePick(ev); const p = ep ? null : asmPick(ev); if (!ep && !p?.ent) return; const pm = S.pm; const ref = ep || { comp: p.comp, ...p.ent };
+    // Where on the face the click landed (part coordinates): two coaxial rings are one axis, the click tells which one was meant.
+    if (p?.point) { const c = S.doc.comps.find((x) => x.id === p.comp); if (c) ref.at = p.point.clone().applyMatrix4(new THREE.Matrix4().fromArray(c.T).invert()).toArray().map((v) => +v.toFixed(5)); }
     if (pm.picks.length >= 2) { pm.picks = []; pm.flip = null; pm.v = null; }
     if (pm.picks.length === 1 && pm.picks[0].comp === ref.comp) { toast('Выберите объект на другом компоненте', 'warn'); return; }
     pm.picks.push(ref); pm.flip = null; pm.v = null; previewMate(); return;
@@ -5842,5 +5868,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
