@@ -668,7 +668,13 @@ function analyzeSketch(sk) {
   for (const d of dependent) { const cid = rows[d.ri].cid; redundant.add(cid); const w = repeats.get(cid) || new Set(); for (const [k, v] of d.comb) if (k !== d.ri && Math.abs(v) > 1e-6 && rows[k].cid !== cid) w.add(rows[k].cid); repeats.set(cid, w); }
   // Null space: one vector per free column, the motions the sketch still allows.
   const nullvecs = [...Array(n).keys()].filter((k) => !pivots.has(k)).map((f) => { const v = new Float64Array(n); v[f] = 1; for (const b of basis) v[b.piv] = -b.vec[f] / b.vec[b.piv]; return v; });
-  return { dof: n - basis.length, free, sys, redundant, repeats, nullvecs };
+  // Construction geometry may stay loose: only motions of the real profile make the sketch under-defined.
+  const main = new Set(); for (const e of Object.values(sk.ents)) if (!e.constr && !e.ext) { for (const id of entPts(e)) { const i = sys.idx['p' + id]; if (i !== undefined) main.add(i).add(i + 1); } const r = sys.idx['r' + e.id]; if (r !== undefined) main.add(r); }
+  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed) { const i = sys.idx['p' + id]; if (i !== undefined) main.add(i).add(i + 1); }
+  const cols = [...main]; const nr = nullvecs.map((v) => cols.map((c) => v[c])); let dofMain = 0;
+  for (let c = 0; c < cols.length && dofMain < nr.length; c++) { let piv = -1, best = 1e-7; for (let r = dofMain; r < nr.length; r++) if (Math.abs(nr[r][c]) > best) { best = Math.abs(nr[r][c]); piv = r; } if (piv < 0) continue;
+    [nr[dofMain], nr[piv]] = [nr[piv], nr[dofMain]]; for (let r = 0; r < nr.length; r++) if (r !== dofMain) { const f = nr[r][c] / nr[dofMain][c]; if (f) for (let k = c; k < cols.length; k++) nr[r][k] -= f * nr[dofMain][k]; } dofMain++; }
+  return { dof: n - basis.length, dofMain, free, sys, redundant, repeats, nullvecs };
 }
 function measure(sk, c) {
   const P = (id) => gp(sk, id); const r = c.refs;
@@ -2363,16 +2369,11 @@ function explainFree(sk, a) {
     } else for (const p of entPts(e)) { if (seen.has(p)) continue; seen.add(p); const m = how(p); if (m) out.push(`Кривая: точка ${xy(p)} ${m}`); }
   }
   for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed && !seen.has(id)) { const m = how(id); if (m) out.push(`Точка ${xy(id)} ${m}`); }
-  // Construction geometry counts too: its free ends are what is left when the profile itself is defined.
-  for (const e of Object.values(sk.ents)) {
-    if (!e.constr || e.t !== 'line') continue; const m1 = seen.has(e.p1) ? null : how(e.p1), m2 = seen.has(e.p2) ? null : how(e.p2); if (!m1 && !m2) continue;
-    out.push(`Вспомогательная линия ${xy(e.p1)} → ${xy(e.p2)}: ${m1 && m2 ? 'оба конца свободны' : 'конец свободен'} (${m1 || m2}). Задайте её длину или привяжите концы, либо удалите, если она не нужна`);
-  }
   return out;
 }
 function showUnderDefined() {
   const sk = editSk(); S.sel = new Set();
-  for (const e of Object.values(sk.ents)) if (entState(sk, e) === 'under') S.sel.add('e:' + e.id);
+  for (const e of Object.values(sk.ents)) if (!e.constr && entState(sk, e) === 'under') S.sel.add('e:' + e.id);
   for (const id of Object.keys(sk.pts)) if (ptState(id) === 'under' && !Object.values(sk.ents).some((e) => !e.constr && entState(sk, e) === 'under' && entPts(e).includes(id))) S.sel.add('p:' + id);
   setTool('select'); refreshSketch();
   // What is selected may lie off screen (the end of a long construction line): bring it into view.
@@ -5390,12 +5391,12 @@ function redundantList(sk, a) {
 }
 function renderSketchPanel() {
   side.textContent = ''; const f = editF(); const sk = f.sk; const a = S.analysis;
-  const state = !a ? 'under' : a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under';
+  const state = !a ? 'under' : a.redundant.size ? 'over' : a.dofMain === 0 ? 'full' : 'under';
   const stateText = { under: 'Недоопределён', full: 'Полностью определён', over: 'Переопределён' }[state];
   const pmEl = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.sketch), h('span', {}, f.name), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)))));
-  pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dof ? h('span', { class: 'note' }, `  свободно: ${a.dof} ${plural(a.dof, 'степень', 'степени', 'степеней')}`) : null),
-    a && a.dof ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
-    ...(a && a.dof ? explainFree(sk, a).slice(0, 5).map((t) => h('div', { class: 'note', style: 'margin-top:4px' }, t)) : []),
+  pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dofMain ? h('span', { class: 'note' }, `  свободно: ${a.dofMain} ${plural(a.dofMain, 'степень', 'степени', 'степеней')}`) : null),
+    a && a.dofMain ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
+    ...(a && a.dofMain ? explainFree(sk, a).slice(0, 5).map((t) => h('div', { class: 'note', style: 'margin-top:4px' }, t)) : []),
     ...(a && a.redundant.size ? redundantList(sk, a) : [])));
   const topt = toolOptionsPanel(); if (topt) pmEl.append(topt);
   const sel = [...S.sel];
@@ -5456,7 +5457,7 @@ function setHint(text) {
   $('hint').textContent = t;
   const st = $('stState'); st.textContent = '';
   if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
-  if (S.editing && S.analysis) { const a = S.analysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределён', full: 'Определён', over: 'Переопределён' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
+  if (S.editing && S.analysis) { const a = S.analysis; const state = a.redundant.size ? 'over' : a.dofMain === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределён', full: 'Определён', over: 'Переопределён' }[state] + (a.dofMain ? ' · ' + a.dofMain : ''))); }
 }
 // Menu
 const menu = $('menu');
