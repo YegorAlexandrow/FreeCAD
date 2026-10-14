@@ -3007,14 +3007,23 @@ function followEdges(f, body, cyls) {
   f.edges = f.edges.map((e) => {
     if (e.t === 'circle') {
       const C = V3(e.c), N = V3(e.n || [0, 0, 1]).normalize(); const cs = topo.circles.filter((c) => Math.abs(c.r - e.r) < tol && Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6 && c.c.clone().sub(C).cross(N).length() < tol);
-      if (cs.some((c) => c.c.distanceTo(C) < tol) || !cs.length) return e;
-      const c = cs.sort((p, q) => p.c.distanceTo(C) - q.c.distanceTo(C))[0]; return { ...e, c: c.c.toArray(), n: c.n.toArray() };
+      // Which side of the rim the material is on along the axis (+1 / -1): the top and bottom rims of a
+      // hole are told apart by it, so a taller boss keeps the chamfer on the rim it was put on.
+      const side = (c) => { const [u] = perpBasis(N); for (const rr of [e.r + 0.05, e.r - 0.05]) { if (rr <= 0) continue; const P = c.clone().addScaledVector(u, rr); const a = isInside(body, P.clone().addScaledVector(N, 0.05)), b = isInside(body, P.clone().addScaledVector(N, -0.05)); if (a !== b) return a ? 1 : -1; } return 0; };
+      const here = cs.find((c) => c.c.distanceTo(C) < tol);
+      if (here) return e.side ? e : { ...e, side: side(here.c) };
+      if (!cs.length) return e;
+      const same = e.side ? cs.filter((c) => side(c.c) === e.side) : cs; const pool = same.length ? same : cs;
+      const c = pool.sort((p, q) => p.c.distanceTo(C) - q.c.distanceTo(C))[0]; return { ...e, c: c.c.toArray(), n: c.n.toArray() };
     }
     const A = V3(e.a), B = V3(e.b); const dir = B.clone().sub(A); const len = dir.length(); if (len < 1e-9) return e; dir.normalize(); const M = A.clone().add(B).multiplyScalar(0.5);
     // A piece of a longer edge is still on the body (Manifold joins pieces the old CSG left split).
     const within = ([a, b]) => { const d = b.clone().sub(a); const L2 = d.lengthSq(); if (L2 < 1e-12) return false; const on = (P) => { const t = P.clone().sub(a).dot(d) / L2; return t > -1e-4 && t < 1 + 1e-4 && P.clone().sub(a).addScaledVector(d, -t).length() < tol; }; return on(A) && on(B); };
-    if (topo.lines.some(within)) return e;
-    const par = topo.lines.filter(([a, b]) => { const d = b.clone().sub(a); return d.length() > 1e-9 && Math.abs(d.clone().normalize().dot(dir)) > 1 - 1e-6; });
+    // The two faces meeting at an edge (their normals) tell a top edge from the bottom one at the same distance.
+    const sig = (a, b) => { try { return edgeFaceNormals(body, a, b).map((n) => n.toArray().map((v) => Math.round(v * 1e3)).join(',')).sort().join('|'); } catch { return ''; } };
+    if (topo.lines.some(within)) return e.sig ? e : { ...e, sig: sig(A, B) };
+    let par = topo.lines.filter(([a, b]) => { const d = b.clone().sub(a); return d.length() > 1e-9 && Math.abs(d.clone().normalize().dot(dir)) > 1 - 1e-6; });
+    if (e.sig) { const same = par.filter(([a, b]) => sig(a, b) === e.sig); if (same.length) par = same; }
     const near = (list) => list.sort((p, q) => p[0].clone().add(p[1]).multiplyScalar(0.5).distanceTo(M) - q[0].clone().add(q[1]).multiplyScalar(0.5).distanceTo(M))[0];
     const hit = near(par.filter(([a, b]) => Math.abs(a.distanceTo(b) - len) < tol)) || near(par.filter(([a]) => a.clone().sub(A).cross(dir).length() < tol));
     return hit ? { ...e, a: hit[0].toArray(), b: hit[1].toArray() } : e;
@@ -3619,7 +3628,9 @@ async function cloudInit() {
   } catch (e) { console.warn('cloud init', e); CLOUD.db = null; return null; }
 }
 async function loadRev(docMeta, rev) {
-  const parts = []; for (let i = 0; i < rev.chunks; i++) { const s = await chunkCol().doc(`${docMeta.id}~${rev.rev}~${i}`).get(); if (!s.exists) throw new Error('нет части ' + i); parts.push(s.data().s); }
+  // A read can fail on a busy connection (the servo STEP files are ~130 parts each): each part is tried three times.
+  const get = async (id) => { for (let k = 0; ; k++) { try { return await chunkCol().doc(id).get(); } catch (e) { if (k >= 2) throw e; await new Promise((r) => setTimeout(r, 500 * 2 ** k)); } } };
+  const parts = []; for (let i = 0; i < rev.chunks; i++) { const s = await get(`${docMeta.id}~${rev.rev}~${i}`); if (!s.exists) throw new Error('нет части ' + i); parts.push(s.data().s); }
   const json = parts.join(''); if (rev.hash && hashStr(json) !== rev.hash) throw new Error('контрольная сумма'); return JSON.parse(json);
 }
 // The project as stored in the cloud; a damaged revision falls back to the previous one.
@@ -3627,13 +3638,16 @@ async function cloudLoadProject(meta) {
   const docs = []; let fellBack = 0;
   for (const dm of meta.docs) {
     let o = null; for (const rev of dm.revs || []) { try { o = await loadRev(dm, rev); break; } catch (e) { console.warn('rev', dm.id, rev.rev, e); fellBack++; } }
-    if (o) { docs.push(docFromStore(o)); CLOUD.lastHash.set(dm.id, (dm.revs.find((r) => r.hash) || {}).hash); }
+    // A document that cannot be read at all fails the whole load: a project opened without it would be
+    // saved back without it, and the document would be gone from the cloud.
+    if (!o) throw new Error(`«${dm.name}» не загрузился`);
+    docs.push(docFromStore(o)); CLOUD.lastHash.set(dm.id, (dm.revs.find((r) => r.hash) || {}).hash);
   }
   if (fellBack) toast(`Часть документов восстановлена из предыдущей версии (${fellBack})`, 'warn');
   return { name: meta.name || 'Проект', active: meta.active, nid: meta.nid || 100, docs, savedAt: meta.savedAt };
 }
 async function cloudSave() {
-  if (!CLOUD.db || CLOUD.conflict) return; if (CLOUD.saving) { CLOUD.again = true; return; }
+  if (!CLOUD.db || CLOUD.conflict || CLOUD.blocked) return; if (CLOUD.saving) { CLOUD.again = true; return; }
   CLOUD.saving = true; setCloudState('saving');
   try {
     // Someone saved after us (another tab or device): stop rather than overwrite their work.
@@ -5651,7 +5665,7 @@ function refreshAll() { updateBodyMesh(); updateSketchVisuals(); drawRegions(); 
 function state() { return S.mode === 'import' ? null : JSON.stringify({ doc: S.doc, editing: S.editing }); }
 let lastSaved = null;
 function pushUndo(merge) {
-  const s = state(); if (s == null || s === lastSaved) { saveProjectSoon(); return; } if (lastSaved && !merge) S.undo.push(lastSaved); if (S.undo.length > 120) S.undo.shift(); S.redo = []; lastSaved = s;
+  const s = state(); if (s == null || s === lastSaved) { saveProjectSoon(); return; } if (lastSaved) S.touched = true; if (lastSaved && !merge) S.undo.push(lastSaved); if (S.undo.length > 120) S.undo.shift(); S.redo = []; lastSaved = s;
   saveProjectSoon();
 }
 function restore(s) {
@@ -5862,13 +5876,26 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
   let proj = await idbGet('project'); const hadLocal = !!proj;
   if (!proj) { let old = null; try { old = JSON.parse(localStorage.getItem('rezets-cad-doc') || 'null'); } catch { old = null; }
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
-  openProject(proj);
-  // The cloud answers later (or never, outside claude.ai); the newer copy wins.
+  openProject(proj); S.touched = false;
+  // The cloud answers later (or never, outside claude.ai); the newer copy wins. Until it has answered, nothing
+  // goes up to the cloud: an older browser copy must never be saved over newer work there.
+  CLOUD.blocked = true;
   const meta = await cloudInit(); if (!CLOUD.db) { setCloudState('local'); return; }
   if (meta && (!hadLocal || (meta.savedAt || 0) > (proj.savedAt || 0))) {
-    try { const cp = await cloudLoadProject(meta); if (cp.docs.length) { openProject(cp); await idbPut('project', { ...cp }); toast('Проект загружен из облака', 'info'); } setCloudState('saved'); }
-    catch (e) { console.warn(e); setCloudState('error', 'Не удалось прочитать проект из облака'); toast('Не удалось загрузить проект из облака, открыта копия из браузера', 'err'); }
-  } else { CLOUD.meta = meta; setCloudState('saving'); cloudSave(); }
+    let cp = null;
+    try { cp = await cloudLoadProject(meta); }
+    catch (e) {
+      console.warn(e); setCloudState('error', 'Облако не прочиталось, сохранение в облако остановлено');
+      toast(`Не удалось загрузить проект из облака (${e.message}). Открыта копия из браузера, она старее облачной; в облако она не сохраняется, чтобы не затереть новое. Перезагрузите страницу`, 'err', [{ label: 'Перезагрузить', act: () => location.reload() }]); return;
+    }
+    // Work started on the browser copy while the cloud was loading is not thrown away silently.
+    if (S.touched) {
+      CLOUD.meta = meta; setCloudState('error', 'В облаке более новая версия');
+      toast('Пока проект грузился из облака, вы уже начали менять копию из браузера. В облаке версия новее', 'warn', [{ label: 'Открыть облачную', act: async () => { openProject(cp); await idbPut('project', { ...cp }); CLOUD.blocked = false; setCloudState('saved'); } }, { label: 'Оставить эту', act: () => { CLOUD.meta = meta; CLOUD.blocked = false; cloudSave(); } }]); return;
+    }
+    if (cp.docs.length) { openProject(cp); await idbPut('project', { ...cp }); toast('Проект загружен из облака', 'info'); }
+    CLOUD.blocked = false; setCloudState('saved');
+  } else { CLOUD.meta = meta; CLOUD.blocked = false; setCloudState('saving'); cloudSave(); }
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
