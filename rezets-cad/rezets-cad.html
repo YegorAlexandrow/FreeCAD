@@ -1336,7 +1336,7 @@ function computeBody(features) {
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
       else body = body ? boolean(body, tool, ADDITION) : tool;
       if (!body.getAttribute('position').count) err = 'Результат пустой';
-    } catch (e) { err = e.message || String(e); }
+    } catch (e) { err = e.message || String(e); if (e.partial) body = e.partial; }
     if (err) errors[f.id] = err;
     S.cache.set(k, { body, err, cyls });
   }
@@ -3011,15 +3011,17 @@ function followEdges(f, body, cyls) {
   const topo = edgeTopology(body, cyls); const tol = 1e-3;
   f.edges = f.edges.map((e) => {
     if (e.t === 'circle') {
-      const C = V3(e.c), N = V3(e.n || [0, 0, 1]).normalize(); const cs = topo.circles.filter((c) => Math.abs(c.r - e.r) < tol && Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6 && c.c.clone().sub(C).cross(N).length() < tol);
+      const C = V3(e.c), N = V3(e.n || [0, 0, 1]).normalize(); const onAxis = topo.circles.filter((c) => Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6 && c.c.clone().sub(C).cross(N).length() < tol);
+      // Same radius first; a hole whose diameter changed is still the same rim on the same axis.
+      let cs = onAxis.filter((c) => Math.abs(c.r - e.r) < tol); const resized = !cs.length && !onAxis.some((c) => c.c.distanceTo(C) < tol && Math.abs(c.r - e.r) < tol); if (resized) cs = onAxis;
       // Which side of the rim the material is on along the axis (+1 / -1): the top and bottom rims of a
       // hole are told apart by it, so a taller boss keeps the chamfer on the rim it was put on.
-      const side = (c) => { const [u] = perpBasis(N); for (const rr of [e.r + 0.05, e.r - 0.05]) { if (rr <= 0) continue; const P = c.clone().addScaledVector(u, rr); const a = isInside(body, P.clone().addScaledVector(N, 0.05)), b = isInside(body, P.clone().addScaledVector(N, -0.05)); if (a !== b) return a ? 1 : -1; } return 0; };
-      const here = cs.find((c) => c.c.distanceTo(C) < tol);
+      const side = (c, r = e.r) => { const [u] = perpBasis(N); for (const rr of [r + 0.05, r - 0.05]) { if (rr <= 0) continue; const P = c.clone().addScaledVector(u, rr); const a = isInside(body, P.clone().addScaledVector(N, 0.05)), b = isInside(body, P.clone().addScaledVector(N, -0.05)); if (a !== b) return a ? 1 : -1; } return 0; };
+      const here = !resized && cs.find((c) => c.c.distanceTo(C) < tol);
       if (here) return e.side ? e : { ...e, side: side(here.c) };
       if (!cs.length) return e;
-      const same = e.side ? cs.filter((c) => side(c.c) === e.side) : cs; const pool = same.length ? same : cs;
-      const c = pool.sort((p, q) => p.c.distanceTo(C) - q.c.distanceTo(C))[0]; return { ...e, c: c.c.toArray(), n: c.n.toArray() };
+      const same = e.side ? cs.filter((c) => side(c.c, c.r) === e.side) : cs; const pool = same.length ? same : cs;
+      const c = pool.sort((p, q) => p.c.distanceTo(C) - q.c.distanceTo(C) || Math.abs(p.r - e.r) - Math.abs(q.r - e.r))[0]; return { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r };
     }
     const A = V3(e.a), B = V3(e.b); const dir = B.clone().sub(A); const len = dir.length(); if (len < 1e-9) return e; dir.normalize(); const M = A.clone().add(B).multiplyScalar(0.5);
     // A piece of a longer edge is still on the body (Manifold joins pieces the old CSG left split).
@@ -3036,8 +3038,11 @@ function followEdges(f, body, cyls) {
 }
 function applyEdgeFeature(f, body) {
   if (!body) throw new Error('Нет тела для обработки рёбер'); if (!f.edges?.length) throw new Error('Выберите рёбра');
-  let out = body;
-  for (const e of f.edges) { const { g, convex } = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d); out = boolean(out, g, convex ? SUBTRACTION : ADDITION); }
+  // An edge that cannot be found is skipped, not the whole feature: the others keep their chamfer,
+  // and the feature says how many were lost.
+  let out = body; let lost = 0;
+  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); }
+  if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление' : 'фаска'} сделана. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
   return out;
 }
 const edgeId = (e) => (e.t === 'line' ? 'l' + [...e.a, ...e.b].map((v) => v.toFixed(3)).join(',') : 'c' + [...e.c, e.r].map((v) => v.toFixed(3)).join(','));
