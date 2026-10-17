@@ -788,7 +788,7 @@ function tryAddConstraint(sk, con) {
 function discretize(sk) {
   const segs = [];
   for (const e of Object.values(sk.ents)) {
-    if (e.constr || e.ext) continue;
+    if (e.constr || e.ext) continue; const n0 = segs.length;
     if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); segs.push([a.x, a.y, b.x, b.y]); }
     else if (isCurve(e)) { const P = curvePts(sk, e, 32); for (let i = 0; i + 1 < P.length; i++) segs.push([P[i].x, P[i].y, P[i + 1].x, P[i + 1].y]); }
     else if (e.t === 'circle' || e.t === 'arc') {
@@ -805,6 +805,8 @@ function discretize(sk) {
         if (prev) segs.push([prev[0], prev[1], x, y]); prev = [x, y];
       }
     }
+    // Fillets between curves end on a curve, not at a shared point: their ends split what they lie on.
+    if (e.snap && segs.length > n0) { segs[n0].snapA = true; segs[segs.length - 1].snapB = true; }
   }
   return segs;
 }
@@ -826,14 +828,23 @@ function buildRegions(sk) {
     if (ti) cuts[i].push(t); if (ui) cuts[j].push(u);
     if (ti && ui) hasCrossing = true;
   }
+  // An end point that lies on a curve (a fillet arc ending on a circle, a tangent touch) sits off the chords that
+  // stand for the curve by up to their sagitta: it still splits the chord it is on, and the split is snapped to it.
+  const snapTo = segs.map(() => new Map());
+  for (let i = 0; i < segs.length; i++) for (const [px, py] of [...(segs[i].snapA ? [[segs[i][0], segs[i][1]]] : []), ...(segs[i].snapB ? [[segs[i][2], segs[i][3]]] : [])]) for (let j = 0; j < segs.length; j++) {
+    if (j === i) continue; const [ax, ay, bx, by] = segs[j]; const rx = bx - ax, ry = by - ay; const L2 = rx * rx + ry * ry; if (L2 < 1e-24) continue;
+    const t = ((px - ax) * rx + (py - ay) * ry) / L2; const L = Math.sqrt(L2); const tl = eps / L; if (t <= tl || t >= 1 - tl) continue;
+    const dd = Math.abs((px - ax) * ry - (py - ay) * rx) / L; if (dd > 0.25 * L || dd < eps) continue;
+    cuts[j].push(t); snapTo[j].set(t, [px, py]);
+  }
   const nodes = []; const key = new Map(); const q = Math.max(eps * 50, 1e-6);
   const node = (x, y) => { const k = Math.round(x / q) + ',' + Math.round(y / q); if (!key.has(k)) { key.set(k, nodes.length); nodes.push({ x, y, out: [] }); } return key.get(k); };
   const edgeSet = new Set(); const edges = [];
   segs.forEach((s, i) => {
     const ts = [...new Set(cuts[i])].sort((a, b) => a - b);
     for (let k = 0; k < ts.length - 1; k++) {
-      const a = node(s[0] + (s[2] - s[0]) * ts[k], s[1] + (s[3] - s[1]) * ts[k]);
-      const b = node(s[0] + (s[2] - s[0]) * ts[k + 1], s[1] + (s[3] - s[1]) * ts[k + 1]);
+      const at = (t) => snapTo[i].get(t) || [s[0] + (s[2] - s[0]) * t, s[1] + (s[3] - s[1]) * t];
+      const a = node(...at(ts[k])); const b = node(...at(ts[k + 1]));
       if (a === b) continue; const ek = a < b ? a + ':' + b : b + ':' + a; if (edgeSet.has(ek)) continue; edgeSet.add(ek); edges.push([a, b]);
     }
   });
@@ -2175,7 +2186,7 @@ function sketchDown(ev) {
   }
   if (S.tool === 'dim') { dimClick(m); return; }
   if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
-  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) return; const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
+  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
 function sketchMove(ev) {
@@ -2630,6 +2641,47 @@ function filletCorner(sk, pid, r) {
   const pending = [{ t: 'tangent', refs: [lines[0].id, aid] }, { t: 'tangent', refs: [lines[1].id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (P.x - C.x) * 1.6, C.y + (P.y - C.y) * 1.6] }];
   const keep = isRefPt(pid) || Object.values(sk.cons).some((c) => c.refs.includes(pid));
   if (keep) pending.push({ t: 'online', refs: [pid, lines[0].id] }, { t: 'online', refs: [pid, lines[1].id] }); else delete sk.pts[pid];
+  addRelations(sk, pending);
+  return { arc: aid };
+}
+// A fillet between two circles or arcs where they meet or touch (a pin against a bore wall): an arc of the
+// given radius tangent to both, on the side of the click, with its ends on them. Which side of each curve the
+// fillet lies on follows the click: outside a pin, inside a bore.
+function filletCurves(sk, m, r) {
+  const round = Object.values(sk.ents).filter((e) => e.t === 'circle' || e.t === 'arc');
+  const near = round.map((e) => { const c = gp(sk, e.c); return { e, c, d: Math.abs(Math.hypot(m.u - c.x, m.v - c.y) - e.r) }; }).sort((a, b) => a.d - b.d);
+  const tol = 12 * unitsPerPx(); if (near.length < 2 || near[1].d > tol + r) return near.length ? 'Щёлкните угол между двумя линиями или место, где сходятся две окружности' : null;
+  const [A, B] = near; const inA = Math.hypot(m.u - A.c.x, m.v - A.c.y) > A.e.r ? 1 : -1, inB = Math.hypot(m.u - B.c.x, m.v - B.c.y) > B.e.r ? 1 : -1;
+  const D = Math.hypot(B.c.x - A.c.x, B.c.y - A.c.y); if (D < 1e-9) return 'У окружностей общий центр: скругление между ними не строится';
+  // Each side of each curve is tried, the side the click is on first; a fillet that shrinks to a point (inside a
+  // pin that only touches the wall) is no fillet.
+  const tries = [[inA, inB], [-inA, inB], [inA, -inB], [-inA, -inB]]; let C = null, T = null;
+  for (const [sA, sB] of tries) {
+    const dA = A.e.r + sA * r, dB = B.e.r + sB * r; if (dA <= 0 || dB <= 0) continue;
+    const a = (dA * dA - dB * dB + D * D) / (2 * D); const h2 = dA * dA - a * a; if (h2 < 0) continue;
+    const ex = (B.c.x - A.c.x) / D, ey = (B.c.y - A.c.y) / D; const hh = Math.sqrt(h2); const bx = A.c.x + ex * a, by = A.c.y + ey * a;
+    const c = [{ x: bx - ey * hh, y: by + ex * hh }, { x: bx + ey * hh, y: by - ex * hh }].sort((p, q) => Math.hypot(p.x - m.u, p.y - m.v) - Math.hypot(q.x - m.u, q.y - m.v))[0];
+    const t = [A, B].map((X) => { const l = Math.hypot(c.x - X.c.x, c.y - X.c.y); return { x: X.c.x + (c.x - X.c.x) / l * X.e.r, y: X.c.y + (c.y - X.c.y) / l * X.e.r }; });
+    if (Math.hypot(t[0].x - t[1].x, t[0].y - t[1].y) < r * 0.05) continue; C = c; T = t; break;
+  }
+  if (!C) return `Радиус ${fmt(r)} здесь не помещается`;
+  const tIds = T.map((t) => { const id = nid(sk); sk.pts[id] = { id, x: t.x, y: t.y }; return id; }); const cId = nid(sk); sk.pts[cId] = { id: cId, x: C.x, y: C.y };
+  // The short way round between the two touch points is the side that fills the corner.
+  const ccw = (T[0].x - C.x) * (T[1].y - C.y) - (T[0].y - C.y) * (T[1].x - C.x) > 0;
+  const aid = nid(sk); sk.ents[aid] = { id: aid, t: 'arc', c: cId, p1: ccw ? tIds[0] : tIds[1], p2: ccw ? tIds[1] : tIds[0], r, snap: true };
+  const pending = [{ t: 'oncircle', refs: [tIds[0], A.e.id] }, { t: 'oncircle', refs: [tIds[1], B.e.id] }, { t: 'tangent', refs: [A.e.id, aid] }, { t: 'tangent', refs: [B.e.id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (C.x - (T[0].x + T[1].x) / 2) * 1.5, C.y + (C.y - (T[0].y + T[1].y) / 2) * 1.5] }];
+  // Against a model edge or a construction circle the corner is not closed by sketch geometry: a piece of that
+  // circle, from the fillet to where the other curve meets it, closes it so the corner is a region to extrude.
+  const wall = [A, B].findIndex((X) => X.e.ext || X.e.constr); const other = [A, B][1 - wall];
+  if (wall >= 0 && !other.e.ext && !other.e.constr) {
+    const W = [A, B][wall]; const D2 = Math.hypot(other.c.x - W.c.x, other.c.y - W.c.y); const ux = (other.c.x - W.c.x) / D2, uy = (other.c.y - W.c.y) / D2;
+    const aa = (W.e.r * W.e.r - other.e.r * other.e.r + D2 * D2) / (2 * D2); const k2 = W.e.r * W.e.r - aa * aa; const kk = Math.sqrt(Math.max(0, k2));
+    const tb = T[wall]; const K = [{ x: W.c.x + ux * aa - uy * kk, y: W.c.y + uy * aa + ux * kk }, { x: W.c.x + ux * aa + uy * kk, y: W.c.y + uy * aa - ux * kk }].sort((p, q) => Math.hypot(p.x - tb.x, p.y - tb.y) - Math.hypot(q.x - tb.x, q.y - tb.y))[0];
+    const kId = nid(sk); sk.pts[kId] = { id: kId, x: K.x, y: K.y }; const wc = W.e.c;
+    const ccw2 = (tb.x - W.c.x) * (K.y - W.c.y) - (tb.y - W.c.y) * (K.x - W.c.x) > 0;
+    const bid = nid(sk); sk.ents[bid] = { id: bid, t: 'arc', c: wc, p1: ccw2 ? tIds[wall] : kId, p2: ccw2 ? kId : tIds[wall], r: W.e.r, snap: true };
+    pending.push({ t: 'oncircle', refs: [kId, other.e.id] }, { t: 'oncircle', refs: [kId, W.e.id] }, { t: 'equal', refs: [bid, W.e.id] });
+  }
   addRelations(sk, pending);
   return { arc: aid };
 }
@@ -5658,7 +5710,7 @@ function setHint(text) {
     slot: S.draw?.stage === 2 ? 'Щёлкните, чтобы задать ширину паза' : S.draw?.stage === 1 ? 'Щёлкните второй центр паза' : 'Паз: щёлкните первый центр',
     polygon: S.draw?.stage === 1 ? 'Щёлкните вершину многоугольника' : 'Многоугольник: щёлкните центр',
     trim: 'Обрезка: наведите на кусок линии и щёлкните, чтобы убрать его до ближайших пересечений',
-    sfillet: 'Скругление: щёлкните угол, где сходятся две линии',
+    sfillet: 'Скругление: щёлкните угол, где сходятся две линии, или место, где сходятся две окружности',
     point: 'Точка: щёлкните место', dim: 'Размер: выберите объект, затем щёлкните место для размера',
   })[S.tool] : S.mode === 'asm' ? (S.pm?.kind === 'mate' ? (S.pm.picks.length < 2 ? 'Сопряжение: щёлкните грань или цилиндр на двух разных компонентах' : 'Выберите тип сопряжения и нажмите Enter') : 'Тяните компонент мышью, Shift+тянуть: вращать. Пустое место: вращение вида')
     : S.pm?.kind === 'pickPlane' ? 'Выберите плоскость или плоскую грань' : S.pm ? 'Настройте параметры, затем OK' : 'Левая кнопка: вращение, правая: сдвиг, колёсико: масштаб. Двойной щелчок по элементу дерева открывает его');
@@ -6076,5 +6128,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
