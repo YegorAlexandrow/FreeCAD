@@ -5385,7 +5385,9 @@ function moveFeature(id, beforeId) {
   for (const g of [...list]) if (g.sketch) { const si = list.findIndex((x) => x.id === g.sketch), gi = list.indexOf(g); if (si > gi) { const [sk] = list.splice(si, 1); list.splice(gi, 0, sk); } }
   for (let i = 0; i < list.length; i++) for (const d of featDeps(list[i])) { const di = list.findIndex((x) => x.id === d); if (di > i) { toast(`«${list[i].name}» построен на «${list[di].name}», выше него его не поставить`, 'warn'); return false; } }
   if (list.every((g, i) => g === S.doc.features[i])) return false;
-  S.doc.features = list; rebuild(); pushUndo(); return true;
+  // The rollback bar stays under the feature it was under; what is dropped below it is rolled back.
+  const rb = S.doc.rollback; const anchor = rb ? S.doc.features[rb - 1] : null;
+  S.doc.features = list; if (anchor && anchor !== f) S.doc.rollback = list.indexOf(anchor) + 1; rebuild(); pushUndo(); return true;
 }
 function startFeatDrag(ev, f, row) {
   if (ev.button !== 0) return; const tree = row.parentElement; const y0 = ev.clientY; let on = false, before = null; const line = h('div', { class: 'dropline' });
@@ -5418,9 +5420,11 @@ function deleteFeature(f) {
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; } }
   for (const g of S.doc.features) if (Array.isArray(g.feats)) g.feats = g.feats.filter((x) => x !== f.id);
   const dependents = S.doc.features.filter((g) => g.sketch === f.id);
+  // The rollback bar stays under the same feature: every removed one above it moves it up by one.
+  const rb = S.doc.rollback; const above = rb == null ? 0 : S.doc.features.slice(0, rb).filter((g) => g === f || dependents.includes(g)).length;
   S.doc.features = S.doc.features.filter((g) => g !== f && !dependents.includes(g));
   if (f.sketch) { const sf = featById(f.sketch); if (sf) sf.show = undefined; }
-  if (S.doc.rollback != null) S.doc.rollback = Math.min(S.doc.rollback, S.doc.features.length);
+  if (rb != null) S.doc.rollback = Math.min(rb - above, S.doc.features.length);
   S.selectedTree = null; rebuild(); pushUndo(); toast(`«${f.name}» удалён${dependents.length ? ' вместе с ' + dependents.map((d) => '«' + d.name + '»').join(', ') : ''}.`, 'info', [{ label: 'Отменить', act: undo }]);
 }
 function renameFeature(f) {
