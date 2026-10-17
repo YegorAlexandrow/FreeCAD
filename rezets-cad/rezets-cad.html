@@ -1249,6 +1249,13 @@ function vertNormals(body, v) {
 }
 const vertRef = (body, v) => ({ w: v.toArray().map((x) => +x.toFixed(6)), ns: vertNormals(body, v).map((n) => n.toArray().map((x) => +x.toFixed(5))) });
 const circleRef = (c) => ({ w: c.c.toArray().map((x) => +x.toFixed(6)), circle: true, r: c.r });
+// An older sketch put on a face without remembering which one stays where the face was; when no face of the
+// body lies in its plane any more, it is flagged so the plane can be picked again.
+function onSomeFace(body, pl) {
+  const pos = body.getAttribute('position'); const N = V3(pl.n).normalize(); const d0 = N.dot(V3(pl.o)); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = b.clone().sub(a).cross(c.clone().sub(a)); const L = n.length(); if (L < 1e-9) continue; if (Math.abs(n.dot(N)) / L > 1 - 1e-6 && Math.abs(N.dot(a) - d0) < 1e-4) return true; }
+  return false;
+}
 function followSketchRefs(f, body, cyls) {
   S.dangling.delete(f.id); const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.free); if (!pts.length) return;
   const T = edgeTopology(body, cyls); const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
@@ -1281,14 +1288,19 @@ function followSketchRefs(f, body, cyls) {
   }
   if (moved) solveSketch(f.sk);
   // What could not be followed still hangs where the model used to be: shown in red, and reattached on request.
-  const lost = pts.filter((p) => { const w = world(p); return !verts.some((v) => v.distanceTo(w) < 1e-3) && !circles.some((c) => c.c.distanceTo(w) < 1e-3); }).map((p) => p.id);
+  const lost = pts.filter((p) => usedPt(f.sk, p.id)).filter((p) => { const w = world(p); return !verts.some((v) => v.distanceTo(w) < 1e-3) && !circles.some((c) => c.c.distanceTo(w) < 1e-3); }).map((p) => p.id);
   if (lost.length) S.dangling.set(f.id, lost);
 }
-// Puts every hanging reference point of the sketch being edited on the nearest point of the model as it is now.
+const usedPt = (sk, id) => Object.values(sk.ents).some((e) => e.p1 === id || e.p2 === id || e.c === id || e.pts?.includes(id)) || Object.values(sk.cons).some((c) => c.refs.includes(id));
+// Puts every hanging reference point of the sketch being edited on the nearest point of the model as it is now;
+// with nothing of the model on the sketch plane, the points become ordinary sketch points where they are.
 function reattachRefs() {
   const f = editF(); const lost = S.dangling.get(f.id) || []; const R = S.refs; if (!lost.length || !R) return;
   const cands = [...R.verts.map(([x, y]) => ({ x, y, ref: () => R.mref('p', [x, y]) })), ...R.lines.flatMap(([x1, y1, x2, y2]) => [{ x: x1, y: y1 }, { x: x2, y: y2 }]).map((q) => ({ ...q, ref: () => R.mref('p', [q.x, q.y]) })), ...R.circles.map((c, i) => ({ x: c.x, y: c.y, r: c.r, ref: () => R.mref('c', i) }))];
-  if (!cands.length) return;
+  if (!cands.length) {
+    for (const id of lost) { const p = f.sk.pts[id]; if (!p) continue; delete p.fixed; delete p.free; delete p.mref; for (const e of Object.values(f.sk.ents)) if (e.ext && (e.p1 === id || e.p2 === id || e.c === id)) delete e.ext; }
+    S.dangling.delete(f.id); commitSketch(); toast('На плоскости эскиза нет рёбер модели: висевшие точки стали обычными точками эскиза, задайте их размерами', 'warn'); return;
+  }
   for (const id of lost) {
     const p = f.sk.pts[id]; if (!p) continue; let best = null; for (const q of cands) { const d = Math.hypot(q.x - p.x, q.y - p.y); if (!best || d < best.d) best = { d, q }; }
     p.x = best.q.x; p.y = best.q.y; p.mref = best.q.ref(); if (best.q.r) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === id) e.r = best.q.r;
@@ -1324,7 +1336,7 @@ const PLANES = {
 };
 const S = {
   doc: null, editing: null, tool: 'select', sel: new Set(), hover: null, pm: null, draw: null, tab: 'feat',
-  body: null, errors: {}, dangling: new Map(), undo: [], redo: [], analysis: null, conflict: new Set(), selectedTree: null, cache: new Map(),
+  body: null, errors: {}, dangling: new Map(), offFace: new Set(), undo: [], redo: [], analysis: null, conflict: new Set(), selectedTree: null, cache: new Map(),
 };
 const featById = (id) => (S.doc.features || []).find((f) => f.id === id);
 const nextName = (prefix) => { let i = 1; while (S.doc.features.some((f) => f.name === prefix + i)) i++; return prefix + i; };
@@ -1384,7 +1396,7 @@ function computeBody(features) {
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
-    if (f.type === 'sketch' && body && !f.suppressed) followSketchRefs(f, body, cyls);
+    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); if (f.plane?.label === 'Грань' && !f.plane.face && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
     key.push(JSON.stringify(f));
@@ -2123,7 +2135,7 @@ function partClick(ev) {
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) toggleRegion(r.id); return; }
   const p = partPickAt(ev, !S.pm);
   if (S.pm?.feature?.type === 'plane') { const f = S.pm.feature; const key = S.pm.slot || 'base'; if (p?.plane) { if (p.plane === 'f:' + f.id) return; f[key] = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; } else if (p?.face) f[key] = { face: planeFromFace(p.face, p.point) }; else return; if (f.mid && key === 'base' && !f.base2) S.pm.slot = 'base2'; renderSide(); rebuild(); return; }
-  if (S.pm?.kind === 'pickPlane') { if (p?.plane) startSketch(planeByKey(p.plane)); else if (p?.face) startSketch(planeFromFace(p.face, p.point)); return; }
+  if (S.pm?.kind === 'pickPlane') { if (p?.plane) sketchOnPlane(planeByKey(p.plane)); else if (p?.face) sketchOnPlane(planeFromFace(p.face, p.point)); return; }
   if (p?.plane) { S.selectedTree = p.plane.startsWith('f:') ? 'feat:' + p.plane.slice(2) : 'plane:' + p.plane; S.pickedFace = null; }
   else if (p?.face) {
     const by = featById(faceCreator(p.face)); S.faceOrigin = by?.id || null; originGroup.clear();
@@ -2768,6 +2780,17 @@ function cmdSketch() {
   if (S.selectedTree === 'face' && S.pickedFace) return startSketch(S.pickedFace);
   openPM({ kind: 'pickPlane', title: 'Эскиз', icon: ICON.sketch });
 }
+// The plane picked for a new sketch, or for an existing one moved to another plane or face (its geometry keeps
+// its coordinates on the new plane; the operations on it are rebuilt there).
+function sketchOnPlane(pl) {
+  if (!S.pm?.replan) { startSketch(pl); return; }
+  const f = featById(S.pm.replan); closePM(true); if (!f) return;
+  // A parallel plane keeps the sketch's own axes, so the geometry is moved, not turned or mirrored.
+  const old = f.plane; const n0 = V3(old.n); const same = V3(pl.n).dot(n0) > 1 - 1e-6;
+  f.plane = same ? { ...clone(pl), x: [...old.x], y: [...old.y], n: [...old.n], o: V3(old.o).addScaledVector(n0, V3(pl.o).sub(V3(old.o)).dot(n0)).toArray().map((v) => +v.toFixed(6)) } : clone(pl);
+  if (pl.ref) f.planeRef = pl.ref; else delete f.planeRef;
+  rebuild(); renderSide(); pushUndo(); toast(`«${f.name}» перенесён на ${pl.label === 'Грань' ? 'выбранную грань' : '«' + pl.label + '»'}`, 'info');
+}
 function startSketch(plane, existing) {
   closePM(true);
   let f = existing;
@@ -2781,7 +2804,9 @@ function startSketch(plane, existing) {
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
 function exitSketch() {
-  if (!S.editing) return; const f = editF(); S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
+  if (!S.editing) return; const f = editF();
+  // Model points brought in only to be clicked at, and left unused, would hang in the sketch for good.
+  for (const [id, p] of Object.entries(f.sk.pts)) if (p.fixed && p.free && !p.hole && !usedPt(f.sk, id)) delete f.sk.pts[id]; S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
   setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo();
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
   if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана. Проверьте, что концы линий соединены`, 'warn'); }
@@ -5369,12 +5394,12 @@ function renderTree() {
   for (const [k, p] of Object.entries(PLANES)) tree.append(row('plane:' + k, ICON.plane, p.label, { onOpen: () => startSketch({ ...p }), title: `Плоскость «${p.label}». Двойной щелчок: эскиз на ней`, menu: [['Эскиз на плоскости', () => startSketch({ ...p })]] }));
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
   const featRow = (f, i, child) => {
-    const off = i >= rb || f.suppressed; const nd = S.dangling.get(f.id)?.length; const err = S.errors[f.id] || (nd && `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели ${nd === 1 ? 'висит' : 'висят'}: тех рёбер или вершин больше нет. Откройте эскиз и нажмите «Привязать к модели»`);
+    const off = i >= rb || f.suppressed; const nd = S.dangling.get(f.id)?.length; const err = S.errors[f.id] || (S.offFace.has(f.id) && 'плоскость эскиза больше не лежит на грани детали: грань сдвинулась. Правый щелчок → «Сменить плоскость…»') || (nd && `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели ${nd === 1 ? 'висит' : 'висят'}: тех рёбер или вершин больше нет. Откройте эскиз и нажмите «Привязать к модели»`);
     const icon = f.type === 'stepbody' ? ICON.insert : f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
     const meta = f.type === 'stepbody' ? (docEntry(f.doc)?.name || 'нет модели') : f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'next' ? 'до следующей' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? (f.mid ? 'средняя' : fmt(f.d) + ' мм') : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
-      ? [['Редактировать эскиз', () => editFeature(f)], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
+      ? [['Редактировать эскиз', () => editFeature(f)], ['Сменить плоскость…', () => { if (S.pm) closePM(); openPM({ kind: 'pickPlane', replan: f.id }); }], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : [['Редактировать элемент', () => editFeature(f)], ...(f.sketch ? [['Редактировать эскиз', () => editFeature(featById(f.sketch))]] : []), [f.suppressed ? 'Высветить' : 'Погасить', () => { f.suppressed = !f.suppressed; rebuild(); pushUndo(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]];
     return row('feat:' + f.id, icon, f.name, { cls: (child ? ' child' : '') + (off ? ' off' : '') + (err ? ' err' : ''), meta, title: err ? f.name + ': ' + err : f.name, onOpen: () => editFeature(f), menu });
   };
@@ -5470,9 +5495,9 @@ const numField = (label, id, val, onset, unit = 'мм') => {
 function renderPM() {
   side.textContent = ''; const pm = S.pm;
   if (pm.kind === 'pickPlane') {
-    side.append(h('div', { class: 'pm' }, pmHeader('Эскиз', ICON.sketch, false),
+    side.append(h('div', { class: 'pm' }, pmHeader(pm.replan ? `Плоскость «${featById(pm.replan)?.name}»` : 'Эскиз', ICON.sketch, false),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость эскиза'), h('div', { class: 'note' }, S.afterSketch?.type ? `Выберите плоскость или плоскую грань. После эскиза откроется «${S.afterSketch.type === 'revolve' ? (S.afterSketch.mode === 'cut' ? 'Вырез пов.' : 'Повернуть') : S.afterSketch.mode === 'cut' ? 'Вырез' : 'Вытянуть'}»` : 'Выберите плоскость или щёлкните плоскую грань детали в окне.'),
-        h('div', { class: 'chips' }, Object.entries(PLANES).map(([, p]) => h('button', { class: 'chip', onclick: () => startSketch({ ...p }) }, svg(ICON.plane), p.label)))),
+        h('div', { class: 'chips' }, Object.entries(PLANES).map(([, p]) => h('button', { class: 'chip', onclick: () => sketchOnPlane({ ...p }) }, svg(ICON.plane), p.label)))),
       h('div', { class: 'grp' }, h('button', { class: 'ghost-btn', onclick: () => closePM() }, 'Отмена'))));
     return;
   }
@@ -6031,5 +6056,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
