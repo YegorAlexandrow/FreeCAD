@@ -454,13 +454,13 @@ const isCurve = (e) => e.t === 'spline' || e.t === 'ellipse';
 const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd', 'rgap', 'emaj']);
 const CON_NAMES = {
   coincident: 'Совпадение', horizontal: 'Горизонтальность', vertical: 'Вертикальность', hpts: 'Горизонтальность точек', vpts: 'Вертикальность точек',
-  online: 'Точка на прямой', oncircle: 'Точка на окружности', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
+  online: 'Точка на прямой', oncircle: 'Точка на окружности', tanpt: 'Касание', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
   equal: 'Равенство', tangent: 'Касание', concentric: 'Концентричность', fix: 'Фиксация', collinear: 'Коллинеарность',
   symmetric: 'Симметрия', offset: 'Смещение', offd: 'Смещение', rgap: 'Зазор',
   dist: 'Расстояние', dx: 'Расстояние по X', dy: 'Расстояние по Y', pldist: 'Расстояние до прямой', rad: 'Радиус', diam: 'Диаметр', angle: 'Угол', emaj: 'Большая ось',
 };
 const REL_KEYS = { coincident: 'C', horizontal: 'H', hpts: 'H', vertical: 'V', vpts: 'V', parallel: 'P', perpendicular: 'N', equal: 'E', tangent: 'T', concentric: 'K', midpoint: 'M', online: 'O', oncircle: 'O', fix: 'F', collinear: 'J', symmetric: 'S' };
-const CON_GLYPH = { horizontal: '—', vertical: '|', hpts: '—', vpts: '|', online: '◦', oncircle: '◦', midpoint: '½', parallel: '∥', perpendicular: '⊥', equal: '=', tangent: '⌒', concentric: '◎', fix: '⚓', coincident: '●', collinear: '⋯', symmetric: '⌯', offset: '⇉' };
+const CON_GLYPH = { tanpt: '⌒', horizontal: '—', vertical: '|', hpts: '—', vpts: '|', online: '◦', oncircle: '◦', midpoint: '½', parallel: '∥', perpendicular: '⊥', equal: '=', tangent: '⌒', concentric: '◎', fix: '⚓', coincident: '●', collinear: '⋯', symmetric: '⌯', offset: '⇉' };
 
 // Builds the equation system of a sketch. Every equation group knows the variable indices it
 // depends on, so the Jacobian is computed locally and cheaply.
@@ -503,6 +503,12 @@ function buildSystem(sk, opts = {}) {
       case 'hpts': case 'vpts': { const a = P(r[0]), b = P(r[1]); const k = c.t === 'hpts' ? 1 : 0; add(cid, [a, b], (x) => [b.g(x)[k] - a.g(x)[k]], 1); break; }
       case 'online': { const p = P(r[0]); const [a, b] = L(r[1]); add(cid, [p, a, b], (x) => { const A = a.g(x), B = b.g(x), Q = p.g(x); const u = dir(A, B); return [cross(u, dir(A, Q)) / len(u)]; }, 1); break; }
       case 'collinear': { const [a, b] = L(r[0]); const [m, n] = L(r[1]); add(cid, [a, b, m, n], (x) => { const A = a.g(x), B = b.g(x), M = m.g(x), N = n.g(x); const u = dir(A, B); return [cross(u, dir(A, M)) / len(u), cross(u, dir(A, N)) / len(u)]; }, 2); break; }
+      // A fillet's end on a curve it touches: on that curve, and in line with both centres. Plain "on the curve"
+      // plus tangency is singular there (the curves meet in a double point) and reads as redundant.
+      case 'tanpt': {
+        const p = P(r[0]); const e = ge(sk, r[1]); const cc = P(e.c), rr = R(r[1]); const ca = P(ge(sk, r[2]).c);
+        add(cid, [p, cc, rr, ca], (x) => { const T = p.g(x), C0 = cc.g(x), A = ca.g(x); const u = [T[0] - C0[0], T[1] - C0[1]], w = [A[0] - C0[0], A[1] - C0[1]]; return [Math.hypot(u[0], u[1]) - rr.g(x), (u[0] * w[1] - u[1] * w[0]) / (Math.hypot(w[0], w[1]) || 1)]; }, 2); break;
+      }
       case 'oncircle': if (ge(sk, r[1]).t === 'ellipse') { const p = P(r[0]); const e = ge(sk, r[1]); const cc = P(e.c), aa = P(e.p1), rr = R(r[1]);
           add(cid, [p, cc, aa, rr], (x) => { const C = cc.g(x), A = aa.g(x), Q = p.g(x); const ax = A[0] - C[0], ay = A[1] - C[1]; const a2 = Math.hypot(ax, ay) || 1e-9; const wx = Q[0] - C[0], wy = Q[1] - C[1]; const u = (wx * ax + wy * ay) / a2, v = (wy * ax - wx * ay) / a2; return [Math.hypot(u / a2, v / rr.g(x)) * Math.min(a2, rr.g(x)) - Math.min(a2, rr.g(x))]; }, 1); break; }
       { const p = P(r[0]); const e = ge(sk, r[1]); const cc = P(e.c), rr = R(r[1]); add(cid, [p, cc, rr], (x) => { const Q = p.g(x), C = cc.g(x); return [Math.hypot(Q[0] - C[0], Q[1] - C[1]) - rr.g(x)]; }, 1); break; }
@@ -640,10 +646,34 @@ function writeBack(sk, sys, X) {
   for (const id in sk.ents) { const i = sys.idx['r' + id]; if (i !== undefined) sk.ents[id].r = Math.abs(X[i]); }
 }
 function solveSketch(sk, weights) {
+  upgradeFillets(sk);
   const sys = buildSystem(sk); const X = Float64Array.from(sys.X);
   const ok = solveSystem(sys, X, weights ? weights(sys) : null);
-  if (ok) writeBack(sk, sys, X);
+  if (ok) { writeBack(sk, sys, X); minorFillets(sk); }
   return ok;
+}
+// A fillet between curves is always the short way round between its ends; a change of radius that carries
+// the centre across would otherwise draw the long way.
+function minorFillets(sk) {
+  for (const e of Object.values(sk.ents)) {
+    if (e.t !== 'arc' || !e.snap) continue; const c = gp(sk, e.c), a = gp(sk, e.p1), b = gp(sk, e.p2); if (!c || !a || !b) continue;
+    let sw = Math.atan2(b.y - c.y, b.x - c.x) - Math.atan2(a.y - c.y, a.x - c.x); while (sw <= 0) sw += 2 * Math.PI;
+    if (sw > Math.PI + 1e-9) [e.p1, e.p2] = [e.p2, e.p1];
+  }
+}
+// Fillets between curves made before 'tanpt' kept their ends only "on" the curves (their tangency was refused
+// as redundant): each such end becomes a tangent end, and the fillet is put back where it touches both.
+function upgradeFillets(sk) {
+  for (const e of Object.values(sk.ents)) {
+    if (e.t !== 'arc' || !e.snap || e.fillet === 2) continue; e.fillet = 2;
+    for (const end of [e.p1, e.p2]) {
+      const on = Object.values(sk.cons).find((k) => k.t === 'oncircle' && k.refs[0] === end && sk.ents[k.refs[1]] && sk.ents[k.refs[1]].c !== e.c && ['circle', 'arc'].includes(sk.ents[k.refs[1]].t));
+      if (!on || Object.values(sk.cons).some((k) => k.t === 'tanpt' && k.refs[0] === end)) continue;
+      // Only a fillet: the curve's other arc along a wall (same centre as the wall) is not one.
+      if (Object.values(sk.ents).some((w) => w.id !== e.id && w.c === e.c)) continue;
+      on.t = 'tanpt'; on.refs = [end, on.refs[1], e.id];
+    }
+  }
 }
 // Incremental elimination with a record of which original rows were combined. A row that
 // reduces to zero is dependent; its combination names the constraints it duplicates.
@@ -2030,7 +2060,7 @@ function layoutOverlay() {
 glyphAnchor.count = {};
 function glyphAnchor(sk, c) {
   // Relations of a point sit at the point, chained relations at the second curve, tangency at the touch point.
-  if (['online', 'oncircle', 'midpoint'].includes(c.t)) { const p = gp(sk, c.refs[0]); if (p) return { x: p.x, y: p.y, key: 'p' + c.refs[0] }; }
+  if (['online', 'oncircle', 'midpoint', 'tanpt'].includes(c.t)) { const p = gp(sk, c.refs[0]); if (p) return { x: p.x, y: p.y, key: 'p' + c.refs[0] }; }
   if (c.t === 'tangent') { const e1 = ge(sk, c.refs[0]), e2 = ge(sk, c.refs[1]); const sh = e1 && e2 && [e1.p1, e1.p2].find((q) => q && (q === e2.p1 || q === e2.p2)); if (sh) { const p = gp(sk, sh); return { x: p.x, y: p.y, key: 'p' + sh }; } }
   const id = (['equal', 'collinear', 'parallel', 'perpendicular'].includes(c.t) && sk.ents[c.refs[1]] ? c.refs[1] : null) ?? c.refs.find((r) => sk.ents[r]) ?? c.refs[0]; const e = sk.ents[id];
   if (e) {
@@ -2678,8 +2708,8 @@ function filletCurves(sk, m, r) {
   const tIds = T.map((t) => { const id = nid(sk); sk.pts[id] = { id, x: t.x, y: t.y }; return id; }); const cId = nid(sk); sk.pts[cId] = { id: cId, x: C.x, y: C.y };
   // The short way round between the two touch points is the side that fills the corner.
   const ccw = (T[0].x - C.x) * (T[1].y - C.y) - (T[0].y - C.y) * (T[1].x - C.x) > 0;
-  const aid = nid(sk); sk.ents[aid] = { id: aid, t: 'arc', c: cId, p1: ccw ? tIds[0] : tIds[1], p2: ccw ? tIds[1] : tIds[0], r, snap: true };
-  const pending = [{ t: 'oncircle', refs: [tIds[0], A.e.id] }, { t: 'oncircle', refs: [tIds[1], B.e.id] }, { t: 'tangent', refs: [A.e.id, aid] }, { t: 'tangent', refs: [B.e.id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (C.x - (T[0].x + T[1].x) / 2) * 1.5, C.y + (C.y - (T[0].y + T[1].y) / 2) * 1.5] }];
+  const aid = nid(sk); sk.ents[aid] = { id: aid, t: 'arc', c: cId, p1: ccw ? tIds[0] : tIds[1], p2: ccw ? tIds[1] : tIds[0], r, snap: true, fillet: 2 };
+  const pending = [{ t: 'tanpt', refs: [tIds[0], A.e.id, aid] }, { t: 'tanpt', refs: [tIds[1], B.e.id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (C.x - (T[0].x + T[1].x) / 2) * 1.5, C.y + (C.y - (T[0].y + T[1].y) / 2) * 1.5] }];
   // Against a model edge or a construction circle the corner is not closed by sketch geometry: a piece of that
   // circle, from the fillet to where the other curve meets it, closes it so the corner is a region to extrude.
   const wall = [A, B].findIndex((X) => X.e.ext || X.e.constr); const other = [A, B][1 - wall];
@@ -2690,7 +2720,7 @@ function filletCurves(sk, m, r) {
     const kId = nid(sk); sk.pts[kId] = { id: kId, x: K.x, y: K.y }; const wc = W.e.c;
     const ccw2 = (tb.x - W.c.x) * (K.y - W.c.y) - (tb.y - W.c.y) * (K.x - W.c.x) > 0;
     const bid = nid(sk); sk.ents[bid] = { id: bid, t: 'arc', c: wc, p1: ccw2 ? tIds[wall] : kId, p2: ccw2 ? kId : tIds[wall], r: W.e.r, snap: true };
-    pending.push({ t: 'oncircle', refs: [kId, other.e.id] }, { t: 'oncircle', refs: [kId, W.e.id] }, { t: 'equal', refs: [bid, W.e.id] });
+    pending.push({ t: 'oncircle', refs: [kId, other.e.id] }, { t: 'oncircle', refs: [kId, W.e.id] });
   }
   addRelations(sk, pending);
   return { arc: aid };
