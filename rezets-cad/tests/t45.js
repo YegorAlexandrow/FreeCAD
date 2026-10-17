@@ -15,9 +15,9 @@ const open = require('./harness.js');
   await p.screenshot({ path: 's45_dim.png' });
   const svgLen = await p.evaluate(() => document.querySelector('#drawing svg').outerHTML.length); L('svg bytes', svgLen);
   // the drawing follows the model: edit the plate depth via the part and come back
-  await p.locator('.doctab', { hasText: 'Кронштейн' }).first().click(); await p.waitForTimeout(500);
+  await p.pickDoc('Кронштейн'); await p.waitForTimeout(500);
   await p.evaluate(() => { const R = window.__rezets; const f = R.S.doc.features.find((x) => x.name === 'Бобышка2'); f.depth = 28; R.rebuild(); });
-  await p.locator('.doctab', { hasText: 'чертёж' }).click(); await p.waitForTimeout(1200);
+  await p.pickDoc('чертёж'); await p.waitForTimeout(1200);
   L('after model edit', await p.evaluate(() => { const R = window.__rezets; const Lr = R.layoutDrawing(R.S.doc); return (Lr.views.front.box.vmax - Lr.views.front.box.vmin).toFixed(2); }), 'expect front height 40');
   L(logs.join('\n')); await b.close();
 })();

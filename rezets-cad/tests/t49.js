@@ -30,7 +30,7 @@ const { spawn } = require('child_process'); const fs = require('fs'); const os =
   L('after keep mine', JSON.parse(fs.readFileSync(path.join(data, 'projects', pid, 'docs', 'd1.json'), 'utf8')).data.features.find((f) => f.name === 'Бобышка1').depth, await p.$eval('#saveState', (e) => e.dataset.state));
   await p2.close();
   // versions menu on the tab
-  await p.locator('.doctab').first().click({ button: 'right' }); await p.locator('#menu button', { hasText: 'Прежние версии' }).click(); await p.waitForTimeout(300);
+  await p.locator('.doccur').click({ button: 'right' }); await p.locator('#menu button', { hasText: 'Прежние версии' }).click(); await p.waitForTimeout(300);
   L('versions', await p.$$eval('#menu button', (els) => els.map((e) => e.textContent).length));
   await p.locator('#menu button').last().click(); await p.waitForTimeout(800);
   L('restored oldest depth', await p.evaluate(() => window.__rezets.S.doc.features.find((f) => f.name === 'Бобышка1').depth));

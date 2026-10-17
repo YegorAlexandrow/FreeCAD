@@ -2,12 +2,12 @@ const open = require('./harness.js');
 (async () => {
   const { b, p, logs } = await open();
   const L = (...a) => console.log(...a);
-  const tabs = () => p.$$eval('.doctab', (els) => els.map((e) => e.textContent + (e.getAttribute('aria-selected') === 'true' ? '*' : '')));
+  const tabs = () => p.evaluate(() => window.__rezets.S.project.docs.map((d) => d.name + (d.id === window.__rezets.S.project.active ? '*' : '')));
   L('tabs0', await tabs());
   // new part, then back
   await p.click('#bAdd'); await p.locator('#menu button', { hasText: 'Новая деталь' }).click(); await p.waitForTimeout(400);
   L('tabs1', await tabs(), await p.evaluate(() => window.__rezets.S.body));
-  await p.locator('.doctab', { hasText: 'Кронштейн' }).click(); await p.waitForTimeout(600);
+  await p.pickDoc('Кронштейн'); await p.waitForTimeout(600);
   L('back vol', await p.evaluate(() => { const R = window.__rezets; return R.geoVolume(R.S.body); }));
   // STEP import
   await p.setInputFiles('#stepIn', __dirname + '/../testdata/servo.step');

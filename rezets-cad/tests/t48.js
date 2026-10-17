@@ -20,7 +20,7 @@ const mock = () => {
   const same = await p.evaluate(async () => { const R = window.__rezets; const meta = await R.cloudInit(); const pr = await R.cloudLoadProject(meta); const a = JSON.stringify(pr.docs.map(R.docToStore)), b2 = JSON.stringify(R.S.project.docs.map(R.docToStore)); return [a.length, a === b2]; });
   L('round trip', JSON.stringify(same));
   // edit the part twice -> revisions accumulate; damage the newest -> previous loads
-  await p.locator('.doctab', { hasText: 'Кронштейн' }).click(); await p.waitForTimeout(500);
+  await p.pickDoc('Кронштейн'); await p.waitForTimeout(500);
   for (const dep of [14, 16, 18]) { await p.evaluate((dep) => { const R = window.__rezets; R.S.doc.features.find((f) => f.name === 'Бобышка1').depth = dep; R.rebuild(); R.S.undo.push('x'); }, dep); await p.evaluate(() => window.__rezets.cloudSave()); await p.waitForTimeout(200); }
   const rv = await p.evaluate(async () => { const m = JSON.parse(window.__store.get('data/users/u1/project')); const d = m.docs.find((x) => x.name === 'Кронштейн'); window.__store.delete(`data/users/u1/project/chunks/${d.id}~${d.revs[0].rev}~0`); const R = window.__rezets; const pr = await R.cloudLoadProject(await R.cloudInit()); return [d.revs.length, pr.docs.find((x) => x.name === 'Кронштейн').data.features.find((f) => f.name === 'Бобышка1').depth, [...window.__store.keys()].filter((k) => k.includes('chunks')).length]; });
   L('revisions kept, depth after damaged newest (expect 16), chunk docs', JSON.stringify(rv));

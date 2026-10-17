@@ -67,6 +67,15 @@ button { font: inherit; color: inherit; }
 .doctab:hover { background: var(--panel-2); color: var(--fg); }
 .doctab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); font-weight: 500; }
 .inline-val { font: inherit; width: 70px; border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; background: var(--bg); color: var(--fg); }
+.doccur { max-width: 260px; }
+.doccur .caret { font-weight: 400; color: var(--fg-2); margin-left: 2px; }
+#menu.doclist { min-width: 240px; max-height: min(70vh, 560px); overflow: auto; }
+#menu .dl-h { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-2); padding: 8px 10px 3px; }
+#menu .dl-row { display: flex; align-items: center; gap: 8px; }
+#menu .dl-row svg { width: 15px; height: 15px; flex: 0 0 15px; color: var(--fg-2); }
+#menu .dl-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#menu .dl-row.cur { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+#menu .dl-row.cur svg { color: var(--accent); }
 .doctab input { font: inherit; width: 140px; border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; background: var(--bg); color: var(--fg); }
 .addtab { font-size: 16px; line-height: 1; padding: 3px 9px; }
 .tbtn { background: none; border: 1px solid transparent; border-radius: 6px; padding: 4px 8px; cursor: pointer; color: var(--fg-2); white-space: nowrap; }
@@ -263,7 +272,6 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
         <button class="tbtn wide" id="bStl">STL…</button>
       </div>
       <div class="doctabs" id="docTabs" role="tablist" aria-label="Документы проекта"></div>
-      <button class="tbtn alldocs" id="bDocs" title="Все документы проекта" aria-label="Все документы">▾</button>
       <button class="tbtn addtab" id="bAdd" title="Новый документ или импорт" aria-label="Добавить документ">＋</button>
       <span id="saveState" class="savest" data-state="local">В браузере</span>
       <button class="tbtn" id="bUndo" title="Отменить (Ctrl+Z)">↶</button>
@@ -5618,13 +5626,13 @@ function setHint(text) {
 const menu = $('menu');
 // An item may carry a third element, called with true while the pointer is over it and false after.
 function openMenu(x, y, items) {
-  menu.textContent = ''; menu.onHover = null;
+  menu.textContent = ''; menu.onHover = null; delete menu.dataset.kind; menu.classList.remove('doclist');
   for (const it of items) { if (!it) { menu.append(h('hr')); continue; } const b = h('button', { onclick: () => { closeMenu(); it[1](); } }, it[0]);
     if (it[2]) { b.addEventListener('pointerenter', () => { menu.onHover?.(false); menu.onHover = it[2]; it[2](true); }); b.addEventListener('pointerleave', () => { it[2](false); menu.onHover = null; }); } menu.append(b); }
   menu.hidden = false; const r = menu.getBoundingClientRect(); menu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px'; menu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
 }
-function closeMenu() { menu.hidden = true; menu.onHover?.(false); menu.onHover = null; }
-document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target)) closeMenu(); });
+function closeMenu() { menu.hidden = true; delete menu.dataset.kind; menu.classList.remove('doclist'); menu.onHover?.(false); menu.onHover = null; }
+document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target) && !(menu.dataset.kind === 'docs' && e.target.closest?.('.doccur'))) closeMenu(); });
 
 // Toasts
 function toast(text, kind = 'info', actions = []) {
@@ -5707,16 +5715,33 @@ function addDoc(kind, name, data, open = true) {
   saveProjectSoon(); return ent;
 }
 function uniqueDocName(base) { let n = base, i = 2; while (S.project.docs.some((d) => d.name === n)) n = base + ' ' + i++; return n; }
+// The documents are one list: the header shows the open one, a click opens the list grouped by kind.
+const docMenuItems = (d, x, y, btn) => [['Переименовать', () => renameDoc(d, btn)], ['Дублировать', () => addDoc(d.kind, d.name, clone(d.data), false)], ...(SRV.on ? [['Прежние версии…', () => serverVersionsMenu(d, x, y)]] : CLOUD.db ? [['Прежние версии…', () => docVersionsMenu(d, x, y)]] : []), null, ['Удалить', () => deleteDoc(d)]];
 function renderDocTabs() {
-  const box = $('docTabs'); box.textContent = '';
-  for (const d of S.project.docs) {
-    const b = h('button', { class: 'doctab', role: 'tab', 'aria-selected': String(d.id === S.project.active), title: KIND_NAME[d.kind] + ': ' + d.name }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name));
-    b.onclick = () => switchDoc(d.id);
-    b.ondblclick = () => renameDoc(d, b);
-    b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Переименовать', () => renameDoc(d, b)], ['Дублировать', () => addDoc(d.kind, d.name, clone(d.data), false)], ...(SRV.on ? [['Прежние версии…', () => serverVersionsMenu(d, e.clientX, e.clientY)]] : CLOUD.db ? [['Прежние версии…', () => docVersionsMenu(d, e.clientX, e.clientY)]] : []), null, ['Удалить', () => deleteDoc(d)]]); };
-    box.append(b);
+  const box = $('docTabs'); box.textContent = ''; const d = activeEntry(); if (!d) return;
+  const b = h('button', { class: 'doctab doccur', 'aria-selected': 'true', 'aria-haspopup': 'true', title: 'Документы проекта. Двойной щелчок: переименовать' }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name), h('b', { class: 'caret' }, '▾'));
+  b.onclick = () => openDocList(b);
+  b.ondblclick = () => { closeMenu(); renameDoc(d, b); };
+  b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, b)); };
+  box.append(b);
+}
+const GROUP_NAME = { part: 'Детали', asm: 'Сборки', import: 'STEP-модели', drw: 'Чертежи' };
+function openDocList(btn) {
+  if (!menu.hidden && menu.dataset.kind === 'docs') { closeMenu(); return; }
+  menu.textContent = ''; menu.onHover = null; menu.dataset.kind = 'docs'; menu.classList.add('doclist');
+  for (const kind of ['part', 'asm', 'import', 'drw']) {
+    const ds = S.project.docs.filter((d) => d.kind === kind); if (!ds.length) continue;
+    menu.append(h('div', { class: 'dl-h' }, GROUP_NAME[kind]));
+    for (const d of ds) {
+      const row = h('button', { class: 'dl-row' + (d.id === S.project.active ? ' cur' : ''), title: d.name }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name));
+      row.onclick = () => { closeMenu(); if (d.id !== S.project.active) switchDoc(d.id); };
+      row.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, btn)); };
+      menu.append(row);
+    }
   }
-  box.querySelector('[aria-selected="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  menu.append(h('hr'), h('button', { class: 'dl-row', onclick: () => { closeMenu(); $('bAdd').click(); } }, '＋ Новый документ…'));
+  menu.hidden = false; const r = btn.getBoundingClientRect(), m = menu.getBoundingClientRect(); menu.style.left = Math.max(8, Math.min(r.left, innerWidth - m.width - 8)) + 'px'; menu.style.top = r.bottom + 4 + 'px';
+  menu.querySelector('.dl-row.cur')?.scrollIntoView({ block: 'nearest' });
 }
 function renameDoc(d, btn) {
   const inp = h('input', { type: 'text', value: d.name, 'aria-label': 'Имя документа' }); btn.replaceChildren(svg(ICON[KIND_ICON[d.kind]]), inp); inp.focus(); inp.select();
@@ -5733,13 +5758,7 @@ function deleteDoc(d) {
   saveProjectSoon(); toast(`Документ «${d.name}» удалён`, 'info');
 }
 // The tab strip scrolls; the full list is one click away, and file commands live in one menu.
-$('docTabs').addEventListener('wheel', (e) => { if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.currentTarget.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
 $('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()]]); };
-$('bDocs').onclick = (e) => {
-  const r = e.currentTarget.getBoundingClientRect(); const items = [];
-  for (const kind of ['part', 'asm', 'import', 'drw']) { const ds = S.project.docs.filter((d) => d.kind === kind); if (!ds.length) continue; if (items.length) items.push(null); for (const d of ds) items.push([(d.id === S.project.active ? '● ' : '') + KIND_NAME[kind] + ': ' + d.name, () => switchDoc(d.id)]); }
-  openMenu(r.left, r.bottom + 4, items);
-};
 $('bAdd').onclick = (e) => {
   const r = e.currentTarget.getBoundingClientRect();
   openMenu(r.left, r.bottom + 4, [
