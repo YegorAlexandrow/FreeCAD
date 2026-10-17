@@ -1224,20 +1224,82 @@ function modelRefs(f) {
     circles: T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6).map((c) => { const [x, y] = uv(c.c); return { x, y, r: c.r }; }),
     verts: T.verts.filter(on).map(uv),
   };
+  val.mref = (kind, i) => kind === 'p' ? vertRef(cb.body, o.clone().addScaledVector(X, i[0]).addScaledVector(Y, i[1])) : circleRef(T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6)[i]);
   refCache = { key: k, val }; return val;
+}
+// A point taken from the model remembers what it was taken from, so that it moves with the model when an
+// earlier operation changes: a vertex by the normals of the faces meeting at it, a circle centre as such.
+function vertNormals(body, v) {
+  const pos = body.getAttribute('position'); const out = []; const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) {
+    A.fromBufferAttribute(pos, i); B.fromBufferAttribute(pos, i + 1); C.fromBufferAttribute(pos, i + 2);
+    if (A.distanceToSquared(v) > 1e-8 && B.distanceToSquared(v) > 1e-8 && C.distanceToSquared(v) > 1e-8) continue;
+    const n = new THREE.Vector3().crossVectors(B.clone().sub(A), C.clone().sub(A)); if (n.lengthSq() < 1e-16) continue; n.normalize();
+    if (!out.some((m) => m.dot(n) > 0.9999)) out.push(n);
+  }
+  return out;
+}
+const vertRef = (body, v) => ({ w: v.toArray().map((x) => +x.toFixed(6)), ns: vertNormals(body, v).map((n) => n.toArray().map((x) => +x.toFixed(5))) });
+const circleRef = (c) => ({ w: c.c.toArray().map((x) => +x.toFixed(6)), circle: true, r: c.r });
+function followSketchRefs(f, body, cyls) {
+  S.dangling.delete(f.id); const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.free); if (!pts.length) return;
+  const T = edgeTopology(body, cyls); const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
+  const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3; const world = (p) => o.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y);
+  // Corners where a straight edge meets a curved face are not vertices of the topology, only ends of its lines.
+  const verts = [...T.verts.filter(on)]; for (const [a, b2] of T.lines) for (const q of [a, b2]) if (on(q) && !verts.some((v) => v.distanceTo(q) < 1e-6)) verts.push(q);
+  const circles = T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6);
+  let moved = false;
+  for (const p of pts) {
+    const w = world(p);
+    // Older sketches stored only the coordinates: a point that sits on the model now starts following it from here.
+    if (!p.mref) { const v = verts.find((q) => q.distanceTo(w) < 1e-3); const c = !v && circles.find((q) => q.c.distanceTo(w) < 1e-3); if (v) p.mref = vertRef(body, v); else if (c) p.mref = circleRef(c); continue; }
+    let best = null;
+    if (p.mref.circle) { for (const c of circles) { const d = c.c.distanceTo(w); if (!best || d < best.d) best = { d, v: c.c, c }; } }
+    else {
+      // Faces that meet at the vertex, by their normals; a curved face shows a different facet each time, so the
+      // vertex sharing the most of them wins, and the nearest one among those.
+      const want = p.mref.ns.map((n) => V3(n));
+      for (const v of verts) {
+        const d = v.distanceTo(w); if (d < 1e-6) { best = { d, v }; break; }
+        const has = vertNormals(body, v); const score = want.filter((n) => has.some((m) => m.dot(n) > 0.999)).length;
+        if (score < Math.min(2, want.length)) continue;
+        if (!best || score > best.score || (score === best.score && d < best.d)) best = { d, v, score };
+      }
+    }
+    if (!best || best.d < 1e-6) continue;
+    const d = best.v.clone().sub(o); const x = +d.dot(X).toFixed(6), y = +d.dot(Y).toFixed(6);
+    for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && best.c) e.r = best.c.r;
+    p.x = x; p.y = y; p.mref = { ...p.mref, w: best.v.toArray().map((q) => +q.toFixed(6)), ...(best.c ? { r: best.c.r } : {}) }; moved = true;
+  }
+  if (moved) solveSketch(f.sk);
+  // What could not be followed still hangs where the model used to be: shown in red, and reattached on request.
+  const lost = pts.filter((p) => { const w = world(p); return !verts.some((v) => v.distanceTo(w) < 1e-3) && !circles.some((c) => c.c.distanceTo(w) < 1e-3); }).map((p) => p.id);
+  if (lost.length) S.dangling.set(f.id, lost);
+}
+// Puts every hanging reference point of the sketch being edited on the nearest point of the model as it is now.
+function reattachRefs() {
+  const f = editF(); const lost = S.dangling.get(f.id) || []; const R = S.refs; if (!lost.length || !R) return;
+  const cands = [...R.verts.map(([x, y]) => ({ x, y, ref: () => R.mref('p', [x, y]) })), ...R.lines.flatMap(([x1, y1, x2, y2]) => [{ x: x1, y: y1 }, { x: x2, y: y2 }]).map((q) => ({ ...q, ref: () => R.mref('p', [q.x, q.y]) })), ...R.circles.map((c, i) => ({ x: c.x, y: c.y, r: c.r, ref: () => R.mref('c', i) }))];
+  if (!cands.length) return;
+  for (const id of lost) {
+    const p = f.sk.pts[id]; if (!p) continue; let best = null; for (const q of cands) { const d = Math.hypot(q.x - p.x, q.y - p.y); if (!best || d < best.d) best = { d, q }; }
+    p.x = best.q.x; p.y = best.q.y; p.mref = best.q.ref(); if (best.q.r) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === id) e.r = best.q.r;
+  }
+  S.dangling.delete(f.id); commitSketch(); toast(`Привязки к модели обновлены: ${lost.length}`, 'info');
 }
 // Brings a model reference into the sketch as fixed (external) geometry and returns its key.
 function materialize(sk, key) {
   if (!key?.startsWith('r:')) return key; const [, kind, iStr] = key.split(':'); const R = S.refs; const i = +iStr;
-  const fixedPt = (x, y) => { const ex = Object.values(sk.pts).find((p) => p.fixed && Math.hypot(p.x - x, p.y - y) < 1e-6); if (ex) return ex.id; const id = nid(sk); sk.pts[id] = { id, x, y, fixed: true, free: true }; return id; };
-  if (kind === 'v') return 'p:' + fixedPt(...R.verts[i]);
+  const fixedPt = (x, y, ref) => { const ex = Object.values(sk.pts).find((p) => p.fixed && Math.hypot(p.x - x, p.y - y) < 1e-6); if (ex) return ex.id; const id = nid(sk); sk.pts[id] = { id, x, y, fixed: true, free: true }; if (ref) sk.pts[id].mref = ref; return id; };
+  const vref = (x, y) => (R.mref ? R.mref('p', [x, y]) : null);
+  if (kind === 'v') return 'p:' + fixedPt(...R.verts[i], vref(...R.verts[i]));
   if (kind === 'l') {
-    const [x1, y1, x2, y2] = R.lines[i]; const a = fixedPt(x1, y1), b = fixedPt(x2, y2);
+    const [x1, y1, x2, y2] = R.lines[i]; const a = fixedPt(x1, y1, vref(x1, y1)), b = fixedPt(x2, y2, vref(x2, y2));
     const ex = Object.values(sk.ents).find((e) => e.ext && e.t === 'line' && ((e.p1 === a && e.p2 === b) || (e.p1 === b && e.p2 === a))); if (ex) return 'e:' + ex.id;
     const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b, ext: true }; return 'e:' + id;
   }
   if (kind === 'c') {
-    const c = R.circles[i]; const cp = fixedPt(c.x, c.y);
+    const c = R.circles[i]; const cp = fixedPt(c.x, c.y, R.mref ? R.mref('c', i) : null);
     const ex = Object.values(sk.ents).find((e) => e.ext && e.t === 'circle' && e.c === cp && Math.abs(e.r - c.r) < 1e-6); if (ex) return 'e:' + ex.id;
     const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: cp, r: c.r, ext: true }; return 'e:' + id;
   }
@@ -1254,7 +1316,7 @@ const PLANES = {
 };
 const S = {
   doc: null, editing: null, tool: 'select', sel: new Set(), hover: null, pm: null, draw: null, tab: 'feat',
-  body: null, errors: {}, undo: [], redo: [], analysis: null, conflict: new Set(), selectedTree: null, cache: new Map(),
+  body: null, errors: {}, dangling: new Map(), undo: [], redo: [], analysis: null, conflict: new Set(), selectedTree: null, cache: new Map(),
 };
 const featById = (id) => (S.doc.features || []).find((f) => f.id === id);
 const nextName = (prefix) => { let i = 1; while (S.doc.features.some((f) => f.name === prefix + i)) i++; return prefix + i; };
@@ -1314,6 +1376,7 @@ function computeBody(features) {
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
+    if (f.type === 'sketch' && body && !f.suppressed) followSketchRefs(f, body, cyls);
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
     key.push(JSON.stringify(f));
@@ -1779,6 +1842,7 @@ function drawSketchObjects(f, active) {
     if (!active) return state === 'constr' ? colors['geo-constr'] : colors['geo-full'];
     if (S.sel.has(k)) return colors['geo-sel']; if (S.hover === k) return colors['geo-hover'];
     if ([...S.conflict].some((cid) => sk.cons[cid]?.refs.includes(e?.id))) return colors['geo-bad'];
+    if (state === 'ext' && S.dangling.get(f.id)?.some((id) => e && (e.p1 === id || e.p2 === id || e.c === id))) return colors['geo-bad'];
     return state === 'ext' ? colors['geo-ext'] : state === 'constr' ? colors['geo-constr'] : state === 'full' ? colors['geo-full'] : colors['geo-under'];
   };
   for (const e of Object.values(sk.ents)) {
@@ -4409,6 +4473,9 @@ function mateResiduals(m, A, B) {
 // Faces and axes from STEP files are parallel only to about 1e-8, so a mate that repeats what
 // two others already fix leaves a remainder of that size and must not count as a new constraint.
 const ASM_TOL = 1e-6;
+// Parts drawn in float32 and STEP meshes rarely meet to the nanometre: holes 28.5002 mm apart on one part and
+// 28.5 on the other are the same holes. A mate counts as satisfied within a micrometre.
+const ASM_FIT = 1e-3;
 // The solver stops near 5e-8; a repeated mate then leaves a remainder in the elimination about a
 // thousand times its residual. The rank threshold follows the residual the assembly is actually at.
 const rankTol = (sys) => Math.min(1e-3, Math.max(ASM_TOL, 2e3 * maxAbs(residual(sys, new Float64Array(sys.n)))));
@@ -4497,20 +4564,20 @@ function asmSolve(asm, weights, extra) {
     const sys = asmSystem(asm, extra); if (!sys.eqs.length || !sys.n) return true;
     const X = new Float64Array(sys.n); const F = residual(sys, X); if (maxAbs(F) < 1e-9 || (outer === 0 && !weights && maxAbs(F) < 1e-8)) return true;
     const ok = solveSystem({ eqs: sys.eqs }, X, [...asmWeights(asm, sys), ...(weights ? weights(sys) : [])], ASM_TOL * 0.05); sys.commit(X);
-    if (ok) { const s2 = asmSystem(asm, extra); if (maxAbs(residual(s2, new Float64Array(s2.n))) < 1e-7) return true; }
+    const s2 = asmSystem(asm, extra); const r2 = maxAbs(residual(s2, new Float64Array(s2.n))); if ((ok && r2 < 1e-7) || (outer >= 2 && r2 < ASM_FIT)) return true;
   }
-  const sys = asmSystem(asm, extra); return maxAbs(residual(sys, new Float64Array(sys.n))) < 1e-6;
+  const sys = asmSystem(asm, extra); return maxAbs(residual(sys, new Float64Array(sys.n))) < ASM_FIT;
 }
 function asmAnalyze(asm) {
   const sys = asmSystem(asm); const X = new Float64Array(sys.n);
-  if (!sys.n) { const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > 1e-6) bad.add(e.cid); return { dof: 0, free: new Set(), redundant: bad }; }
+  if (!sys.n) { const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > ASM_FIT) bad.add(e.cid); return { dof: 0, free: new Set(), redundant: bad }; }
   const rows = jacobian(sys, X, 1e-5); const { basis, dependent } = eliminate(rows, sys.n, rankTol(sys));
   for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < sys.n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
   const piv = new Set(basis.map((b) => b.piv)); const freeCols = [...Array(sys.n).keys()].filter((k) => !piv.has(k)); const free = new Set(freeCols);
   for (const b of basis) if (freeCols.some((f) => Math.abs(b.vec[f]) > 1e-7)) free.add(b.piv);
   const freeComps = new Set(); for (const [id, i] of sys.idx) for (let k = 0; k < 6; k++) if (free.has(6 * i + k)) { freeComps.add(id); break; }
   // Consistent overlap between mates is normal in assemblies; only unsatisfied mates are errors.
-  const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > 1e-6) bad.add(e.cid); void dependent;
+  const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > ASM_FIT) bad.add(e.cid); void dependent;
   return { dof: sys.n - basis.length, free: freeComps, redundant: bad };
 }
 const snapPoses = (asm) => asm.comps.map((c) => [c.id, c.T.slice()]);
@@ -4797,7 +4864,7 @@ function renderAsmTree() {
     const ent = docEntry(c.doc); const status = c.fixed ? '(ф)' : an?.free.has(c.id) ? '(−)' : '';
     const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : ''), tabindex: '0', role: 'treeitem', title: c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён' },
       svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name));
-    r.onclick = () => { S.asmSel = c.id; asmRefresh(); };
+    r.onclick = () => { S.asmSel = c.id; S.mateSel = null; asmRefresh(); };
     r.ondblclick = () => switchDoc(c.doc);
     r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, [[c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]]); };
     tree.append(r);
@@ -4818,7 +4885,7 @@ function renderAsmTree() {
     const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : '') + (S.mateSel === m.id ? ' sel' : ''), tabindex: '0', role: 'treeitem', title: m.broken ? `${m.name}: ${m.broken}. Отредактируйте сопряжение и выберите элементы заново` : `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, m.broken ? '!' : MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
     r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
     r.ondblclick = (e) => (e.target.classList.contains('meta') ? editMateValue(m, r) : editMate(m));
-    r.onclick = () => { S.mateSel = S.mateSel === m.id ? null : m.id; renderSide(); drawMatePicks(); };
+    r.onclick = () => { S.mateSel = S.mateSel === m.id ? null : m.id; if (S.mateSel) S.asmSel = null; asmRefresh(); drawMatePicks(); };
     r.onmouseenter = () => { S.mateHover = m.id; drawMatePicks(); }; r.onmouseleave = () => { S.mateHover = null; drawMatePicks(); };
     tree.append(r);
   }
@@ -5159,7 +5226,7 @@ function asmUp(ev, d) {
     if (pm.picks.length === 1 && pm.picks[0].comp === ref.comp) { toast('Выберите объект на другом компоненте', 'warn'); return; }
     pm.picks.push(ref); pm.flip = null; pm.flipTouched = false; pm.v = null; previewMate(); return;
   }
-  if (d && !d.moved && !S.pm) { const p = asmPick(ev); S.asmSel = p?.comp || null; asmRefresh(); }
+  if (d && !d.moved && !S.pm) { const p = asmPick(ev); S.asmSel = p?.comp || null; if (S.asmSel) S.mateSel = null; asmRefresh(); }
 }
 
 // ============================================================================================
@@ -5286,7 +5353,7 @@ function renderTree() {
   for (const [k, p] of Object.entries(PLANES)) tree.append(row('plane:' + k, ICON.plane, p.label, { onOpen: () => startSketch({ ...p }), title: `Плоскость «${p.label}». Двойной щелчок: эскиз на ней`, menu: [['Эскиз на плоскости', () => startSketch({ ...p })]] }));
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
   const featRow = (f, i, child) => {
-    const off = i >= rb || f.suppressed; const err = S.errors[f.id];
+    const off = i >= rb || f.suppressed; const nd = S.dangling.get(f.id)?.length; const err = S.errors[f.id] || (nd && `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели ${nd === 1 ? 'висит' : 'висят'}: тех рёбер или вершин больше нет. Откройте эскиз и нажмите «Привязать к модели»`);
     const icon = f.type === 'stepbody' ? ICON.insert : f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
     const meta = f.type === 'stepbody' ? (docEntry(f.doc)?.name || 'нет модели') : f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'next' ? 'до следующей' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? (f.mid ? 'средняя' : fmt(f.d) + ' мм') : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
@@ -5495,6 +5562,8 @@ function renderSketchPanel() {
     grp.append(h('button', { class: 'ghost-btn', onclick: deleteSelection }, 'Удалить выделенное'));
     pmEl.append(grp);
   }
+  const nd = S.dangling.get(S.editing)?.length;
+  if (nd) pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'note' }, `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели ${nd === 1 ? 'висит' : 'висят'} там, где модель была раньше (красным)`), h('button', { class: 'big-btn', onclick: reattachRefs }, 'Привязать к модели')));
   pmEl.append(h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: S.showRel !== false, onchange: (e) => { S.showRel = e.target.checked; layoutOverlay(); } }), 'Показывать значки взаимосвязей'),
     h('button', { class: 'big-btn', onclick: exitSketch }, 'Выйти из эскиза'),
     h('button', { class: 'ghost-btn', onclick: () => { const fb = editF(); fb.sk = JSON.parse(S.editBackup); S.editing = fb.id; exitSketch(); toast('Изменения эскиза отменены', 'info'); } }, 'Отменить изменения')));
@@ -5875,6 +5944,8 @@ window.addEventListener('keydown', (e) => {
     if (k === 'f') return fitView();
     if (k === 'i') return cmdInsert();
     if (k === 'm') return S.pm?.kind === 'mate' ? closePM() : cmdMate();
+    // Delete removes what was picked last: a mate selected in the tree, not the component picked before it.
+    if (e.key === 'Delete' && S.mateSel) { const asm = S.doc; const m = asm.mates.find((x) => x.id === S.mateSel); if (m) { asm.mates = asm.mates.filter((x) => x !== m); S.mateSel = null; asmSolve(asm); asmRefresh(true); pushUndo(); toast(`Удалено: ${m.name}`, 'info'); } return; }
     if (e.key === 'Delete' && S.asmSel) { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) asmDeleteComp(c); }
     return;
   }
@@ -5926,5 +5997,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, followSketchRefs, vertNormals, reattachRefs, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
