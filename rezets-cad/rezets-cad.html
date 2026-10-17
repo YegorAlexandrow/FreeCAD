@@ -1797,8 +1797,8 @@ function snap(m, ctx = {}) {
 function snapToPoint(sk, sn, pending) {
   // A model point stays its own point; the sketch point sits on it by a coincident relation, which shows as a
   // glyph and can be deleted like any other, instead of the two being merged for good.
-  const onModel = (fp) => { const id = nid(sk); sk.pts[id] = { id, x: sk.pts[fp].x, y: sk.pts[fp].y }; pending.push({ t: 'coincident', refs: [id, fp] }); return id; };
-  if (sn.kind === 'pt') return sk.pts[sn.ref]?.fixed ? onModel(sn.ref) : sn.ref;
+  const onModel = (fp) => { const q = gp(sk, fp); const id = nid(sk); sk.pts[id] = { id, x: q.x, y: q.y }; pending.push({ t: 'coincident', refs: [id, fp] }); return id; };
+  if (sn.kind === 'pt') return sk.pts[sn.ref]?.fixed || sn.ref === 'O' ? onModel(sn.ref) : sn.ref;
   if (sn.kind === 'ref') return onModel(materialize(sk, sn.ref).slice(2));
   if (sn.kind === 'refon') { const ek = materialize(sk, sn.ref).slice(2); sn = { ...sn, kind: 'on', ref: ek }; }
   const id = nid(sk); sk.pts[id] = { id, x: sn.u, y: sn.v };
@@ -2405,9 +2405,9 @@ function applyRelation(fn) {
   commitSketch();
 }
 function detachFromModel(sk, fp) {
-  const id = nid(sk); sk.pts[id] = { id, x: sk.pts[fp].x, y: sk.pts[fp].y };
+  const q = gp(sk, fp); const id = nid(sk); sk.pts[id] = { id, x: q.x, y: q.y };
   for (const e of Object.values(sk.ents)) { if (e.ext) continue; for (const k of ['p1', 'p2', 'c']) if (e[k] === fp) e[k] = id; if (e.pts) e.pts = e.pts.map((q) => (q === fp ? id : q)); }
-  S.sel.clear(); S.sel.add('p:' + id); commitSketch(); toast('Точка отвязана от модели: теперь её можно двигать и задать размерами', 'info');
+  S.sel.clear(); S.sel.add('p:' + id); commitSketch(); toast(fp === 'O' ? 'Точка отвязана от исходной точки: теперь её можно двигать и задать размерами' : 'Точка отвязана от модели: теперь её можно двигать и задать размерами', 'info');
 }
 function deleteSelection() {
   const sk = editSk(); if (!sk || !S.sel.size) return;
@@ -5569,11 +5569,11 @@ function renderSketchPanel() {
       else if (e.t === 'ellipse') { const c = gp(sk, e.c), a = gp(sk, e.p1); grp.append(h('div', { class: 'note' }, `Полуоси ${fmt(Math.hypot(a.x - c.x, a.y - c.y))} и ${fmt(e.r)} мм`)); }
       else grp.append(h('div', { class: 'note' }, `Радиус ${fmt(e.r)} мм`));
     }
-    const ptsSel = sel.filter((k) => k.startsWith('p:')).map((k) => gp(sk, k.slice(2)));
+    const ptsSel = sel.filter((k) => k.startsWith('p:')).map((k) => ({ ...gp(sk, k.slice(2)), id: k.slice(2) }));
     if (ptsSel.length === 1) grp.append(h('div', { class: 'note' }, `X ${fmt(ptsSel[0].x)}  Y ${fmt(ptsSel[0].y)} мм`));
     // Older sketches merged their own geometry into the model point it was snapped to: split it off again.
     const own = (id) => Object.values(sk.ents).some((e) => !e.ext && (e.p1 === id || e.p2 === id || e.c === id || e.pts?.includes(id)));
-    if (ptsSel.length === 1 && ptsSel[0].fixed && own(ptsSel[0].id)) grp.append(h('button', { class: 'ghost-btn', onclick: () => detachFromModel(sk, ptsSel[0].id) }, 'Отвязать от модели'));
+    if (ptsSel.length === 1 && (ptsSel[0].fixed || ptsSel[0].id === 'O') && own(ptsSel[0].id)) grp.append(h('button', { class: 'ghost-btn', onclick: () => detachFromModel(sk, ptsSel[0].id) }, ptsSel[0].id === 'O' ? 'Отвязать от исходной точки' : 'Отвязать от модели'));
     grp.append(h('button', { class: 'ghost-btn', onclick: deleteSelection }, 'Удалить выделенное'));
     pmEl.append(grp);
   }
