@@ -1445,7 +1445,7 @@ function rebuild() {
   const preview = S.pm && S.pm.feature ? S.pm.feature : null;
   let list = feats;
   if (preview) { const i = list.findIndex((f) => f.id === preview.id); list = i >= 0 ? list.map((f) => (f.id === preview.id ? preview : f)) : [...list, preview]; }
-  const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls;
+  const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
   updateBodyMesh(); buildPlanes(); renderTree(); updateSketchVisuals(); requestRender();
 }
 
@@ -2704,6 +2704,7 @@ function exitSketch() {
   if (!S.editing) return; const f = editF(); S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
   setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo();
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
+  if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана. Проверьте, что концы линий соединены`, 'warn'); }
   const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. Нажмите «Вытянуть» или «Повернуть».`);
 }
 const plural = (n, a, b, c) => { const m = n % 10, m2 = n % 100; return m === 1 && m2 !== 11 ? a : m >= 2 && m <= 4 && (m2 < 10 || m2 >= 20) ? b : c; };
@@ -2719,7 +2720,8 @@ function cmdFeature(type, mode) {
   const sf = pickSketchForFeature();
   if (!sf) {
     // Every sketch can feed more than one feature: with no unused one, the user picks one, in the tree or in the window.
-    if (!S.doc.features.slice(0, rollbackIndex()).some((g) => g.type === 'sketch' && sketchRegions(g).faces.length)) { toast('Сначала нарисуйте замкнутый эскиз: «Эскиз» → выберите плоскость → нарисуйте контур', 'warn'); return; }
+    // No sketch yet: go straight into one, as SolidWorks does, and come back to this feature when the sketch closes.
+    if (!S.doc.features.slice(0, rollbackIndex()).some((g) => g.type === 'sketch' && sketchRegions(g).faces.length)) { S.afterSketch = { type, mode }; cmdSketch(); return; }
     S.pickSketch = { type, mode }; S.selectedTree = null; updateSketchVisuals(); renderSide(); setHint('Щёлкните эскиз в дереве или его линии в окне. Esc: отмена'); requestRender(); return;
   }
   S.pickSketch = null;
@@ -2745,7 +2747,7 @@ function toggleRegion(id) {
 function openPM(pm) { S.pm = pm; renderSide(); renderCorner(); if (pm.feature) { rebuild(); drawRegions(); } setHint(); }
 function closePM(silent) {
   if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
-  const had = S.pm; S.pm = null; groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); setHint(); requestRender(); }
+  const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') S.afterSketch = null; groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); setHint(); requestRender(); }
 function okPM() {
   const pm = S.pm; if (!pm) return;
   if (pm.kind === 'mate') { if (pm.picks.length) okMate(); else closePM(); return; }
@@ -5208,14 +5210,14 @@ function renderTools() {
       toolBtn('Траектория', ICON.sweep, () => cmdSweep('add'), { title: 'По траектории: профиль вдоль линии (вырез — в настройках)' }),
       toolBtn('Сечения', ICON.loft, () => cmdLoft('add'), { title: 'По сечениям между замкнутыми эскизами (вырез — в настройках)' }),
       h('div', { class: 'sep' }),
-      toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { title: 'Скруглить рёбра' }),
-      toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { title: 'Фаска на рёбрах' }),
-      toolBtn('Оболочка', ICON.shell, cmdShell, { title: 'Оболочка: полая деталь с открытыми гранями' }),
-      toolBtn('Отверстие', ICON.hole, cmdHole, { title: 'Отверстие под крепёж: простое, цековка, зенковка, под резьбу' }),
+      toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { disabled: !S.body, title: 'Скруглить рёбра' }),
+      toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { disabled: !S.body, title: 'Фаска на рёбрах' }),
+      toolBtn('Оболочка', ICON.shell, cmdShell, { disabled: !S.body, title: 'Оболочка: полая деталь с открытыми гранями' }),
+      toolBtn('Отверстие', ICON.hole, cmdHole, { disabled: !S.body, title: 'Отверстие под крепёж: простое, цековка, зенковка, под резьбу' }),
       h('div', { class: 'sep' }),
-      toolBtn('Массив', ICON.lpattern, () => cmdPattern('lpattern'), { title: 'Линейный массив элементов' }),
-      toolBtn('Круговой', ICON.cpattern, () => cmdPattern('cpattern'), { title: 'Круговой массив элементов' }),
-      toolBtn('Зеркало', ICON.mirror, () => cmdPattern('mirror'), { title: 'Зеркальное отражение элементов или всего тела' }),
+      toolBtn('Массив', ICON.lpattern, () => cmdPattern('lpattern'), { disabled: !S.body, title: 'Линейный массив элементов' }),
+      toolBtn('Круговой', ICON.cpattern, () => cmdPattern('cpattern'), { disabled: !S.body, title: 'Круговой массив элементов' }),
+      toolBtn('Зеркало', ICON.mirror, () => cmdPattern('mirror'), { disabled: !S.body, title: 'Зеркальное отражение элементов или всего тела' }),
       h('div', { class: 'sep' }),
       h('div', { class: 'sep' }),
       toolBtn('STEP', ICON.insert, cmdStepBody, { title: 'Взять STEP-модель из проекта телом детали: на ней можно рисовать эскизы, резать и сверлить' }),
@@ -5382,7 +5384,7 @@ function renderPM() {
   side.textContent = ''; const pm = S.pm;
   if (pm.kind === 'pickPlane') {
     side.append(h('div', { class: 'pm' }, pmHeader('Эскиз', ICON.sketch, false),
-      h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость эскиза'), h('div', { class: 'note' }, 'Выберите плоскость или щёлкните плоскую грань детали в окне.'),
+      h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость эскиза'), h('div', { class: 'note' }, S.afterSketch?.type ? `Выберите плоскость или плоскую грань. После эскиза откроется «${S.afterSketch.type === 'revolve' ? (S.afterSketch.mode === 'cut' ? 'Вырез пов.' : 'Повернуть') : S.afterSketch.mode === 'cut' ? 'Вырез' : 'Вытянуть'}»` : 'Выберите плоскость или щёлкните плоскую грань детали в окне.'),
         h('div', { class: 'chips' }, Object.entries(PLANES).map(([, p]) => h('button', { class: 'chip', onclick: () => startSketch({ ...p }) }, svg(ICON.plane), p.label)))),
       h('div', { class: 'grp' }, h('button', { class: 'ghost-btn', onclick: () => closePM() }, 'Отмена'))));
     return;
