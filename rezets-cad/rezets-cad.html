@@ -451,13 +451,13 @@ function curvePts(sk, e, per = 20) {
 }
 const isCurve = (e) => e.t === 'spline' || e.t === 'ellipse';
 
-const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd', 'rgap']);
+const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd', 'rgap', 'emaj']);
 const CON_NAMES = {
   coincident: 'Совпадение', horizontal: 'Горизонтальность', vertical: 'Вертикальность', hpts: 'Горизонтальность точек', vpts: 'Вертикальность точек',
   online: 'Точка на прямой', oncircle: 'Точка на окружности', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
   equal: 'Равенство', tangent: 'Касание', concentric: 'Концентричность', fix: 'Фиксация', collinear: 'Коллинеарность',
   symmetric: 'Симметрия', offset: 'Смещение', offd: 'Смещение', rgap: 'Зазор',
-  dist: 'Расстояние', dx: 'Расстояние по X', dy: 'Расстояние по Y', pldist: 'Расстояние до прямой', rad: 'Радиус', diam: 'Диаметр', angle: 'Угол',
+  dist: 'Расстояние', dx: 'Расстояние по X', dy: 'Расстояние по Y', pldist: 'Расстояние до прямой', rad: 'Радиус', diam: 'Диаметр', angle: 'Угол', emaj: 'Большая ось',
 };
 const REL_KEYS = { coincident: 'C', horizontal: 'H', hpts: 'H', vertical: 'V', vpts: 'V', parallel: 'P', perpendicular: 'N', equal: 'E', tangent: 'T', concentric: 'K', midpoint: 'M', online: 'O', oncircle: 'O', fix: 'F', collinear: 'J', symmetric: 'S' };
 const CON_GLYPH = { horizontal: '—', vertical: '|', hpts: '—', vpts: '|', online: '◦', oncircle: '◦', midpoint: '½', parallel: '∥', perpendicular: '⊥', equal: '=', tangent: '⌒', concentric: '◎', fix: '⚓', coincident: '●', collinear: '⋯', symmetric: '⌯', offset: '⇉' };
@@ -474,7 +474,8 @@ function buildSystem(sk, opts = {}) {
     return { v: [i, i + 1], g: (x) => [x[i], x[i + 1]] };
   };
   const R = (id) => { const i = idx['r' + id]; if (i === undefined) { const r = ge(sk, id).r; return { v: [], g: () => r }; } return { v: [i], g: (x) => x[i] }; };
-  const L = (id) => { const e = ge(sk, id); return [P(e.p1), P(e.p2)]; };
+  // An ellipse stands for its major axis, from the centre to the end point.
+  const L = (id) => { const e = ge(sk, id); return e.t === 'ellipse' ? [P(e.c), P(e.p1)] : [P(e.p1), P(e.p2)]; };
   const eqs = [];
   const add = (cid, parts, f, n) => { const v = [...new Set(parts.flatMap((p) => p.v))]; eqs.push({ cid, vars: v, f, n }); };
   // Internal arc equations: both end points lie on the arc.
@@ -571,6 +572,7 @@ function buildSystem(sk, opts = {}) {
       case 'pldist': { const p = P(r[0]); const [a, b] = L(r[1]); add(cid, [p, a, b], (x) => { const A = a.g(x), u = dir(A, b.g(x)); return [(c.s || 1) * cross(u, dir(A, p.g(x))) / len(u) - c.v]; }, 1); break; }
       case 'rad': { const rr = R(r[0]); add(cid, [rr], (x) => [rr.g(x) - c.v], 1); break; }
       case 'diam': { const rr = R(r[0]); add(cid, [rr], (x) => [2 * rr.g(x) - c.v], 1); break; }
+      case 'emaj': { const e = ge(sk, r[0]); const a = P(e.c), b = P(e.p1); add(cid, [a, b], (x) => { const A = a.g(x), B = b.g(x); return [2 * Math.hypot(B[0] - A[0], B[1] - A[1]) - c.v]; }, 1); break; }
       case 'angle': {
         const [a, b] = L(r[0]); const [m, n] = L(r[1]);
         add(cid, [a, b, m, n], (x) => {
@@ -696,6 +698,7 @@ function measure(sk, c) {
     case 'offd': return offsetDistance(sk, r[0], r[1]);
     case 'rgap': return Math.abs(ge(sk, r[0]).r - ge(sk, r[1]).r);
     case 'diam': return 2 * ge(sk, r[0]).r;
+    case 'emaj': { const e = ge(sk, r[0]); return 2 * len2(P(e.c), P(e.p1)); }
     case 'angle': { const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const u = [P(e1.p2).x - P(e1.p1).x, P(e1.p2).y - P(e1.p1).y], v = [P(e2.p2).x - P(e2.p1).x, P(e2.p2).y - P(e2.p1).y]; return Math.abs(Math.atan2(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1])) * 180 / Math.PI; }
   }
   return 0;
@@ -1831,7 +1834,8 @@ function addRelations(sk, list, quiet = true) {
   for (const c of list) { c.id = c.id || nid(sk); const r = tryAddConstraint(sk, c); results.push(r); if (!quiet || r.replaced?.length) reportAdd(r, c); }
   return results;
 }
-function conLabel(sk, cid) { const c = sk.cons[cid]; if (!c) return cid; return CON_NAMES[c.t] + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''); }
+const conName = (sk, c) => (c.t === 'diam' && sk.ents[c.refs[0]]?.t === 'ellipse' ? 'Малая ось' : c.t === 'horizontal' && sk.ents[c.refs[0]]?.t === 'ellipse' ? 'Ось горизонтально' : c.t === 'vertical' && sk.ents[c.refs[0]]?.t === 'ellipse' ? 'Ось вертикально' : CON_NAMES[c.t]);
+function conLabel(sk, cid) { const c = sk.cons[cid]; if (!c) return cid; return conName(sk, c) + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''); }
 function reportAdd(r, c) {
   const sk = editSk();
   if (r.replaced?.length) toast(`${CON_NAMES[c.t]} добавлена. ${r.replaced.map((x) => x.name + (x.driven ? ' стал справочным' : ' удалена: следует из новой')).join('; ')}.`, 'info');
@@ -1915,8 +1919,9 @@ function drawSketchObjects(f, active) {
 const dotTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 32; const x = c.getContext('2d'); x.fillStyle = '#fff'; x.beginPath(); x.arc(16, 16, 14, 0, Math.PI * 2); x.fill(); const t = new THREE.CanvasTexture(c); return t; })();
 function dimText(sk, c) {
   const v = c.driven ? measure(sk, c) : c.v;
-  if (c.expr && !c.driven) return 'Σ' + (c.t === 'diam' ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v));
-  const s = c.t === 'diam' ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v);
+  const dia = c.t === 'diam' && sk.ents[c.refs[0]]?.t !== 'ellipse';
+  if (c.expr && !c.driven) return 'Σ' + (dia ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v));
+  const s = dia ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v);
   return c.driven ? '(' + s + ')' : s;
 }
 // Dimension lines in sketch coordinates, plus the label position.
@@ -1947,10 +1952,17 @@ function dimGeometry(sk, c) {
       const x1 = cc.x + o.r * Math.cos(ang), y1 = cc.y + o.r * Math.sin(ang), x2 = cc.x + n.r * Math.cos(ang), y2 = cc.y + n.r * Math.sin(ang);
       lines.push([x1, y1, x2, y2]); arrow(x1, y1, x1 - x2, y1 - y2); arrow(x2, y2, x2 - x1, y2 - y1); if (Math.hypot(L.x - cc.x, L.y - cc.y) > Math.max(n.r, o.r)) lines.push([x2 > x1 ? x2 : x1, x2 > x1 ? y2 : y1, L.x, L.y]); label = L; break;
     }
+    case 'emaj': {
+      // The major axis end to end, with its label off to the side the user put it.
+      const e = ge(sk, r[0]); const cc = P(e.c), aa = P(e.p1); const ux = aa.x - cc.x, uy = aa.y - cc.y; const A = Math.hypot(ux, uy) || 1;
+      const bx = cc.x - ux, by = cc.y - uy; const L = pos || { x: cc.x + uy / A * (e.r + 4), y: cc.y - ux / A * (e.r + 4) };
+      lines.push([bx, by, aa.x, aa.y]); arrow(aa.x, aa.y, ux, uy); arrow(bx, by, -ux, -uy); lines.push([cc.x, cc.y, L.x, L.y]); label = L; break;
+    }
     case 'rad': case 'diam': if (ge(sk, r[0]).t === 'ellipse') {
       const e = ge(sk, r[0]); const cc = P(e.c), aa = P(e.p1); const A = Math.hypot(aa.x - cc.x, aa.y - cc.y) || 1; let vx = -(aa.y - cc.y) / A, vy = (aa.x - cc.x) / A;
       if (pos && (pos.x - cc.x) * vx + (pos.y - cc.y) * vy < 0) { vx = -vx; vy = -vy; } const ex = cc.x + vx * e.r, ey = cc.y + vy * e.r; const L = pos || { x: ex + vx * 6, y: ey + vy * 6 };
-      lines.push([cc.x, cc.y, ex, ey], [ex, ey, L.x, L.y]); arrow(ex, ey, vx, vy); label = L; break;
+      if (c.t === 'diam') { const sx = cc.x - vx * e.r, sy = cc.y - vy * e.r; lines.push([sx, sy, ex, ey], [ex, ey, L.x, L.y]); arrow(sx, sy, -vx, -vy); } else lines.push([cc.x, cc.y, ex, ey], [ex, ey, L.x, L.y]);
+      arrow(ex, ey, vx, vy); label = L; break;
     } else {
       const e = ge(sk, r[0]); const cc = P(e.c); const L = pos || { x: cc.x + e.r * 1.3, y: cc.y + e.r * 0.5 };
       const ang = Math.atan2(L.y - cc.y, L.x - cc.x); const ex = cc.x + e.r * Math.cos(ang), ey = cc.y + e.r * Math.sin(ang);
@@ -1983,7 +1995,7 @@ function layoutOverlay() {
     for (const c of Object.values(sk.cons)) {
       if (DIM_TYPES.has(c.t)) {
         const g = dimGeometry(sk, c); const s = sScreen(g.label.x, g.label.y);
-        const el = h('div', { class: 'dimlbl' + (c.driven ? ' driven' : '') + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${s.x}px;top:${s.y}px`, title: CON_NAMES[c.t] + (c.driven ? ' (справочный)' : '') }, dimText(sk, c));
+        const el = h('div', { class: 'dimlbl' + (c.driven ? ' driven' : '') + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${s.x}px;top:${s.y}px`, title: conName(sk, c) + (c.driven ? ' (справочный)' : '') }, dimText(sk, c));
         el.addEventListener('pointerdown', (ev) => startDimDrag(ev, c));
         el.addEventListener('dblclick', (ev) => { ev.stopPropagation(); openDimEditor(c); });
         overlay.append(el);
@@ -2362,6 +2374,9 @@ function makeDim(sk, picks, m) {
     if (e.t === 'line') return place(e.p1, e.p2);
     if (e.t === 'circle') return { t: 'diam', refs: [e.id] };
     if (e.t === 'arc') return { t: 'rad', refs: [e.id] };
+    // An ellipse: the axis nearer to where it was clicked, end to end.
+    if (e.t === 'ellipse') { const c = gp(sk, e.c), a = gp(sk, e.p1); const A = Math.hypot(a.x - c.x, a.y - c.y) || 1; const ux = (a.x - c.x) / A, uy = (a.y - c.y) / A; const lx = (m.u - c.x) * ux + (m.v - c.y) * uy, ly = -(m.u - c.x) * uy + (m.v - c.y) * ux;
+      return Math.abs(lx) / A >= Math.abs(ly) / (e.r || 1) ? { t: 'emaj', refs: [e.id] } : { t: 'diam', refs: [e.id] }; }
     return null;
   }
   const [a, b] = it;
@@ -2386,7 +2401,9 @@ function relationOptions(sk) {
   const sel = [...S.sel]; const pts = sel.filter((k) => k.startsWith('p:')).map((k) => k.slice(2));
   const ents = sel.filter((k) => k.startsWith('e:')).map((k) => ge(sk, k.slice(2))).filter(Boolean);
   const lines = ents.filter((e) => e.t === 'line'); const circs = ents.filter((e) => e.t === 'circle' || e.t === 'arc');
-  if (ents.some((e) => e.t === 'spline' || e.t === 'ellipse')) { const out2 = []; if (pts.length === 1 && ents.length === 1 && ents[0].t === 'ellipse') { out2.push(['oncircle', 'На эллипсе', () => [{ t: 'oncircle', refs: [pts[0], ents[0].id] }]]); if (ents[0].c !== pts[0]) out2.push(['concentric', 'Концентрично', () => [{ t: 'coincident', refs: [pts[0], ents[0].c] }]]); } return out2; }
+  if (ents.some((e) => e.t === 'spline' || e.t === 'ellipse')) { const out2 = []; if (pts.length === 1 && ents.length === 1 && ents[0].t === 'ellipse') { out2.push(['oncircle', 'На эллипсе', () => [{ t: 'oncircle', refs: [pts[0], ents[0].id] }]]); if (ents[0].c !== pts[0]) out2.push(['concentric', 'Концентрично', () => [{ t: 'coincident', refs: [pts[0], ents[0].c] }]]); }
+    if (!pts.length && ents.length && ents.every((e) => e.t === 'ellipse')) { out2.push(['horizontal', 'Ось горизонтально', () => ents.map((e) => ({ t: 'horizontal', refs: [e.id] }))], ['vertical', 'Ось вертикально', () => ents.map((e) => ({ t: 'vertical', refs: [e.id] }))]); }
+    return out2; }
   const out = [];
   if (!pts.length && lines.length && !circs.length) {
     if (lines.every((e) => !e.ref)) { out.push(['horizontal', 'Горизонтально', () => lines.filter((e) => !e.ref).map((e) => ({ t: 'horizontal', refs: [e.id] }))]); out.push(['vertical', 'Вертикально', () => lines.map((e) => ({ t: 'vertical', refs: [e.id] }))]); }
@@ -5591,7 +5608,7 @@ function renderSketchPanel() {
     const related = Object.values(sk.cons).filter((c) => sel.includes('c:' + c.id) || c.refs.some((r) => ids.has(r)));
     if (related.length) {
       grp.append(h('div', { class: 'note' }, 'Существующие взаимосвязи'));
-      for (const c of related) grp.append(h('div', { class: 'rel' + (S.conflict.has(c.id) ? ' bad' : '') }, h('b', {}, CON_GLYPH[c.t] || (DIM_TYPES.has(c.t) ? '↔' : '')), CON_NAMES[c.t] + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''), h('button', { class: 'x', title: 'Удалить взаимосвязь', onclick: () => { delete sk.cons[c.id]; S.sel.delete('c:' + c.id); S.conflict.delete(c.id); commitSketch(); } }, '✕')));
+      for (const c of related) grp.append(h('div', { class: 'rel' + (S.conflict.has(c.id) ? ' bad' : '') }, h('b', {}, CON_GLYPH[c.t] || (DIM_TYPES.has(c.t) ? '↔' : '')), conName(sk, c) + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''), h('button', { class: 'x', title: 'Удалить взаимосвязь', onclick: () => { delete sk.cons[c.id]; S.sel.delete('c:' + c.id); S.conflict.delete(c.id); commitSketch(); } }, '✕')));
     }
     const lines = sel.filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => sk.ents[k.slice(2)]);
     if (lines.length === 1) {
