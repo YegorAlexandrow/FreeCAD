@@ -2186,7 +2186,7 @@ function sketchDown(ev) {
   }
   if (S.tool === 'dim') { dimClick(m); return; }
   if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
-  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
+  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
 function sketchMove(ev) {
@@ -2239,7 +2239,7 @@ function dragTo(m) {
 // ---------------- drawing tools ----------------
 function setTool(t) {
   if (!S.editing && t !== 'select') return;
-  S.tool = t; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); S.dimPreview = null; S.hover = null;
+  S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); S.dimPreview = null; S.hover = null;
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
 }
@@ -2826,7 +2826,9 @@ function toolOptionsPanel() {
   if (S.skOp?.kind === 'offset') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), field('Расстояние', 'opOffset', o.offsetD, (v) => { o.offsetD = v; previewOffset(); }),
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: o.offsetFlip, onchange: (e) => { o.offsetFlip = e.target.checked; previewOffset(); } }), 'В другую сторону'),
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okOffset }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')));
-  if (S.tool === 'sfillet') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; }), h('div', { class: 'note' }, 'Щёлкайте углы, где сходятся две линии'));
+  // The radius is for the next fillets and, as in SolidWorks, for the ones already put with the tool this time.
+  if (S.tool === 'sfillet') { const sk = editSk(); const made = () => (S.toolFillets || []).map((id) => sk?.ents[id]).filter(Boolean);
+    return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности')); }
   if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true));
   return null;
 }
