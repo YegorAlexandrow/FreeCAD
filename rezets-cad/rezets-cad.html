@@ -576,7 +576,7 @@ function buildSystem(sk, opts = {}) {
       case 'angle': {
         const [a, b] = L(r[0]); const [m, n] = L(r[1]);
         add(cid, [a, b, m, n], (x) => {
-          const u = dir(a.g(x), b.g(x)), v = dir(m.g(x), n.g(x));
+          const u = dir(a.g(x), b.g(x)).map((q) => q * (c.f1 || 1)), v = dir(m.g(x), n.g(x)).map((q) => q * (c.f2 || 1));
           let d = Math.atan2(cross(u, v), dot(u, v)) - (c.s || 1) * c.v * Math.PI / 180;
           while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return [d];
         }, 1); break;
@@ -699,7 +699,7 @@ function measure(sk, c) {
     case 'rgap': return Math.abs(ge(sk, r[0]).r - ge(sk, r[1]).r);
     case 'diam': return 2 * ge(sk, r[0]).r;
     case 'emaj': { const e = ge(sk, r[0]); return 2 * len2(P(e.c), P(e.p1)); }
-    case 'angle': { const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const u = [P(e1.p2).x - P(e1.p1).x, P(e1.p2).y - P(e1.p1).y], v = [P(e2.p2).x - P(e2.p1).x, P(e2.p2).y - P(e2.p1).y]; return Math.abs(Math.atan2(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1])) * 180 / Math.PI; }
+    case 'angle': { const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const f1 = c.f1 || 1, f2 = c.f2 || 1; const u = [(P(e1.p2).x - P(e1.p1).x) * f1, (P(e1.p2).y - P(e1.p1).y) * f1], v = [(P(e2.p2).x - P(e2.p1).x) * f2, (P(e2.p2).y - P(e2.p1).y) * f2]; return Math.abs(Math.atan2(u[0] * v[1] - u[1] * v[0], u[0] * v[0] + u[1] * v[1])) * 180 / Math.PI; }
   }
   return 0;
 }
@@ -718,7 +718,7 @@ function initSigns(sk, c) {
     c.inner = Math.abs(d - Math.abs(e1.r - e2.r)) < Math.abs(d - (e1.r + e2.r));
   }
   if (c.t === 'angle') {
-    const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const u = [P(e1.p2).x - P(e1.p1).x, P(e1.p2).y - P(e1.p1).y], v = [P(e2.p2).x - P(e2.p1).x, P(e2.p2).y - P(e2.p1).y];
+    const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]); const f1 = c.f1 || 1, f2 = c.f2 || 1; const u = [(P(e1.p2).x - P(e1.p1).x) * f1, (P(e1.p2).y - P(e1.p1).y) * f1], v = [(P(e2.p2).x - P(e2.p1).x) * f2, (P(e2.p2).y - P(e2.p1).y) * f2];
     c.s = Math.sign(u[0] * v[1] - u[1] * v[0]) || 1;
   }
   if (c.t === 'fix') { const p = P(r[0]); c.x = p.x; c.y = p.y; }
@@ -1976,10 +1976,10 @@ function dimGeometry(sk, c) {
       const d1 = [b.x - a.x, b.y - a.y], d2 = [n.x - m.x, n.y - m.y]; const den = d1[0] * d2[1] - d1[1] * d2[0];
       let ix = a.x, iy = a.y; if (Math.abs(den) > 1e-12) { const t = ((m.x - a.x) * d2[1] - (m.y - a.y) * d2[0]) / den; ix = a.x + t * d1[0]; iy = a.y + t * d1[1]; }
       const L = pos || { x: ix + 15, y: iy + 15 }; const R = Math.hypot(L.x - ix, L.y - iy);
-      let a1 = Math.atan2(d1[1], d1[0]), a2 = Math.atan2(d2[1], d2[0]); const al = Math.atan2(L.y - iy, L.x - ix);
+      // The arc spans the sector the dimension measures: between the two rays its flips pick.
+      const a1 = Math.atan2(d1[1] * (c.f1 || 1), d1[0] * (c.f1 || 1)), a2 = Math.atan2(d2[1] * (c.f2 || 1), d2[0] * (c.f2 || 1));
       const norm = (x) => { while (x < 0) x += 2 * Math.PI; while (x >= 2 * Math.PI) x -= 2 * Math.PI; return x; };
-      const cands = [[a1, a2], [a1 + Math.PI, a2], [a1, a2 + Math.PI], [a1 + Math.PI, a2 + Math.PI]]; let pick2 = cands[0];
-      for (const [s, t] of cands) { let sw = norm(t - s); let st = s; if (sw > Math.PI) { st = t; sw = 2 * Math.PI - sw; } if (norm(al - st) <= sw) { pick2 = [st, st + sw]; break; } }
+      let sw = norm(a2 - a1), st = a1; if (sw > Math.PI) { st = a2; sw = 2 * Math.PI - sw; } const pick2 = [st, st + sw];
       const N = 24; for (let i = 0; i < N; i++) { const t0 = pick2[0] + (pick2[1] - pick2[0]) * i / N, t1 = pick2[0] + (pick2[1] - pick2[0]) * (i + 1) / N; lines.push([ix + R * Math.cos(t0), iy + R * Math.sin(t0), ix + R * Math.cos(t1), iy + R * Math.sin(t1)]); }
       label = L; break;
     }
@@ -2385,7 +2385,10 @@ function makeDim(sk, picks, m) {
     const u = [A[1].x - A[0].x, A[1].y - A[0].y], v = [B[1].x - B[0].x, B[1].y - B[0].y];
     const sin = (u[0] * v[1] - u[1] * v[0]) / (Math.hypot(...u) * Math.hypot(...v));
     if (Math.abs(sin) < 1e-6) { if (a.e.ref) return { t: 'pldist', refs: [b.e.p1, a.id] }; return { t: 'pldist', refs: [a.e.p1, b.id] }; }
-    return { t: 'angle', refs: [a.id, b.id] };
+    // The angle of the sector the cursor is in, as in SolidWorks: each line's ray is the one bounding that sector.
+    const A0 = gp(sk, a.e.p1), B0 = gp(sk, b.e.p1); const den = u[0] * v[1] - u[1] * v[0]; const t = ((B0.x - A0.x) * v[1] - (B0.y - A0.y) * v[0]) / den; const ix = A0.x + t * u[0], iy = A0.y + t * u[1];
+    const wx = m.u - ix, wy = m.v - iy; const al = (wx * v[1] - wy * v[0]) / den, be = (u[0] * wy - u[1] * wx) / den;
+    return { t: 'angle', refs: [a.id, b.id], f1: al < 0 ? -1 : 1, f2: be < 0 ? -1 : 1 };
   }
   const line = [a, b].find((x) => x.e?.t === 'line'); const other = [a, b].find((x) => x !== line);
   if (line && other) { const p = ptOf(other); if (p) return { t: 'pldist', refs: [p, line.id] }; return null; }
@@ -6073,5 +6076,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
