@@ -1795,8 +1795,11 @@ function snap(m, ctx = {}) {
 }
 // Turns a snap result into a point id, adding the relation the snap stands for.
 function snapToPoint(sk, sn, pending) {
-  if (sn.kind === 'pt') return sn.ref;
-  if (sn.kind === 'ref') return materialize(sk, sn.ref).slice(2);
+  // A model point stays its own point; the sketch point sits on it by a coincident relation, which shows as a
+  // glyph and can be deleted like any other, instead of the two being merged for good.
+  const onModel = (fp) => { const id = nid(sk); sk.pts[id] = { id, x: sk.pts[fp].x, y: sk.pts[fp].y }; pending.push({ t: 'coincident', refs: [id, fp] }); return id; };
+  if (sn.kind === 'pt') return sk.pts[sn.ref]?.fixed ? onModel(sn.ref) : sn.ref;
+  if (sn.kind === 'ref') return onModel(materialize(sk, sn.ref).slice(2));
   if (sn.kind === 'refon') { const ek = materialize(sk, sn.ref).slice(2); sn = { ...sn, kind: 'on', ref: ek }; }
   const id = nid(sk); sk.pts[id] = { id, x: sn.u, y: sn.v };
   if (sn.kind === 'mid') pending.push({ t: 'midpoint', refs: [id, sn.ref] });
@@ -2400,6 +2403,11 @@ function applyRelation(fn) {
   const sk = editSk(); const list = fn(); S.conflict = new Set();
   for (const c of list) { c.id = nid(sk); const r = tryAddConstraint(sk, c); reportAdd(r, c); if (r.status !== 'ok' && r.status !== 'driven') break; }
   commitSketch();
+}
+function detachFromModel(sk, fp) {
+  const id = nid(sk); sk.pts[id] = { id, x: sk.pts[fp].x, y: sk.pts[fp].y };
+  for (const e of Object.values(sk.ents)) { if (e.ext) continue; for (const k of ['p1', 'p2', 'c']) if (e[k] === fp) e[k] = id; if (e.pts) e.pts = e.pts.map((q) => (q === fp ? id : q)); }
+  S.sel.clear(); S.sel.add('p:' + id); commitSketch(); toast('Точка отвязана от модели: теперь её можно двигать и задать размерами', 'info');
 }
 function deleteSelection() {
   const sk = editSk(); if (!sk || !S.sel.size) return;
@@ -5563,6 +5571,9 @@ function renderSketchPanel() {
     }
     const ptsSel = sel.filter((k) => k.startsWith('p:')).map((k) => gp(sk, k.slice(2)));
     if (ptsSel.length === 1) grp.append(h('div', { class: 'note' }, `X ${fmt(ptsSel[0].x)}  Y ${fmt(ptsSel[0].y)} мм`));
+    // Older sketches merged their own geometry into the model point it was snapped to: split it off again.
+    const own = (id) => Object.values(sk.ents).some((e) => !e.ext && (e.p1 === id || e.p2 === id || e.c === id || e.pts?.includes(id)));
+    if (ptsSel.length === 1 && ptsSel[0].fixed && own(ptsSel[0].id)) grp.append(h('button', { class: 'ghost-btn', onclick: () => detachFromModel(sk, ptsSel[0].id) }, 'Отвязать от модели'));
     grp.append(h('button', { class: 'ghost-btn', onclick: deleteSelection }, 'Удалить выделенное'));
     pmEl.append(grp);
   }
@@ -6001,5 +6012,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, followSketchRefs, vertNormals, reattachRefs, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
