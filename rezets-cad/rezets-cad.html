@@ -3209,8 +3209,12 @@ function edgeTool(body, edge, kind, size) {
     let e1 = new THREE.Vector3().crossVectors(u, Math.abs(u.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const e2 = new THREE.Vector3().crossVectors(u, e1);
     const to2 = (v) => [v.dot(e1), v.dot(e2)];
     const sec = edgeSection(kind, size, [0, 0], to2(d1), to2(d2), to2(n1), to2(n2), convex);
-    const ext = convex ? 0.01 : 0; const g = extrudeGeometry([{ pts: sec, holes: [] }], -ext, L + ext);
-    g.applyMatrix4(new THREE.Matrix4().makeBasis(e1, e2, u).setPosition(a)); g.computeVertexNormals(); return { g, convex };
+    const ext = convex ? 0.01 : 0; let g = extrudeGeometry([{ pts: sec, holes: [] }], -ext, L + ext);
+    g.applyMatrix4(new THREE.Matrix4().makeBasis(e1, e2, u).setPosition(a)); g.computeVertexNormals();
+    // Added material stays over the two faces: where a face ends (a round rim, a step) the fillet ends with it
+    // instead of hanging in the air past it.
+    if (!convex) for (const [n, d] of [[n1, d1], [n2, d2]]) { const prism = facePrism(body, n, mid.clone().addScaledVector(d, eps), size + eps); if (prism) g = boolean(g, prism, INTERSECTION); }
+    return { g, convex };
   }
   // Circular edge between a plane and a cylinder: work in the (radial, axial) half-plane.
   const c = V3(edge.c), n = V3(edge.n).normalize(); let rho = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize();
@@ -3224,6 +3228,32 @@ function edgeTool(body, edge, kind, size) {
   if (sec.some((p) => p[0] < 1e-6)) throw new Error('Размер больше радиуса кромки');
   const g = revolveGeometry([{ pts: sec, holes: [] }], [0, 0], [0, 1], 360);
   g.applyMatrix4(new THREE.Matrix4().makeBasis(rho, n, new THREE.Vector3().crossVectors(rho, n)).setPosition(c)); g.computeVertexNormals(); return { g, convex };
+}
+// The planar face of the body through a point, as a prism standing on it on its outer side, h high.
+function facePrism(body, n, at, h) {
+  const pos = body.getAttribute('position'); const N = n.clone().normalize(); const d0 = N.dot(at); const tris = [];
+  const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += 3) { A.fromBufferAttribute(pos, i); B.fromBufferAttribute(pos, i + 1); C.fromBufferAttribute(pos, i + 2); const nn = B.clone().sub(A).cross(C.clone().sub(A)); const l = nn.length(); if (l < 1e-12 || nn.dot(N) / l < 1 - 1e-6 || Math.abs(N.dot(A) - d0) > 1e-4) continue; tris.push(i); }
+  if (!tris.length) return null;
+  const key = (i) => `${Math.round(pos.getX(i) * 1e4)},${Math.round(pos.getY(i) * 1e4)},${Math.round(pos.getZ(i) * 1e4)}`;
+  // Only the face the point is on: triangles joined to it through shared corners.
+  const byVert = new Map(); for (const t of tris) for (let k = 0; k < 3; k++) { const kk = key(t + k); if (!byVert.has(kk)) byVert.set(kk, []); byVert.get(kk).push(t); }
+  const inTri = (t) => { const a = new THREE.Vector3().fromBufferAttribute(pos, t), b = new THREE.Vector3().fromBufferAttribute(pos, t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, t + 2); const tr = new THREE.Triangle(a, b, c); const q = new THREE.Vector3(); tr.closestPointToPoint(at, q); return q.distanceTo(at) < 1e-4; };
+  const seed = tris.find(inTri); if (seed === undefined) return null;
+  const sel = new Set([seed]); const st = [seed]; while (st.length) { const t = st.pop(); for (let k = 0; k < 3; k++) for (const o of byVert.get(key(t + k))) if (!sel.has(o)) { sel.add(o); st.push(o); } }
+  // Its outline: edges used by one triangle only, chained into loops in the face's own 2D axes.
+  const X = new THREE.Vector3().crossVectors(N, Math.abs(N.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const Y = new THREE.Vector3().crossVectors(N, X);
+  const P = new Map(); const cnt = new Map();
+  for (const t of sel) for (let k = 0; k < 3; k++) { const i = t + k, j = t + (k + 1) % 3; const ka = key(i), kb = key(j); for (const [kk, ii] of [[ka, i], [kb, j]]) if (!P.has(kk)) { const v = new THREE.Vector3().fromBufferAttribute(pos, ii).sub(at); P.set(kk, [v.dot(X), v.dot(Y)]); } const ek = ka < kb ? ka + '|' + kb : kb + '|' + ka; const e = cnt.get(ek); if (e) e.n++; else cnt.set(ek, { n: 1, a: ka, b: kb }); }
+  const next = new Map(); for (const e of cnt.values()) if (e.n === 1) next.set(e.a, e.b);
+  const loops = []; const seen = new Set();
+  for (const s0 of next.keys()) { if (seen.has(s0)) continue; const loop = []; let k = s0; while (k && !seen.has(k)) { seen.add(k); loop.push(P.get(k)); k = next.get(k); } if (loop.length >= 3) loops.push(loop); }
+  if (!loops.length) return null;
+  const area = (l) => { let a2 = 0; for (let i = 0; i < l.length; i++) { const p = l[i], q = l[(i + 1) % l.length]; a2 += p[0] * q[1] - q[0] * p[1]; } return a2 / 2; };
+  loops.sort((p, q) => Math.abs(area(q)) - Math.abs(area(p)));
+  const outer = area(loops[0]) > 0 ? loops[0] : loops[0].slice().reverse(); const holes = loops.slice(1).map((l) => (area(l) < 0 ? l : l.slice().reverse()));
+  const g = extrudeGeometry([{ pts: outer, holes }], -0.01, h);
+  g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, N).setPosition(at.clone().addScaledVector(N, d0 - N.dot(at)))); g.computeVertexNormals(); return g;
 }
 // Fillets and chamfers keep their edges as coordinates. After a dimension change an edge that is gone
 // is found again: a circle of the same radius on the same axis, or a straight edge of the same direction
