@@ -5771,6 +5771,9 @@ function renderSketchPanel() {
     const lines = sel.filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => sk.ents[k.slice(2)]);
     if (lines.length === 1) {
       const e = lines[0];
+      // An arc drawn the short way between two points that should have gone round the long way (a D profile):
+      // the same ends, the other side of the circle.
+      if (e.t === 'arc' && !e.ext) grp.append(h('button', { class: 'ghost-btn', onclick: () => { [e.p1, e.p2] = [e.p2, e.p1]; commitSketch(); } }, 'Дуга с другой стороны'));
       grp.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!e.constr, onchange: () => { e.constr = !e.constr; commitSketch(); } }), 'Вспомогательная геометрия'));
       if (e.t === 'line') { const p = gp(sk, e.p1), q = gp(sk, e.p2); grp.append(h('div', { class: 'note' }, `Длина ${fmt(Math.hypot(q.x - p.x, q.y - p.y))} мм, угол ${fmt(Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI, 1)}°`)); }
       else if (e.t === 'spline') grp.append(h('div', { class: 'note' }, `Сплайн через ${e.pts.length} ${plural(e.pts.length, 'точку', 'точки', 'точек')}: форма задаётся положением точек`));
