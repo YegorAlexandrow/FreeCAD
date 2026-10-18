@@ -3922,8 +3922,8 @@ function setCloudState(st, note) {
   CLOUD.state = st; const el = $('saveState'); if (!el) return;
   if (st === 'saved') CLOUD.savedAt = new Date();
   const hm = CLOUD.savedAt ? CLOUD.savedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
-  const txt = { local: 'В браузере', saving: 'Сохраняю…', saved: 'Сохранено ' + hm, loading: 'Загружаю из облака…', error: 'Не сохранено', conflict: 'Изменён в другом окне', offline: 'Нет связи' }[st] || st;
-  el.textContent = txt; el.dataset.state = st === 'loading' ? 'saving' : st; el.title = note || (st !== 'saved' && CLOUD.savedAt ? `Последнее сохранение в облако: ${hm}. ` : '') + ({ local: 'Облако недоступно: проект хранится только в этом браузере. Делайте резервные копии кнопкой «Сохранить…»', saved: 'Проект сохранён в облаке Claude и доступен на любом устройстве', saving: 'Идёт сохранение в облако', error: 'Последнее сохранение в облако не удалось, повторю при следующем изменении', conflict: 'Проект сохранили в другом окне или на другом устройстве. Перезагрузите страницу, чтобы не затереть те изменения', offline: 'Облако временно недоступно, повторю сам', loading: 'Проект читается из облака; пока он не прочитан, в облако ничего не пишется' }[st] || '');
+  const txt = { local: 'В браузере', saving: 'Сохраняю…', saved: 'Сохранено ' + hm, loading: 'Загружаю из облака…', wait: 'Жду облако', error: 'Не сохранено', conflict: 'Изменён в другом окне', offline: 'Нет связи' }[st] || st;
+  el.textContent = txt; el.dataset.state = st === 'loading' || st === 'wait' ? 'saving' : st; el.style.cursor = ['error', 'offline', 'wait'].includes(st) ? 'pointer' : ''; el.title = note || (st !== 'saved' && CLOUD.savedAt ? `Последнее сохранение в облако: ${hm}. ` : '') + ({ local: 'Облако недоступно: проект хранится только в этом браузере. Делайте резервные копии кнопкой «Сохранить…»', saved: 'Проект сохранён в облаке Claude и доступен на любом устройстве', saving: 'Идёт сохранение в облако', error: 'Последнее сохранение в облако не удалось, повторю при следующем изменении', conflict: 'Проект сохранили в другом окне или на другом устройстве. Перезагрузите страницу, чтобы не затереть те изменения', offline: 'Облако временно недоступно, повторю сам', loading: 'Проект читается из облака; пока он не прочитан, в облако ничего не пишется' }[st] || '');
 }
 const metaRef = () => CLOUD.db.doc(`data/users/${CLOUD.uid}/project`);
 const chunkCol = () => metaRef().collection('chunks');
@@ -3967,7 +3967,7 @@ function storedJson(d) {
 }
 async function cloudSave() {
   if (!CLOUD.db || CLOUD.conflict || CLOUD.blocked) return; if (CLOUD.saving) { CLOUD.again = true; return; }
-  CLOUD.saving = true; setCloudState('saving');
+  CLOUD.saving = true; CLOUD.lastStart = Date.now(); setCloudState('saving'); let failed = false;
   try {
     // Someone saved after us (another tab or device): stop rather than overwrite their work.
     const cur = await dbCall(metaRef().get()); const curMeta = cur.exists ? cur.data() : null;
@@ -3989,16 +3989,24 @@ async function cloudSave() {
   } catch (e) {
     console.warn('cloud save', e); const code = e?.code;
     if (code === 'quota_exceeded') { setCloudState('error', 'Облако переполнено: удалите ненужные документы или импорты'); toast('Облачное хранилище переполнено, проект сохранён только в браузере', 'err'); }
-    else { setCloudState(code === 'unavailable' ? 'offline' : 'error', code === 'unavailable' ? `Облако не ответило, повторю через 15 с (${e.message})` : `Сохранение не удалось (${e.message || e}), повторю через 15 с`); clearTimeout(cloudRetry); cloudRetry = setTimeout(cloudSaveSoon, 15000); }
-  } finally { CLOUD.saving = false; if (CLOUD.again) { CLOUD.again = false; setTimeout(cloudSave, 500); } }
+    else if (code === 'revoked') setCloudState('error', 'Доступ к облаку отозван: перезагрузите страницу. Проект сохранён в этом браузере');
+    else {
+      // The cloud limits how often one viewer may write: then it waits longer instead of asking again at once.
+      const busy = code === 'resource_exhausted'; const wait = busy ? 30 : 15; failed = true;
+      setCloudState(busy ? 'wait' : code === 'unavailable' ? 'offline' : 'error', `${busy ? 'Облако просит сохранять реже' : code === 'unavailable' ? 'Облако не ответило' : 'Сохранение не удалось'} (${e.message || e}). Проект цел в этом браузере, в облако повторю сам через ${wait} с. Щёлкните, чтобы повторить сейчас`);
+      clearTimeout(cloudRetry); cloudRetry = setTimeout(cloudSaveSoon, wait * 1000);
+    }
+  } finally { CLOUD.saving = false; if (CLOUD.again) { CLOUD.again = false; if (!failed) cloudSaveSoon(); } }
 }
 let cloudTimer = null, cloudRetry = null;
 function cloudSaveSoon() {
   if (!CLOUD.db || CLOUD.conflict) return;
   // While the cloud copy is being read (or could not be read) nothing goes up: say that, not «Сохраняю…».
   if (CLOUD.blocked) { if (CLOUD.state !== 'error') setCloudState('loading'); return; }
-  clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, 1500);
+  // Saves are at least 5 s apart: each one is several calls, and the cloud limits how many a viewer makes.
+  clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, Math.max(1500, (CLOUD.lastStart || 0) + 5000 - Date.now()));
 }
+document.getElementById('saveState')?.addEventListener('click', () => { if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
 window.addEventListener('beforeunload', (e) => { if (CLOUD.db && (CLOUD.saving || cloudTimer && CLOUD.state === 'saving')) { e.preventDefault(); e.returnValue = ''; } });
 // Earlier revisions of a document, to roll back from the tab's menu.
 function docVersionsMenu(d, x, y) {
