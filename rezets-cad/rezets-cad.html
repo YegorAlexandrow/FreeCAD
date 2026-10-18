@@ -3882,8 +3882,10 @@ const docToStore = (d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.kind 
 const docFromStore = (o) => ({ ...o, data: o.kind === 'import' ? { ...o.data, pos: b64.dec(o.data.pos, Float32Array), nrm: o.data.nrm ? b64.dec(o.data.nrm, Float32Array) : null } : o.data });
 function setCloudState(st, note) {
   CLOUD.state = st; const el = $('saveState'); if (!el) return;
-  const txt = { local: 'В браузере', saving: 'Сохраняю…', saved: 'Сохранено', error: 'Не сохранено', conflict: 'Изменён в другом окне', offline: 'Нет связи' }[st] || st;
-  el.textContent = txt; el.dataset.state = st; el.title = note || { local: 'Облако недоступно: проект хранится только в этом браузере. Делайте резервные копии кнопкой «Сохранить…»', saved: 'Проект сохранён в облаке Claude и доступен на любом устройстве', saving: 'Идёт сохранение в облако', error: 'Последнее сохранение в облако не удалось, повторю при следующем изменении', conflict: 'Проект сохранили в другом окне или на другом устройстве. Перезагрузите страницу, чтобы не затереть те изменения', offline: 'Облако временно недоступно' }[st] || '';
+  if (st === 'saved') CLOUD.savedAt = new Date();
+  const hm = CLOUD.savedAt ? CLOUD.savedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+  const txt = { local: 'В браузере', saving: 'Сохраняю…', saved: 'Сохранено ' + hm, loading: 'Загружаю из облака…', error: 'Не сохранено', conflict: 'Изменён в другом окне', offline: 'Нет связи' }[st] || st;
+  el.textContent = txt; el.dataset.state = st === 'loading' ? 'saving' : st; el.title = note || (st !== 'saved' && CLOUD.savedAt ? `Последнее сохранение в облако: ${hm}. ` : '') + ({ local: 'Облако недоступно: проект хранится только в этом браузере. Делайте резервные копии кнопкой «Сохранить…»', saved: 'Проект сохранён в облаке Claude и доступен на любом устройстве', saving: 'Идёт сохранение в облако', error: 'Последнее сохранение в облако не удалось, повторю при следующем изменении', conflict: 'Проект сохранили в другом окне или на другом устройстве. Перезагрузите страницу, чтобы не затереть те изменения', offline: 'Облако временно недоступно, повторю сам', loading: 'Проект читается из облака; пока он не прочитан, в облако ничего не пишется' }[st] || '');
 }
 const metaRef = () => CLOUD.db.doc(`data/users/${CLOUD.uid}/project`);
 const chunkCol = () => metaRef().collection('chunks');
@@ -3898,7 +3900,7 @@ async function cloudInit() {
 }
 async function loadRev(docMeta, rev) {
   // A read can fail on a busy connection (the servo STEP files are ~130 parts each): each part is tried three times.
-  const get = async (id) => { for (let k = 0; ; k++) { try { return await chunkCol().doc(id).get(); } catch (e) { if (k >= 2) throw e; await new Promise((r) => setTimeout(r, 500 * 2 ** k)); } } };
+  const get = async (id) => { for (let k = 0; ; k++) { try { return await dbCall(chunkCol().doc(id).get()); } catch (e) { if (k >= 2) throw e; await new Promise((r) => setTimeout(r, 500 * 2 ** k)); } } };
   const parts = []; for (let i = 0; i < rev.chunks; i++) { const s = await get(`${docMeta.id}~${rev.rev}~${i}`); if (!s.exists) throw new Error('нет части ' + i); parts.push(s.data().s); }
   const json = parts.join(''); if (rev.hash && hashStr(json) !== rev.hash) throw new Error('контрольная сумма'); return JSON.parse(json);
 }
@@ -3915,34 +3917,50 @@ async function cloudLoadProject(meta) {
   if (fellBack) toast(`Часть документов восстановлена из предыдущей версии (${fellBack})`, 'warn');
   return { name: meta.name || 'Проект', active: meta.active, nid: meta.nid || 100, docs, savedAt: meta.savedAt };
 }
+// A database call that never answers would leave «Сохраняю…» up for good: each one has a time limit, and a failed
+// save is tried again by itself.
+const dbCall = (p, ms = 30000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('облако не ответило за ' + ms / 1000 + ' с'), { code: 'unavailable' })), ms))]);
+// A STEP model never changes once imported; its stored form (megabytes of base64) is built and hashed once.
+const storeCache = new WeakMap();
+function storedJson(d) {
+  if (d.kind !== 'import') { const json = JSON.stringify(docToStore(d)); return { json, hash: hashStr(json) }; }
+  const c = storeCache.get(d.data); if (c && c.name === d.name) return c;
+  const json = JSON.stringify(docToStore(d)); const v = { json, hash: hashStr(json), name: d.name }; storeCache.set(d.data, v); return v;
+}
 async function cloudSave() {
   if (!CLOUD.db || CLOUD.conflict || CLOUD.blocked) return; if (CLOUD.saving) { CLOUD.again = true; return; }
   CLOUD.saving = true; setCloudState('saving');
   try {
     // Someone saved after us (another tab or device): stop rather than overwrite their work.
-    const cur = await metaRef().get(); const curMeta = cur.exists ? cur.data() : null;
+    const cur = await dbCall(metaRef().get()); const curMeta = cur.exists ? cur.data() : null;
     if (curMeta && CLOUD.meta && curMeta.savedAt > CLOUD.meta.savedAt && curMeta.writer !== CLOUD.writer) { CLOUD.conflict = true; setCloudState('conflict'); toast('Проект изменён в другом окне. Перезагрузите страницу, иначе изменения здесь не попадут в облако', 'err'); return; }
     const prev = new Map((curMeta?.docs || []).map((d) => [d.id, d])); const docs = []; const drop = [];
     for (const d of S.project.docs) {
-      const json = JSON.stringify(docToStore(d)); const hash = hashStr(json); const old = prev.get(d.id);
+      const { json, hash } = storedJson(d); const old = prev.get(d.id);
       if (old && old.revs?.[0]?.hash === hash) { docs.push({ ...old, name: d.name, kind: d.kind }); continue; }
       const rev = Date.now().toString(36) + Math.random().toString(36).slice(2, 5); const n = Math.max(1, Math.ceil(json.length / CHUNK));
-      for (let i = 0; i < n; i++) await chunkCol().doc(`${d.id}~${rev}~${i}`).set({ s: json.slice(i * CHUNK, (i + 1) * CHUNK) });
+      for (let i = 0; i < n; i++) await dbCall(chunkCol().doc(`${d.id}~${rev}~${i}`).set({ s: json.slice(i * CHUNK, (i + 1) * CHUNK) }));
       const revs = [{ rev, chunks: n, hash, savedAt: Date.now(), size: json.length }, ...(old?.revs || [])]; for (const r of revs.slice(KEEP_REVS)) drop.push([d.id, r]);
       docs.push({ id: d.id, kind: d.kind, name: d.name, revs: revs.slice(0, KEEP_REVS) }); CLOUD.lastHash.set(d.id, hash);
     }
     for (const [id, old] of prev) if (!docs.some((d) => d.id === id)) for (const r of old.revs || []) drop.push([id, r]);
     const meta = { version: 1, name: S.project.name, active: S.project.active, nid: S.project.nid, docs, savedAt: Date.now(), writer: CLOUD.writer };
-    await metaRef().set(meta); CLOUD.meta = meta;
+    await dbCall(metaRef().set(meta)); CLOUD.meta = meta;
     for (const [id, r] of drop) for (let i = 0; i < r.chunks; i++) await chunkCol().doc(`${id}~${r.rev}~${i}`).delete().catch(() => {});
     setCloudState('saved');
   } catch (e) {
     console.warn('cloud save', e); const code = e?.code;
     if (code === 'quota_exceeded') { setCloudState('error', 'Облако переполнено: удалите ненужные документы или импорты'); toast('Облачное хранилище переполнено, проект сохранён только в браузере', 'err'); }
-    else setCloudState(code === 'unavailable' ? 'offline' : 'error');
+    else { setCloudState(code === 'unavailable' ? 'offline' : 'error', code === 'unavailable' ? `Облако не ответило, повторю через 15 с (${e.message})` : `Сохранение не удалось (${e.message || e}), повторю через 15 с`); clearTimeout(cloudRetry); cloudRetry = setTimeout(cloudSaveSoon, 15000); }
   } finally { CLOUD.saving = false; if (CLOUD.again) { CLOUD.again = false; setTimeout(cloudSave, 500); } }
 }
-let cloudTimer = null; function cloudSaveSoon() { if (!CLOUD.db || CLOUD.conflict) return; clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, 1500); }
+let cloudTimer = null, cloudRetry = null;
+function cloudSaveSoon() {
+  if (!CLOUD.db || CLOUD.conflict) return;
+  // While the cloud copy is being read (or could not be read) nothing goes up: say that, not «Сохраняю…».
+  if (CLOUD.blocked) { if (CLOUD.state !== 'error') setCloudState('loading'); return; }
+  clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, 1500);
+}
 window.addEventListener('beforeunload', (e) => { if (CLOUD.db && (CLOUD.saving || cloudTimer && CLOUD.state === 'saving')) { e.preventDefault(); e.returnValue = ''; } });
 // Earlier revisions of a document, to roll back from the tab's menu.
 function docVersionsMenu(d, x, y) {
@@ -6191,7 +6209,7 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
   // The cloud answers later (or never, outside claude.ai); the newer copy wins. Until it has answered, nothing
   // goes up to the cloud: an older browser copy must never be saved over newer work there.
   CLOUD.blocked = true;
-  const meta = await cloudInit(); if (!CLOUD.db) { setCloudState('local'); return; }
+  const meta = await cloudInit(); if (CLOUD.db && CLOUD.blocked) setCloudState('loading'); if (!CLOUD.db) { setCloudState('local'); return; }
   if (meta && (!hadLocal || (meta.savedAt || 0) > (proj.savedAt || 0))) {
     let cp = null;
     try { cp = await cloudLoadProject(meta); }
