@@ -382,6 +382,7 @@ const ICON = {
   lpattern: '<rect x="3" y="9" width="5" height="6" rx="1"/><rect x="10" y="9" width="5" height="6" rx="1" stroke-dasharray="2 1.5"/><rect x="17" y="9" width="4" height="6" rx="1" stroke-dasharray="2 1.5"/>',
   cpattern: '<circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="5" r="2"/><circle cx="18.5" cy="15.5" r="2"/><circle cx="5.5" cy="15.5" r="2"/>',
   trim: '<path d="M4 12h5M15 12h5" /><path d="M9 12h6" stroke-dasharray="1.5 2"/><path d="M12 4v4M12 16v4"/><path d="M9.5 9.5 14.5 14.5"/>',
+  convert: '<path d="M4 8l4-4h8l4 4v8l-4 4H8l-4-4z" stroke-dasharray="2 1.6"/><path d="M9 12h6M12 9v6"/>',
   sfillet: '<path d="M5 20V12a7 7 0 0 1 7-7h8"/><path d="M5 5h3M5 5v3" stroke-dasharray="1.5 2"/>',
   offset: '<path d="M4 18V8l6-4h10"/><path d="M8 20V10l4-2.5h8" stroke-dasharray="2.5 2"/>',
   mirror: '<path d="M12 3v18" stroke-dasharray="2.5 2"/><path d="M9 7 4 17h5zM15 7l5 10h-5z"/>',
@@ -1279,6 +1280,7 @@ function modelRefs(f) {
     circles: T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6).map((c) => { const [x, y] = uv(c.c); return { x, y, r: c.r }; }),
     verts: T.verts.filter(on).map(uv),
   };
+  Object.defineProperty(val, 'body', { value: cb.body, enumerable: false });
   val.mref = (kind, i) => kind === 'p' ? vertRef(cb.body, o.clone().addScaledVector(X, i[0]).addScaledVector(Y, i[1])) : circleRef(T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6)[i]);
   refCache = { key: k, val }; return val;
 }
@@ -2219,6 +2221,7 @@ function sketchDown(ev) {
   }
   if (S.tool === 'dim') { dimClick(m); return; }
   if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
+  if (S.tool === 'convert') { const r = convertFace(sk, m); if (typeof r === 'string') { toast(r, 'warn'); return; } setTool('select'); commitSketch(); toast(`Контур грани в эскизе: ${r} ${plural(r, 'линия', 'линии', 'линий')}. Выйдите из эскиза и вытяните его`, 'info'); return; }
   if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
@@ -2497,6 +2500,23 @@ function setRadii(sk, ents, r) {
   }
   if (!solveSketch(sk)) { sk.cons = JSON.parse(saved); restoreGeo(sk, before); toast(`Радиус ${fmt(r)} недостижим при текущих взаимосвязях`, 'err'); refreshSketch(); return; }
   commitSketch(); toast(`Радиус ${fmt(r)} мм: ${ents.length} ${plural(ents.length, 'дуга', 'дуги', 'дуг')}`, 'info');
+}
+// «Контур грани», like Convert Entities: the outline of the model face clicked in the sketch plane becomes sketch
+// lines (a STEP gear's teeth and its holes included), fixed where the model has them, ready to extrude.
+function convertFace(sk, m) {
+  const f = editF(); const body = S.refs?.body; if (!body) return 'Под эскизом нет тела';
+  const N = V3(f.plane.n).normalize(), X = V3(f.plane.x), Y = V3(f.plane.y); const w = toWorld(f.plane, m.u, m.v);
+  let L = null; for (const n of [N, N.clone().negate()]) { L = faceLoops(body, n, w); if (L) break; }
+  if (!L) return 'Щёлкните внутри плоской грани модели, лежащей в плоскости эскиза';
+  const o = V3(f.plane.o); const toSk = ([x, y]) => { const q = L.o.clone().addScaledVector(L.X, x).addScaledVector(L.Y, y).sub(o); return [q.dot(X), q.dot(Y)]; };
+  // Runs of nearly collinear segments (a tessellated curve's straight stretches) become one line.
+  const simplify = (pts) => { const out = []; for (const p of pts) { out.push(p); while (out.length >= 3) { const [a, b, c] = out.slice(-3); const cr = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / (Math.hypot(c[0] - a[0], c[1] - a[1]) || 1); if (cr < 1e-4) out.splice(-2, 1); else break; } } return out; };
+  let nLines = 0;
+  for (const loop of [L.outer, ...L.holes]) {
+    const pts = simplify(loop.map(toSk)); if (pts.length < 3) continue; const ids = pts.map(([x, y]) => { const id = nid(sk); sk.pts[id] = { id, x, y, fixed: true }; return id; });
+    ids.forEach((a, i) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: ids[(i + 1) % ids.length] }; nLines++; });
+  }
+  return nLines;
 }
 function detachFromModel(sk, fp) {
   const q = gp(sk, fp); const id = nid(sk); sk.pts[id] = { id, x: q.x, y: q.y };
@@ -3241,8 +3261,9 @@ function edgeTool(body, edge, kind, size) {
   const g = revolveGeometry([{ pts: sec, holes: [] }], [0, 0], [0, 1], 360);
   g.applyMatrix4(new THREE.Matrix4().makeBasis(rho, n, new THREE.Vector3().crossVectors(rho, n)).setPosition(c)); g.computeVertexNormals(); return { g, convex };
 }
-// The planar face of the body through a point, as a prism standing on it on its outer side, h high.
-function facePrism(body, n, at, h) {
+// The outline of the planar face of the body through a point: its loops in the face's own 2D axes (X, Y around
+// the point), the largest first.
+function faceLoops(body, n, at) {
   const pos = body.getAttribute('position'); const N = n.clone().normalize(); const d0 = N.dot(at); const tris = [];
   const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
   for (let i = 0; i < pos.count; i += 3) { A.fromBufferAttribute(pos, i); B.fromBufferAttribute(pos, i + 1); C.fromBufferAttribute(pos, i + 2); const nn = B.clone().sub(A).cross(C.clone().sub(A)); const l = nn.length(); if (l < 1e-12 || nn.dot(N) / l < 1 - 1e-6 || Math.abs(N.dot(A) - d0) > 1e-4) continue; tris.push(i); }
@@ -3264,8 +3285,13 @@ function facePrism(body, n, at, h) {
   const area = (l) => { let a2 = 0; for (let i = 0; i < l.length; i++) { const p = l[i], q = l[(i + 1) % l.length]; a2 += p[0] * q[1] - q[0] * p[1]; } return a2 / 2; };
   loops.sort((p, q) => Math.abs(area(q)) - Math.abs(area(p)));
   const outer = area(loops[0]) > 0 ? loops[0] : loops[0].slice().reverse(); const holes = loops.slice(1).map((l) => (area(l) < 0 ? l : l.slice().reverse()));
-  const g = extrudeGeometry([{ pts: outer, holes }], -0.01, h);
-  g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, N).setPosition(at.clone().addScaledVector(N, d0 - N.dot(at)))); g.computeVertexNormals(); return g;
+  return { outer, holes, X, Y, N, o: at.clone().addScaledVector(N, d0 - N.dot(at)) };
+}
+// That face as a prism standing on it on its outer side, h high.
+function facePrism(body, n, at, h) {
+  const L = faceLoops(body, n, at); if (!L) return null;
+  const g = extrudeGeometry([{ pts: L.outer, holes: L.holes }], -0.01, h);
+  g.applyMatrix4(new THREE.Matrix4().makeBasis(L.X, L.Y, L.N).setPosition(L.o)); g.computeVertexNormals(); return g;
 }
 // Fillets and chamfers keep their edges as coordinates. After a dimension change an edge that is gone
 // is found again: a circle of the same radius on the same axis, or a straight edge of the same direction
@@ -5529,6 +5555,7 @@ function renderTools() {
       h('div', { class: 'sep' }),
       toolBtn('Обрезать', ICON.trim, () => setTool('trim'), { pressed: S.tool === 'trim', disabled: !ed, kbd: 'T', title: 'Обрезка: щёлкните кусок, который нужно убрать (T)' }),
       toolBtn('Скругл.', ICON.sfillet, () => setTool('sfillet'), { pressed: S.tool === 'sfillet', disabled: !ed, title: 'Скругление угла эскиза' }),
+      toolBtn('Контур грани', ICON.convert, () => setTool('convert'), { pressed: S.tool === 'convert', disabled: !ed || !S.refs?.body, title: 'Перенести в эскиз контур грани модели, по которой щёлкнете (как «Преобразовать объекты»)' }),
       toolBtn('Смещение', ICON.offset, cmdOffset, { pressed: S.skOp?.kind === 'offset', disabled: !ed, title: 'Смещение выделенных объектов' }),
       toolBtn('Зеркало', ICON.mirror, cmdMirror, { disabled: !ed, title: 'Отразить выделенное относительно выделенной линии' }),
       h('div', { class: 'sep' }),
@@ -5833,6 +5860,7 @@ function setHint(text) {
     slot: S.draw?.stage === 2 ? 'Щёлкните, чтобы задать ширину паза' : S.draw?.stage === 1 ? 'Щёлкните второй центр паза' : 'Паз: щёлкните первый центр',
     polygon: S.draw?.stage === 1 ? 'Щёлкните вершину многоугольника' : 'Многоугольник: щёлкните центр',
     trim: 'Обрезка: наведите на кусок линии и щёлкните, чтобы убрать его до ближайших пересечений',
+    convert: 'Контур грани: щёлкните внутри грани модели в плоскости эскиза',
     sfillet: 'Скругление: щёлкните угол, где сходятся две линии, или место, где сходятся две окружности',
     point: 'Точка: щёлкните место', dim: 'Размер: выберите объект, затем щёлкните место для размера',
   })[S.tool] : S.mode === 'asm' ? (S.pm?.kind === 'mate' ? (S.pm.picks.length < 2 ? 'Сопряжение: щёлкните грань или цилиндр на двух разных компонентах' : 'Выберите тип сопряжения и нажмите Enter') : 'Тяните компонент мышью, Shift+тянуть: вращать. Пустое место: вращение вида')
@@ -6251,5 +6279,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
