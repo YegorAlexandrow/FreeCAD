@@ -4667,8 +4667,8 @@ function renderImportPanel() {
 // their faces and axes, solved with the same minimum-norm Gauss-Newton as sketches.
 // ============================================================================================
 const newAsm = () => ({ comps: [], mates: [], nid: 1 });
-const MATE_NAMES = { coincident: 'Совпадение', parallel: 'Параллельность', perpendicular: 'Перпендикулярность', distance: 'Расстояние', angle: 'Угол', concentric: 'Концентричность' };
-const MATE_GLYPH = { coincident: '◆', parallel: '∥', perpendicular: '⊥', distance: '↔', angle: '∠', concentric: '◎' };
+const MATE_NAMES = { coincident: 'Совпадение', parallel: 'Параллельность', perpendicular: 'Перпендикулярность', distance: 'Расстояние', angle: 'Угол', concentric: 'Концентричность', path: 'Путь', slot: 'Паз', cam: 'Кулачок' };
+const MATE_GLYPH = { coincident: '◆', parallel: '∥', perpendicular: '⊥', distance: '↔', angle: '∠', concentric: '◎', path: '⤳', slot: '⊂', cam: '◔' };
 const COMP_COLORS = ['#b9c3cf', '#c9b79b', '#9fb8a5', '#b3a7c7', '#c2a2a2', '#9eb4c9'];
 // Geometry and recognisable faces of the document a component shows.
 const infoCache = new WeakMap();
@@ -4717,10 +4717,78 @@ function docInfo0(docId) {
 // ---------------- poses and the solver ----------------
 const poseOf = (c) => { const m = new THREE.Matrix4().fromArray(c.T); const p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3(); m.decompose(p, q, s); return { t: p, q }; };
 const setPose = (c, t, q) => { c.T = new THREE.Matrix4().compose(t, q, new THREE.Vector3(1, 1, 1)).toArray(); };
-function worldEnt(e, pose) { const p = V3(e.p).applyQuaternion(pose.q).add(pose.t); const d = V3(e.d || [0, 0, 1]).applyQuaternion(pose.q); return { kind: e.kind, p, d }; }
+function worldEnt(e, pose) {
+  const W = (v) => V3(v).applyQuaternion(pose.q).add(pose.t); const p = W(e.p); const d = V3(e.d || [0, 0, 1]).applyQuaternion(pose.q);
+  const out = { kind: e.kind, p, d, r: e.r, edge: e.edge }; if (e.p2) out.p2 = W(e.p2); if (e.loop) out.loop = e.loop.map(W); return out;
+}
+// ---- Mechanical mates: path, slot, cam ----
+// A slot is two half-cylinders of one radius joined by flat walls: from one end the other end is the nearest
+// parallel cylinder of the same radius with a wall tangent to both.
+function slotPartner(inf, ent) {
+  const d = ent.d.clone().normalize(); let best = null;
+  for (const o of inf.ents) {
+    if (o === ent || o.kind !== 'axis' || Math.abs(o.r - ent.r) > 1e-3 || Math.abs(o.d.clone().normalize().dot(d)) < 1 - 1e-6) continue;
+    const s0 = o.p.clone().sub(ent.p); s0.addScaledVector(d, -s0.dot(d)); const L = s0.length(); if (L < 1e-4) continue; const u = s0.clone().divideScalar(L);
+    const wall = inf.ents.some((w) => w.kind === 'plane' && Math.abs(w.n.dot(d)) < 1e-6 && Math.abs(w.n.dot(u)) < 1e-6 && Math.abs(Math.abs(w.p.clone().sub(ent.p).dot(w.n)) - ent.r) < 1e-3);
+    if (wall && (!best || L < best.L)) best = { L, p: ent.p.clone().add(s0) };
+  }
+  return best && best.p;
+}
+// A cam's profile: the outline of the end face picked, in the part's coordinates.
+function camLoop(inf, ent) {
+  const pos = inf.geo.getAttribute('position'); const t = ent.tris[0]; const at = new THREE.Vector3(); for (let k = 0; k < 3; k++) at.add(new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k)); at.divideScalar(3);
+  const L = faceLoops(inf.geo, ent.n.clone().normalize(), at); if (!L) return null; const step = Math.max(1, Math.ceil(L.outer.length / 720));
+  return L.outer.filter((_, i) => i % step === 0).map(([x, y]) => L.o.clone().addScaledVector(L.X, x).addScaledVector(L.Y, y).toArray().map((v) => +v.toFixed(5)));
+}
+// Signed distance in the plane normal to n from a point to a closed polygon: positive outside.
+function polyDist(loop, q, n) {
+  const [u1, u2] = perpBasis(n); const P = loop.map((v) => [v.dot(u1), v.dot(u2)]); const x = q.dot(u1), y = q.dot(u2); let best = Infinity, inside = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+    const [ax, ay] = P[j], [bx, by] = P[i]; if ((ay > y) !== (by > y) && x < ax + (y - ay) * (bx - ax) / (by - ay)) inside = !inside;
+    const dx = bx - ax, dy = by - ay; const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1))); best = Math.min(best, Math.hypot(ax + t * dx - x, ay + t * dy - y));
+  }
+  return inside ? -best : best;
+}
+function mechResiduals(m, A, B) {
+  if (m.type === 'path') {
+    const pt = A.kind === 'point' ? A : B, o = pt === A ? B : A; const w = pt.p.clone().sub(o.p); const d = o.d.clone().normalize();
+    if (o.edge?.t === 'circle') { const ax = w.dot(d); return [ax, w.clone().addScaledVector(d, -ax).length() - o.r]; }
+    const [u1, u2] = perpBasis(d); return [w.dot(u1), w.dot(u2)];
+  }
+  if (m.type === 'slot') {
+    const sl = A.p2 ? A : B, pin = sl === A ? B : A; const d = sl.d.clone().normalize(); const [u1, u2] = perpBasis(d);
+    const seg = sl.p2.clone().sub(sl.p); const L = seg.length() || 1; const u = seg.clone().divideScalar(L); const nrm = new THREE.Vector3().crossVectors(d, u).normalize();
+    const q = pin.p.clone().sub(sl.p); const t = q.dot(u);
+    // The pin's axis stays in the slot's middle surface and parallel to it; past either end it is pulled back.
+    return [pin.d.dot(u1), pin.d.dot(u2), q.dot(nrm), Math.max(0, -t) + Math.max(0, t - L)];
+  }
+  if (m.type === 'cam') {
+    const cam = A.loop ? A : B, f = cam === A ? B : A; const n = cam.d.clone().normalize(); const dist = polyDist(cam.loop, f.p, n);
+    if (f.kind === 'point') return [dist];
+    const [u1, u2] = perpBasis(n); return [f.d.dot(u1), f.d.dot(u2), dist - (f.r || 0)];
+  }
+  return [];
+}
+// The extra data a mechanical mate keeps on its references (the slot's other end, the cam's outline).
+function mechRefs(type, a, b) {
+  const asm = S.doc; const infOf = (r) => docInfo(asm.comps.find((c) => c.id === r.comp)?.doc);
+  if (type === 'slot') {
+    for (const [x, y] of [[a, b], [b, a]]) { if (x.kind !== 'axis' || !x.r || x.edge) continue; const inf = infOf(x); const ent = inf?.ents[x.e]; if (!ent || ent.kind !== 'axis') continue; const p2 = slotPartner(inf, ent);
+      if (p2 && (!y.r || y.r <= x.r + 1e-6)) return [{ ...y, p2: undefined }, { ...x, p2: p2.toArray() }]; }
+    return null;
+  }
+  if (type === 'cam') {
+    const pl = a.kind === 'plane' ? a : b.kind === 'plane' ? b : null; const f = pl === a ? b : a; if (!pl || !(f.kind === 'point' || (f.kind === 'axis' && f.r && !f.edge))) return null;
+    const inf = infOf(pl); const ent = inf?.ents[pl.e]; if (!ent || ent.kind !== 'plane') return null; const loop = camLoop(inf, ent); if (!loop) return null;
+    return [f, { ...pl, loop }];
+  }
+  if (type === 'path') { const pt = a.kind === 'point' ? a : b.kind === 'point' ? b : null; const o = pt === a ? b : a; return pt && o?.edge ? [pt, o] : null; }
+  return null;
+}
 const perpBasis = (v) => { const u1 = new THREE.Vector3().crossVectors(v, Math.abs(v.x) < 0.6 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); return [u1, new THREE.Vector3().crossVectors(v, u1)]; };
 // Residuals of one mate for given world entities.
 function mateResiduals(m, A, B) {
+  if (m.type === 'path' || m.type === 'slot' || m.type === 'cam') return mechResiduals(m, A, B);
   const par = () => { const [u1, u2] = perpBasis(B.d); return [A.d.dot(u1), A.d.dot(u2)]; };
   const sep = B.p.clone().sub(A.p);
   // Vertices: on a point (3 equations), on a plane (1) or on an axis (2).
@@ -4795,7 +4863,10 @@ function checkMateRefs(asm) {
     for (const ref of [m.a, m.b]) {
       const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
       const k = refExists(ref, inf);
-      if (k >= 0) { ref.e = k; ref.n = inf.ents.length; if (ref.by === undefined) ref.by = entCreator(c, inf, k); continue; }
+      if (k >= 0) { ref.e = k; ref.n = inf.ents.length; if (ref.by === undefined) ref.by = entCreator(c, inf, k);
+        // A slot's other end and a cam's outline are taken again from the part as it is now.
+        if (ref.p2) { const q = slotPartner(inf, inf.ents[k]); if (q) ref.p2 = q.toArray(); } if (ref.loop) { const lp = camLoop(inf, inf.ents[k]); if (lp) ref.loop = lp; }
+        continue; }
       // A vertex is kept by the planes through it: they are found again and the vertex is where they meet now.
       const P0 = V3(ref.p); const through = () => inf.ents.map((x, i) => [x, i]).filter(([x]) => x.kind === 'plane' && Math.abs(x.n.dot(P0) - x.n.dot(x.p)) < 1e-4);
       if (k === -2) { if (ref.kind === 'point' && !ref.planes) ref.planes = through().map(([x, i]) => ({ n: x.n.toArray(), by: entCreator(c, inf, i) })); continue; }
@@ -5052,6 +5123,10 @@ function drawContext() {
 function cmdMate() { if (S.measure) closeMeasure(); if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; } if (S.doc.explode?.on) { S.doc.explode.on = false; toast('Разнесённый вид выключен на время сопряжений', 'info'); } S.asmSel = null; openPM({ kind: 'mate', picks: [], mate: null, before: snapPoses(S.doc) }); asmRefresh(); }
 function mateOptions(a, b) {
   if (!a || !b) return [];
+  // The mechanical ones come after the usual ones, so a plane and a cylinder still default to a plain mate.
+  const mech = ['path', 'slot', 'cam'].filter((t) => mechRefs(t, a, b)); const std = mateOptions0(a, b); return mech.includes('path') ? ['path', ...std] : [...std, ...mech];
+}
+function mateOptions0(a, b) {
   if (a.kind === 'point' || b.kind === 'point') { const o = a.kind === 'point' ? b : a; return ['coincident', 'distance']; }
   if (a.kind === 'axis' && b.kind === 'axis' && !a.r && !b.r) return ['coincident', 'parallel', 'perpendicular', 'distance', 'angle'];
   if (a.kind === 'plane' && b.kind === 'plane') return ['coincident', 'parallel', 'perpendicular', 'distance', 'angle'];
@@ -5064,7 +5139,8 @@ function previewMate() {
   const [a, b] = pm.picks; const opts = mateOptions(a, b); if (!opts.includes(pm.type)) pm.type = opts[0];
   const asm = S.doc; const A = worldEnt(a, poseOf(asm.comps.find((c) => c.id === a.comp))), B = worldEnt(b, poseOf(asm.comps.find((c) => c.id === b.comp)));
   if (pm.flip == null) pm.flip = a.kind === 'plane' && b.kind === 'plane' ? false : A.d.dot(B.d) > 0;
-  const m = { id: 'm' + asm.nid, type: pm.type, a, b, flip: pm.flip };
+  const mr = ['path', 'slot', 'cam'].includes(pm.type) ? mechRefs(pm.type, a, b) : null;
+  const m = { id: 'm' + asm.nid, type: pm.type, a: mr ? mr[0] : a, b: mr ? mr[1] : b, flip: pm.flip };
   // Distance keeps the side the parts are on now.
   if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = Math.abs(raw); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
   if (pm.type === 'angle') { if (pm.v == null) pm.v = Math.round(Math.acos(Math.min(1, Math.abs(A.d.dot(B.d)))) * 180 / Math.PI); m.v = pm.v; m.side = pm.flip ? -1 : 1; }
@@ -6324,5 +6400,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
