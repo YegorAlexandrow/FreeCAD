@@ -469,6 +469,7 @@ const CON_GLYPH = { tanpt: '⌒', horizontal: '—', vertical: '|', hpts: '—',
 // Builds the equation system of a sketch. Every equation group knows the variable indices it
 // depends on, so the Jacobian is computed locally and cheaply.
 function buildSystem(sk, opts = {}) {
+  upgradeFillets(sk);
   const idx = {}; const X = []; const owner = [];
   for (const id in sk.pts) { if (sk.pts[id].fixed) continue; idx['p' + id] = X.length; X.push(sk.pts[id].x, sk.pts[id].y); owner.push('p' + id, 'p' + id); }
   for (const id in sk.ents) { const e = sk.ents[id]; if ((e.t === 'circle' || e.t === 'arc' || e.t === 'ellipse') && !e.ext) { idx['r' + id] = X.length; X.push(e.r); owner.push('r' + id); } }
@@ -517,6 +518,11 @@ function buildSystem(sk, opts = {}) {
         add(cid, [o, q, cc], (x) => { const O = o.g(x), Q2 = q.g(x), C = cc.g(x); const ux = O[0] - C[0], uy = O[1] - C[1]; return [C[0] + ux * cs - uy * sn - Q2[0], C[1] + ux * sn + uy * cs - Q2[1]]; }, 2); break;
       }
       case 'tanpt': {
+        if (ge(sk, r[1]).t === 'line') {
+          // On a line: the point is the foot of the perpendicular from the arc's centre.
+          const p = P(r[0]); const [a, b] = L(r[1]); const ca = P(ge(sk, r[2]).c);
+          add(cid, [p, a, b, ca], (x) => { const A = a.g(x), u = dir(A, b.g(x)), T = p.g(x), C = ca.g(x); return [cross(u, dir(A, T)) / len(u), dot(u, dir(C, T)) / len(u)]; }, 2); break;
+        }
         const p = P(r[0]); const e = ge(sk, r[1]); const cc = P(e.c), rr = R(r[1]); const ca = P(ge(sk, r[2]).c);
         add(cid, [p, cc, rr, ca], (x) => { const T = p.g(x), C0 = cc.g(x), A = ca.g(x); const u = [T[0] - C0[0], T[1] - C0[1]], w = [A[0] - C0[0], A[1] - C0[1]]; return [Math.hypot(u[0], u[1]) - rr.g(x), (u[0] * w[1] - u[1] * w[0]) / (Math.hypot(w[0], w[1]) || 1)]; }, 2); break;
       }
@@ -640,14 +646,21 @@ function solveSystem(sys, X, weights, tol = 1e-10) {
   const n = X.length; if (!sys.eqs.length) return true;
   const D = new Float64Array(n).fill(1); if (weights) for (const [i, w] of weights) D[i] = w;
   let F = residual(sys, X);
-  for (let it = 0; it < 60; it++) {
+  // Redundant equations (tangencies that also follow from other relations, a line of zero length) make the normal
+  // matrix nearly singular, and the plain step then overshoots so far that no line search saves it. When a step does
+  // not help, the damping grows a hundredfold and the same point is tried again (Levenberg-Marquardt).
+  // Rows that repeat others (a tangency also held by a touching point) are left out of the step: their combination
+  // with the rest is singular, and the solve then returns noise. They are still checked in the residual.
+  let damp = 1e-11, J = null, A0 = null, tr = 0, keep = null;
+  for (let it = 0; it < 80; it++) {
     const err = maxAbs(F); if (err < tol) break;
-    const J = jacobian(sys, X).map((r) => r.row); const m = J.length;
-    const A = Array.from({ length: m }, () => new Float64Array(m)); let tr = 0;
-    for (let i = 0; i < m; i++) for (let j = i; j < m; j++) { let s = 0; const a = J[i], b = J[j]; for (let k = 0; k < n; k++) if (a[k] && b[k]) s += a[k] * D[k] * b[k]; A[i][j] = A[j][i] = s; if (i === j) tr += s; }
-    const mu = 1e-11 * (tr / Math.max(m, 1) + 1e-9); for (let i = 0; i < m; i++) A[i][i] += mu;
-    const y = solveLinear(A.map((r) => Array.from(r)), F.map((v) => -v));
-    const dx = new Float64Array(n); for (let i = 0; i < m; i++) if (y[i]) for (let k = 0; k < n; k++) if (J[i][k]) dx[k] += D[k] * J[i][k] * y[i];
+    if (!J) {
+      const rows = jacobian(sys, X); const dep = new Set(eliminate(rows, n, 1e-9).dependent.map((d) => d.ri)); keep = rows.map((_, i) => i).filter((i) => !dep.has(i)); J = keep.map((i) => rows[i].row); A0 = Array.from({ length: J.length }, () => new Float64Array(J.length)); tr = 0;
+      for (let i = 0; i < J.length; i++) for (let j = i; j < J.length; j++) { let s = 0; const a = J[i], b = J[j]; for (let k = 0; k < n; k++) if (a[k] && b[k]) s += a[k] * D[k] * b[k]; A0[i][j] = A0[j][i] = s; if (i === j) tr += s; }
+    }
+    const mJ = J.length; const mu = damp * (tr / Math.max(mJ, 1) + 1e-9); const A = A0.map((r) => Array.from(r)); for (let i = 0; i < mJ; i++) A[i][i] += mu;
+    const y = solveLinear(A, keep.map((i) => -F[i]));
+    const dx = new Float64Array(n); for (let i = 0; i < mJ; i++) if (y[i]) for (let k = 0; k < n; k++) if (J[i][k]) dx[k] += D[k] * J[i][k] * y[i];
     let step = 1, improved = false; const X0 = Float64Array.from(X);
     for (let ls = 0; ls < 8; ls++) {
       for (let k = 0; k < n; k++) X[k] = X0[k] + step * dx[k];
@@ -655,7 +668,8 @@ function solveSystem(sys, X, weights, tol = 1e-10) {
       if (maxAbs(F2) < err || ls === 7) { F = F2; improved = maxAbs(F2) < err; break; }
       step *= 0.5;
     }
-    if (!improved && maxAbs(F) >= err) { X.set(X0); F = residual(sys, X); break; }
+    if (!improved && maxAbs(F) >= err) { X.set(X0); F = residual(sys, X); if (damp >= 1e-1) break; damp *= 100; continue; }
+    J = null; damp = Math.max(1e-11, damp / 10);
   }
   return maxAbs(F) < 1e-6;
 }
@@ -690,6 +704,23 @@ function upgradeFillets(sk) {
       // Only a fillet: the curve's other arc along a wall (same centre as the wall) is not one.
       if (Object.values(sk.ents).some((w) => w.id !== e.id && w.c === e.c)) continue;
       on.t = 'tanpt'; on.refs = [end, on.refs[1], e.id];
+    }
+  }
+  // Any arc whose end is only "on" a line or circle that it touches tangentially: a point on a curve at the arc's
+  // radius from a centre already at that distance is a double root, and the solver crawls there (nothing can be
+  // dragged, every dimension is refused). The end is made the touching point instead, which is the same place.
+  const scale = Math.max(1, ...Object.values(sk.pts).map((q) => Math.max(Math.abs(q.x), Math.abs(q.y))));
+  for (const e of Object.values(sk.ents)) {
+    if (e.t !== 'arc' || e.ext) continue; const C = gp(sk, e.c); if (!C) continue;
+    for (const end of [e.p1, e.p2]) {
+      if (Object.values(sk.cons).some((k) => k.t === 'tanpt' && k.refs[0] === end)) continue;
+      const on = Object.values(sk.cons).find((k) => (k.t === 'online' || k.t === 'oncircle') && k.refs[0] === end && sk.ents[k.refs[1]] && k.refs[1] !== e.id); if (!on) continue;
+      const w = sk.ents[on.refs[1]]; if (w.p1 === end || w.p2 === end || (w.c && w.c === e.c)) continue;
+      let gap;
+      if (w.t === 'line') { const A = gp(sk, w.p1), B = gp(sk, w.p2); const L2 = Math.hypot(B.x - A.x, B.y - A.y); if (L2 < 1e-9) continue; gap = Math.abs(Math.abs(((B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x)) / L2) - e.r); }
+      else if (w.t === 'circle' || w.t === 'arc') { const W = gp(sk, w.c); const d = Math.hypot(W.x - C.x, W.y - C.y); gap = Math.min(Math.abs(d - (w.r + e.r)), Math.abs(d - Math.abs(w.r - e.r))); }
+      else continue;
+      if (gap < 1e-7 * scale) { on.t = 'tanpt'; on.refs = [end, on.refs[1], e.id]; }
     }
   }
 }
@@ -2057,6 +2088,10 @@ function layoutOverlay() {
   overlay.textContent = ''; const f = editF();
   if (f) {
     const sk = f.sk;
+    // A glyph over a point would take the click meant for the point (it could then be neither dragged nor
+    // dimensioned): each glyph goes to the first corner around its anchor with no point under it.
+    const ptsOnScreen = [...Object.keys(sk.pts), 'O'].map((id) => { const q = gp(sk, id); return q && sScreen(q.x, q.y); }).filter(Boolean);
+    const clear = (x, y) => ptsOnScreen.every((q) => Math.abs(q.x - x) > 13 || Math.abs(q.y - y) > 13);
     for (const c of Object.values(sk.cons)) {
       if (DIM_TYPES.has(c.t)) {
         const g = dimGeometry(sk, c); const s = sScreen(g.label.x, g.label.y);
@@ -2067,7 +2102,9 @@ function layoutOverlay() {
       } else if (S.showRel !== false && CON_GLYPH[c.t]) {
         const at = glyphAnchor(sk, c); if (!at) continue; const s = sScreen(at.x, at.y);
         const stack = (glyphAnchor.count[at.key] = (glyphAnchor.count[at.key] || 0) + 1) - 1;
-        const el = h('div', { class: 'glyph' + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${s.x + 12 + stack * 19}px;top:${s.y - 12}px`, title: CON_NAMES[c.t] }, CON_GLYPH[c.t]);
+        const spots = [[12, -12], [12, 12], [-12, -12], [-12, 12], [26, -26], [26, 26], [-26, -26], [-26, 26]].map(([dx, dy]) => [s.x + Math.sign(dx) * stack * 19 + dx, s.y + dy]);
+        const [gx, gy] = spots.find(([x, y]) => clear(x, y)) || spots[0];
+        const el = h('div', { class: 'glyph' + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${gx}px;top:${gy}px`, title: CON_NAMES[c.t] }, CON_GLYPH[c.t]);
         el.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); if (!ev.shiftKey && !ev.ctrlKey) S.sel.clear(); S.sel.add('c:' + c.id); refreshSketch(); });
         overlay.append(el);
       }
@@ -2607,6 +2644,42 @@ function detachFromModel(sk, fp) {
   for (const e of Object.values(sk.ents)) { if (e.ext) continue; for (const k of ['p1', 'p2', 'c']) if (e[k] === fp) e[k] = id; if (e.pts) e.pts = e.pts.map((q) => (q === fp ? id : q)); }
   S.sel.clear(); S.sel.add('p:' + id); commitSketch(); toast(fp === 'O' ? 'Точка отвязана от исходной точки: теперь её можно двигать и задать размерами' : 'Точка отвязана от модели: теперь её можно двигать и задать размерами', 'info');
 }
+// A line that dimensions squeezed to a point (both ends at the same height, say) has no direction, yet its
+// vertical, tangent and offset relations still lean on one: the solver can then satisfy nothing, and the whole
+// sketch stops moving and refuses every dimension. Such a line is removed and its ends merged; a line offset
+// from it keeps its distance as a distance to the merged point. Returns how many lines went.
+function collapseZeroLines(sk) {
+  const scale = Math.max(1, ...Object.values(sk.pts).map((q) => Math.max(Math.abs(q.x), Math.abs(q.y)))); let n = 0;
+  for (const e of Object.values(sk.ents)) {
+    if (e.t !== 'line' || e.ext || !sk.ents[e.id]) continue; const A = gp(sk, e.p1), B = gp(sk, e.p2); if (!A || !B || Math.hypot(B.x - A.x, B.y - A.y) > 1e-5 * scale) continue;
+    const keep = e.p1, gone = e.p2; if (sk.pts[gone]?.fixed || isRefPt(gone) || isRefPt(keep)) continue;
+    if (Object.values(sk.ents).some((w) => w.id !== e.id && [w.p1, w.p2].includes(keep) && [w.p1, w.p2].includes(gone))) continue;
+    for (const c of Object.values(sk.cons)) {
+      if (!c.refs.includes(e.id)) continue;
+      if (c.t === 'offset' && c.refs[1] === e.id && sk.ents[c.refs[0]]?.t === 'line') {
+        const con = { id: c.id, t: 'pldist', refs: [keep, c.refs[0]], pos: c.pos }; con.v = measure(sk, con); delete sk.cons[c.id]; if (con.v > 1e-9) { initSigns(sk, con); sk.cons[c.id] = con; } continue;
+      }
+      delete sk.cons[c.id];
+    }
+    delete sk.ents[e.id];
+    const sub = (v) => (v === gone ? keep : v);
+    for (const w of Object.values(sk.ents)) { for (const k of ['p1', 'p2', 'c']) if (w[k]) w[k] = sub(w[k]); if (w.pts) w.pts = w.pts.map(sub); }
+    for (const c of Object.values(sk.cons)) { c.refs = c.refs.map(sub); for (const k of ['e1', 'e2', 'c1', 'c2']) if (c[k]) c[k] = sub(c[k]); }
+    delete sk.pts[gone];
+    // Relations the merge made empty (a point with itself) or doubled (the same height set on both ends) go too.
+    const seen = new Set();
+    for (const c of Object.values(sk.cons)) {
+      if (['coincident', 'dist', 'hpts', 'vpts'].includes(c.t) && c.refs[0] === c.refs[1]) { delete sk.cons[c.id]; continue; }
+      const key = JSON.stringify([c.t, c.refs, c.v ?? null]); if (seen.has(key)) delete sk.cons[c.id]; else seen.add(key);
+    }
+    n++;
+  }
+  return n;
+}
+function cleanZeroLines(sk) {
+  const n = collapseZeroLines(sk); if (n) toast(n === 1 ? 'Линия нулевой длины убрана, её концы слиты: из-за неё эскиз не решался' : `Линии нулевой длины убраны (${n}), их концы слиты: из-за них эскиз не решался`, 'info', [{ label: 'Отменить', act: undo }]);
+  return n;
+}
 function deleteSelection() {
   const sk = editSk(); if (!sk || !S.sel.size) return;
   const delEnts = new Set(), delPts = new Set(), delCons = new Set();
@@ -3037,7 +3110,7 @@ function startSketch(plane, existing) {
   }
   S.editing = f.id; S.editBackup = JSON.stringify(f.sk); S.refs = modelRefs(f); S.sel.clear(); S.conflict = new Set(); S.selectedTree = null; showFaceHover(null);
   setTab('sketch'); setTool(existing ? 'select' : 'line');
-  solveSketch(f.sk); analyze(); rebuild(); renderSide(); renderCorner(); pushUndo();
+  if (cleanZeroLines(f.sk)) pushUndo(); solveSketch(f.sk); analyze(); rebuild(); renderSide(); renderCorner(); pushUndo();
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
 function exitSketch() {
@@ -6357,7 +6430,7 @@ function updateSketchVisuals() {
   updateRelBar(); requestRender();
 }
 function refreshSketch(keepDraw) { if (!keepDraw && S.tool !== 'select' && S.tool !== 'dim') { /* keep tool */ } analyze(); updateSketchVisuals(); renderSide(); setHint(); }
-function commitSketch(keepDraw, merge) { const sk = editSk(); if (sk) solveSketch(sk); analyze(); updateSketchVisuals(); renderSide(); setHint(); pushUndo(merge); void keepDraw; }
+function commitSketch(keepDraw, merge) { const sk = editSk(); if (sk) { if (cleanZeroLines(sk)) pushUndo(merge); solveSketch(sk); } analyze(); updateSketchVisuals(); renderSide(); setHint(); pushUndo(merge); void keepDraw; }
 function refreshAll() { updateBodyMesh(); updateSketchVisuals(); drawRegions(); renderSide(); renderTools(); renderCorner(); setHint(); requestRender(); }
 function state() { return S.mode === 'import' ? null : JSON.stringify({ doc: S.doc, editing: S.editing }); }
 let lastSaved = null;
@@ -6644,5 +6717,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
