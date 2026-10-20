@@ -4812,13 +4812,14 @@ function renderImportPanel() {
   const apply = (k) => { scaleImport(ent, k); rebuild(); fitView(); saveProjectSoon(); renderImportPanel(); toast(`Масштаб ×${fmt(k, 4)}`, 'info', [{ label: 'Отменить', act: () => { scaleImport(ent, 1 / k); rebuild(); fitView(); saveProjectSoon(); renderImportPanel(); } }]); };
   const kIn = h('input', { type: 'text', value: '2', style: 'width:70px', onkeydown: (e) => { if (e.key === 'Enter') go(); } });
   const go = () => { const k = evalWith(kIn.value.replace(',', '.'), {}); if (!(k > 0)) { toast('Множитель должен быть больше нуля', 'warn'); return; } apply(k); };
-  const sz = importSize(ent).map((v) => fmt(v, 2)).join(' × ');
+  const dims = importSize(ent);
   side.append(h('div', { class: 'sec-h' }, h('span', {}, ent.name), h('span', { class: 'meta' }, d.nrm ? 'STEP' : 'STL')),
     h('div', { class: 'grp' }, h('div', { class: 'note' }, `Импортированное тело без истории: ${d.faces.length} граней, из них ${d.cyls.length} цилиндрических. Рулетка (M) работает по его рёбрам и окружностям.`),
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!d.zup, onchange: (e) => { setImportUp(d, e.target.checked); rebuild(); fitView(); saveProjectSoon(); } }), 'В файле ось Z направлена вверх'),
       h('button', { class: 'ghost-btn', onclick: () => { const a = addDoc('asm', 'Сборка', newAsm()); asmInsert(ent.id); void a; } }, 'Вставить в новую сборку')),
     h('div', { class: 'sec-h' }, h('span', {}, 'Масштаб'), h('span', { class: 'meta' }, d.scale && d.scale !== 1 ? `×${fmt(d.scale, 4)} от файла` : '')),
-    h('div', { class: 'grp' }, h('div', { class: 'note' }, `Габарит ${sz} мм`),
+    h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Габарит, мм. Введите нужный размер по любой оси: тело масштабируется целиком, пропорции сохраняются'),
+      h('div', { class: 'chips', style: 'align-items:center' }, ...dims.map((v, i) => { const inp = h('input', { type: 'text', value: fmt(v, 3), style: 'width:64px', title: `Размер по ${'XYZ'[i]}`, onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); }, onchange: (e) => { const t = evalWith(e.target.value.replace(',', '.'), {}); if (!(t > 0) || !(v > 0)) { toast('Размер должен быть больше нуля', 'warn'); e.target.value = fmt(v, 3); return; } apply(t / v); } }); return [h('span', { class: 'note' }, 'XYZ'[i]), inp]; }).flat()),
       h('div', { class: 'chips', style: 'align-items:center' }, h('span', { class: 'note' }, 'Умножить на'), kIn, h('button', { class: 'chip', onclick: go }, 'Применить')),
       h('div', { class: 'chips' }, ...[['дюймы → мм', 25.4], ['см → мм', 10], ['м → мм', 1000], ['×0.1', 0.1]].map(([t, k]) => h('button', { class: 'chip', onclick: () => apply(k) }, t))),
       d.scale && d.scale !== 1 ? h('button', { class: 'ghost-btn', onclick: () => apply(1 / d.scale) }, 'Вернуть размер из файла') : null));
