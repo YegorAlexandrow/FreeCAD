@@ -6482,8 +6482,54 @@ function zipFiles(files) {
   const cdSize = central.reduce((s, x) => s + x.length, 0); const end = new DataView(new ArrayBuffer(22)); end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, cdSize, true); end.setUint32(16, off, true);
   return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
 }
+// Edges a slicer calls non-manifold: after welding vertices, an edge not shared by exactly one pair of opposite triangles.
+function badEdges(g) {
+  const pos = g.getAttribute('position'); const ids = new Map(); const q = 1e5; const vid = (i) => { const k = Math.round(pos.getX(i) * q) + ',' + Math.round(pos.getY(i) * q) + ',' + Math.round(pos.getZ(i) * q); let id = ids.get(k); if (id === undefined) { id = ids.size; ids.set(k, id); } return id; };
+  const cnt = new Map(); for (let t = 0; t < pos.count; t += 3) { const v = [vid(t), vid(t + 1), vid(t + 2)]; if (v[0] === v[1] || v[1] === v[2] || v[0] === v[2]) continue; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const k = a < b ? a + ',' + b : b + ',' + a; const c = cnt.get(k) || [0, 0]; c[a < b ? 0 : 1]++; cnt.set(k, c); } }
+  let bad = 0; for (const [, c] of cnt) if (c[0] !== 1 || c[1] !== 1) bad++; return bad;
+}
+// A body that came out of the fallback CSG (or an imported mesh) can have cracks and T-junctions that a slicer
+// reports as non-manifold. Before saving it is welded and passed through Manifold; failing that, the cracks are
+// closed first. Whatever cannot be fixed is said, with the number of edges, instead of saved silently.
+// A vertex lying inside another triangle's edge (a T-junction) leaves that edge without a twin. Each such triangle is
+// cut into a fan around its centre through the vertices on its edges, which is never degenerate.
+function splitTJunctions(g) {
+  const pos = g.getAttribute('position'); const q = 1e5; const P = []; const ids = new Map();
+  const vid = (i) => { const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i); const k = Math.round(x * q) + ',' + Math.round(y * q) + ',' + Math.round(z * q); let id = ids.get(k); if (id === undefined) { id = P.length; ids.set(k, id); P.push(new THREE.Vector3(x, y, z)); } return id; };
+  const tris = []; for (let t = 0; t < pos.count; t += 3) tris.push([vid(t), vid(t + 1), vid(t + 2)]);
+  const cnt = new Map(); for (const v of tris) for (let e = 0; e < 3; e++) { const k = v[e] + '>' + v[(e + 1) % 3]; cnt.set(k, (cnt.get(k) || 0) + 1); }
+  const lone = new Set(); for (const v of tris) for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; if (!cnt.get(b + '>' + a)) { lone.add(a); lone.add(b); } }
+  if (!lone.size) return g;
+  const cell = 0.5; const grid = new Map(); const gk = (x, y, z) => x + ',' + y + ',' + z;
+  for (const v of lone) { const p = P[v]; const k = gk(Math.floor(p.x / cell), Math.floor(p.y / cell), Math.floor(p.z / cell)); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(v); }
+  const seg = new THREE.Line3(), tmp = new THREE.Vector3(); const out = []; let changed = false;
+  const push = (...vs) => { for (const v of vs) out.push(v.x, v.y, v.z); };
+  for (const v of tris) {
+    const ring = [];
+    for (let e = 0; e < 3; e++) {
+      const a = v[e], b = v[(e + 1) % 3]; ring.push(a); if (cnt.get(b + '>' + a)) continue;
+      const A = P[a], B = P[b]; const lo = A.clone().min(B), hi = A.clone().max(B); if ((hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z) / cell ** 3 > 1e5) continue; seg.set(A, B); const on = [];
+      for (let x = Math.floor(lo.x / cell); x <= Math.floor(hi.x / cell); x++) for (let y = Math.floor(lo.y / cell); y <= Math.floor(hi.y / cell); y++) for (let z = Math.floor(lo.z / cell); z <= Math.floor(hi.z / cell); z++) for (const w of grid.get(gk(x, y, z)) || []) {
+        if (w === a || w === b) continue; const t = seg.closestPointToPointParameter(P[w], true); if (t <= 1e-9 || t >= 1 - 1e-9) continue; seg.at(t, tmp); if (tmp.distanceToSquared(P[w]) < 1e-10) on.push([t, w]); }
+      on.sort((x, y) => x[0] - y[0]); for (const [, w] of on) ring.push(w);
+    }
+    if (ring.length === 3) { push(P[v[0]], P[v[1]], P[v[2]]); continue; }
+    changed = true; const c = P[v[0]].clone().add(P[v[1]]).add(P[v[2]]).divideScalar(3);
+    for (let i = 0; i < ring.length; i++) push(c, P[ring[i]], P[ring[(i + 1) % ring.length]]);
+  }
+  if (!changed) return g;
+  const r = new THREE.BufferGeometry(); r.setAttribute('position', new THREE.BufferAttribute(new Float32Array(out), 3)); r.computeVertexNormals(); return r;
+}
+function watertight(g) {
+  if (!badEdges(g)) return { geo: g, bad: 0 };
+  const viaMf = (x) => { if (!MF) return null; let m; try { m = toManifold(x); const r = fromManifold(m); return r.getAttribute('position').count && !badEdges(r) ? r : null; } catch { return null; } finally { m?.delete(); } };
+  const r = viaMf(g) || (() => { let c = splitTJunctions(g); if (!badEdges(c)) return c; c = closeCracks(cleanGeo(c)); return badEdges(c) ? viaMf(c) || c : c; })();
+  return { geo: r, bad: badEdges(r) };
+}
 async function saveStl(list, zipName) {
-  const blob = zipFiles(list.map((x) => ({ name: x.name + '.stl', data: stlBinary(x.geo) })));
+  const fixed = list.map((x) => ({ ...x, ...watertight(x.geo) })); const bad = fixed.reduce((s, x) => s + x.bad, 0);
+  if (bad) toast(`В STL остались незамкнутые рёбра (${bad}): слайсер предложит починку. Пришлите проект, разберёмся, откуда они`, 'warn');
+  const blob = zipFiles(fixed.map((x) => ({ name: x.name + '.stl', data: stlBinary(x.geo) })));
   if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: zipName + '.zip', data: blob }); return true; } catch (e) { if (e?.code === 'declined') return false; console.warn('download', e); } }
   // Outside claude.ai (the local server or a plain file) the browser saves it directly.
   const a = h('a', { href: URL.createObjectURL(blob), download: zipName + '.zip' }); document.body.append(a); a.click(); a.remove(); return true;
@@ -6598,5 +6644,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
