@@ -711,7 +711,7 @@ function upgradeFillets(sk) {
   // dragged, every dimension is refused). The end is made the touching point instead, which is the same place.
   const scale = Math.max(1, ...Object.values(sk.pts).map((q) => Math.max(Math.abs(q.x), Math.abs(q.y))));
   for (const e of Object.values(sk.ents)) {
-    if (e.t !== 'arc' || e.ext) continue; const C = gp(sk, e.c); if (!C) continue;
+    if (e.t !== 'arc' || e.ext || e.snap) continue; const C = gp(sk, e.c); if (!C) continue;
     for (const end of [e.p1, e.p2]) {
       if (Object.values(sk.cons).some((k) => k.t === 'tanpt' && k.refs[0] === end)) continue;
       const on = Object.values(sk.cons).find((k) => (k.t === 'online' || k.t === 'oncircle') && k.refs[0] === end && sk.ents[k.refs[1]] && k.refs[1] !== e.id); if (!on) continue;
