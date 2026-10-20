@@ -458,7 +458,7 @@ const isCurve = (e) => e.t === 'spline' || e.t === 'ellipse';
 const DIM_TYPES = new Set(['dist', 'dx', 'dy', 'pldist', 'rad', 'diam', 'angle', 'offd', 'rgap', 'emaj', 'eoff']);
 const CON_NAMES = {
   coincident: 'Совпадение', horizontal: 'Горизонтальность', vertical: 'Вертикальность', hpts: 'Горизонтальность точек', vpts: 'Вертикальность точек',
-  online: 'Точка на прямой', oncircle: 'Точка на окружности', tanpt: 'Касание', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
+  online: 'Точка на прямой', oncircle: 'Точка на окружности', tanpt: 'Касание', patpt: 'Массив', midpoint: 'Середина', parallel: 'Параллельность', perpendicular: 'Перпендикулярность',
   equal: 'Равенство', tangent: 'Касание', concentric: 'Концентричность', fix: 'Фиксация', collinear: 'Коллинеарность',
   symmetric: 'Симметрия', offset: 'Смещение', offd: 'Смещение', rgap: 'Зазор',
   dist: 'Расстояние', dx: 'Расстояние по X', dy: 'Расстояние по Y', pldist: 'Расстояние до прямой', rad: 'Радиус', diam: 'Диаметр', angle: 'Угол', emaj: 'Большая ось', eoff: 'Смещение',
@@ -509,6 +509,13 @@ function buildSystem(sk, opts = {}) {
       case 'collinear': { const [a, b] = L(r[0]); const [m, n] = L(r[1]); add(cid, [a, b, m, n], (x) => { const A = a.g(x), B = b.g(x), M = m.g(x), N = n.g(x); const u = dir(A, B); return [cross(u, dir(A, M)) / len(u), cross(u, dir(A, N)) / len(u)]; }, 2); break; }
       // A fillet's end on a curve it touches: on that curve, and in line with both centres. Plain "on the curve"
       // plus tangency is singular there (the curves meet in a double point) and reads as redundant.
+      // A copy in a sketch pattern: the original point moved i steps (linear) or turned i steps about the centre.
+      case 'patpt': {
+        const pt = (sk.pats || {})[c.pat]; if (!pt) break; const o = P(r[0]), q = P(r[1]); const i = c.i;
+        if (pt.kind === 'lin') { add(cid, [o, q], (x) => { const O = o.g(x), Q2 = q.g(x); return [O[0] + i * pt.dx - Q2[0], O[1] + i * pt.dy - Q2[1]]; }, 2); break; }
+        const cc = P(pt.c || 'O'); const step = (pt.ang >= 360 - 1e-9 ? 360 / pt.n : pt.ang / Math.max(1, pt.n - 1)) * i * Math.PI / 180; const cs = Math.cos(step), sn = Math.sin(step);
+        add(cid, [o, q, cc], (x) => { const O = o.g(x), Q2 = q.g(x), C = cc.g(x); const ux = O[0] - C[0], uy = O[1] - C[1]; return [C[0] + ux * cs - uy * sn - Q2[0], C[1] + ux * sn + uy * cs - Q2[1]]; }, 2); break;
+      }
       case 'tanpt': {
         const p = P(r[0]); const e = ge(sk, r[1]); const cc = P(e.c), rr = R(r[1]); const ca = P(ge(sk, r[2]).c);
         add(cid, [p, cc, rr, ca], (x) => { const T = p.g(x), C0 = cc.g(x), A = ca.g(x); const u = [T[0] - C0[0], T[1] - C0[1]], w = [A[0] - C0[0], A[1] - C0[1]]; return [Math.hypot(u[0], u[1]) - rr.g(x), (u[0] * w[1] - u[1] * w[0]) / (Math.hypot(w[0], w[1]) || 1)]; }, 2); break;
@@ -2537,6 +2544,64 @@ function convertFace(sk, m) {
   }
   return nLines;
 }
+// ---- Sketch patterns ----
+// A pattern keeps its settings in sk.pats; its copies (points, curves, relations) carry its id and are rebuilt
+// whenever the count or the step changes.
+function patXform(sk, pt, i) {
+  if (pt.kind === 'lin') return (q) => ({ x: q.x + i * pt.dx, y: q.y + i * pt.dy });
+  const c = gp(sk, pt.c || 'O'); const a = (pt.ang >= 360 - 1e-9 ? 360 / pt.n : pt.ang / Math.max(1, pt.n - 1)) * i * Math.PI / 180; const cs = Math.cos(a), sn = Math.sin(a);
+  return (q) => ({ x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn, y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs });
+}
+function buildPattern(sk, pt) {
+  const src = pt.src.map((id) => sk.ents[id]).filter(Boolean);
+  for (let i = 1; i < pt.n; i++) {
+    const T = patXform(sk, pt, i); const map = new Map();
+    const mp = (id) => { if (map.has(id)) return map.get(id); if (pt.kind === 'circ' && id === (pt.c || 'O')) { map.set(id, id); return id; } const q = T(gp(sk, id)); const nidv = nid(sk); sk.pts[nidv] = { id: nidv, x: q.x, y: q.y, pat: pt.id }; const k = nid(sk); sk.cons[k] = { id: k, t: 'patpt', refs: [id, nidv], pat: pt.id, i }; map.set(id, nidv); return nidv; };
+    for (const e of src) {
+      const id = nid(sk); let ne;
+      if (e.t === 'line') ne = { id, t: 'line', p1: mp(e.p1), p2: mp(e.p2) };
+      else if (e.t === 'circle') ne = { id, t: 'circle', c: mp(e.c), r: e.r };
+      else if (e.t === 'arc') ne = { id, t: 'arc', c: mp(e.c), p1: mp(e.p1), p2: mp(e.p2), r: e.r };
+      else if (e.t === 'ellipse') ne = { id, t: 'ellipse', c: mp(e.c), p1: mp(e.p1), r: e.r };
+      else if (e.t === 'spline') { const pts = e.pts.map(mp); ne = { id, t: 'spline', pts, p1: pts[0], p2: pts[pts.length - 1], closed: e.closed }; }
+      else continue;
+      if (e.constr) ne.constr = true; ne.pat = pt.id; sk.ents[id] = ne;
+      if (ne.r != null) { const k = nid(sk); sk.cons[k] = { id: k, t: 'equal', refs: [e.id, id], pat: pt.id }; }
+    }
+  }
+}
+function clearPattern(sk, pt) {
+  for (const [id, c] of Object.entries(sk.cons)) if (c.pat === pt.id) delete sk.cons[id];
+  for (const [id, e] of Object.entries(sk.ents)) if (e.pat === pt.id) delete sk.ents[id];
+  for (const [id, q] of Object.entries(sk.pts)) if (q.pat === pt.id) delete sk.pts[id];
+}
+function makePattern(sk, ids, opt) {
+  sk.pats = sk.pats || {}; const id = 'pat' + nid(sk); const pt = { id, kind: opt.kind, n: Math.max(2, Math.round(opt.n)), dx: opt.dx, dy: opt.dy, ang: opt.ang, c: opt.c || 'O', src: ids.filter((x) => sk.ents[x] && !sk.ents[x].ext) };
+  if (!pt.src.length) return 'Выделите линии, дуги или окружности'; sk.pats[id] = pt; buildPattern(sk, pt); solveSketch(sk); return pt;
+}
+function updatePattern(sk, pt, ch) { Object.assign(pt, ch); pt.n = Math.max(2, Math.round(pt.n)); clearPattern(sk, pt); buildPattern(sk, pt); solveSketch(sk); commitSketch(); }
+function patternOf(sk, ids) { for (const id of ids) { const e = sk.ents[id]; if (!e) continue; if (e.pat && sk.pats?.[e.pat]) return sk.pats[e.pat]; const p2 = Object.values(sk.pats || {}).find((q) => q.src.includes(id)); if (p2) return p2; } return null; }
+function cmdSkPattern() {
+  const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)] && !sk.ents[k.slice(2)].ext).map((k) => k.slice(2));
+  if (!ids.length) { toast('Выделите линии, дуги или окружности, затем нажмите «Массив»', 'info'); return; }
+  const cp = [...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2))[0];
+  S.skOp = { kind: 'pattern', ids, opt: { kind: 'lin', n: 3, dx: 10, dy: 0, ang: 360, c: cp || 'O' } }; renderSide(); previewPattern();
+}
+function previewPattern() {
+  const op = S.skOp; if (op?.kind !== 'pattern') return; const sk = editSk(); const pt = { ...op.opt, n: Math.max(2, Math.round(op.opt.n)) }; const segs = [];
+  for (let i = 1; i < pt.n; i++) { const T = patXform(sk, pt, i); for (const id of op.ids) { const e = sk.ents[id]; if (!e) continue; const P = e.t === 'line' ? [gp(sk, e.p1), gp(sk, e.p2)] : curvePts(sk, e, 48); const Q = P.map(T); for (let k = 0; k + 1 < Q.length; k++) segs.push([Q[k].x, Q[k].y, Q[k + 1].x, Q[k + 1].y]); } }
+  S.draw = { stage: 0, preview: segs }; updateSketchVisuals();
+}
+function okPattern() { const op = S.skOp; S.skOp = null; S.draw = null; const r = makePattern(editSk(), op.ids, op.opt); if (typeof r === 'string') toast(r, 'warn'); S.sel.clear(); commitSketch(); }
+// Panel for a pattern being made (op) or already made (pt, picked through one of its curves).
+function patternPanel(o, onChange, onOk) {
+  const num = (label, key, unit, int) => { const inp = h('input', { type: 'text', value: fmt(o[key], 4), inputmode: 'decimal' }); const apply = () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) { inp.value = fmt(o[key], 4); return; } if (int) v = Math.max(2, Math.round(v)); onChange({ [key]: v }); };
+    inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); onOk?.(); } if (e.key === 'Escape' && S.skOp) cancelSkOp(); });
+    return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit)); };
+  return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Массив'), seg([['lin', 'Линейный'], ['circ', 'Круговой']], o.kind, (v) => onChange({ kind: v })),
+    num('Количество', 'n', 'шт', true), ...(o.kind === 'lin' ? [num('Шаг по X', 'dx', 'мм'), num('Шаг по Y', 'dy', 'мм')] : [num('Угол', 'ang', '°'), h('div', { class: 'note' }, o.c && o.c !== 'O' ? 'Вокруг выделенной точки' : 'Вокруг исходной точки. Чтобы вокруг другой, выделите и её перед «Массив»')]),
+    onOk ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: onOk }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')) : null);
+}
 function detachFromModel(sk, fp) {
   const q = gp(sk, fp); const id = nid(sk); sk.pts[id] = { id, x: q.x, y: q.y };
   for (const e of Object.values(sk.ents)) { if (e.ext) continue; for (const k of ['p1', 'p2', 'c']) if (e[k] === fp) e[k] = id; if (e.pts) e.pts = e.pts.map((q) => (q === fp ? id : q)); }
@@ -2910,6 +2975,7 @@ function toolOptionsPanel() {
     inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); if (S.skOp?.kind === 'offset') okOffset(); else inp.blur(); } if (e.key === 'Escape') { inp.blur(); if (S.skOp) cancelSkOp(); } });
     return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
   };
+  if (S.skOp?.kind === 'pattern') return patternPanel(S.skOp.opt, (ch) => { Object.assign(S.skOp.opt, ch); renderSide(); previewPattern(); }, okPattern);
   if (S.skOp?.kind === 'offset') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), field('Расстояние', 'opOffset', o.offsetD, (v) => { o.offsetD = v; previewOffset(); }),
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: o.offsetFlip, onchange: (e) => { o.offsetFlip = e.target.checked; previewOffset(); } }), 'В другую сторону'),
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okOffset }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')));
@@ -4522,8 +4588,18 @@ function patternPick(ev, click) {
   let e = pickEdge(ev, pm.topo); if (e && pm.pickFor === 'dir' || pm.pickFor === 'dir2') { if (e && e.t !== 'line') e = null; }
   if (!click) { if (JSON.stringify(e) !== JSON.stringify(pm.hoverEdge)) { pm.hoverEdge = e; drawPatternRefs(); } return; }
   if (!e) return; const spec = { edge: e };
-  if (pm.pickFor === 'dir') f.dir = spec; else if (pm.pickFor === 'dir2') f.dir2 = spec; else f.axis = spec;
+  if (pm.pickFor === 'dir') f.dir = spec; else if (pm.pickFor === 'dir2') f.dir2 = spec; else f.axis = spec; if (pm.pickFor !== 'axis') autoFlipDir(f, pm.pickFor);
   pm.hoverEdge = null; renderSide(); drawPatternRefs(); schedulePreview();
+}
+// A direction picked by axis or edge points one way of two; like SolidWorks shows the preview going off the part,
+// here the way that keeps more copies over the part is taken (Деталь 9: «Ось Z» pointed off the plate).
+function autoFlipDir(f, key) {
+  const A = axisOf(f[key]); const sd = (f.feats || []).map((id) => featById(id)).find((x) => x && !x.suppressed); if (!A || !sd || !S.body) return;
+  let ctr; try { const own = []; const t = sd.type === 'hole' ? holeTool(sd, S.body, own)[0] : buildTool(sd, S.body, own); t.computeBoundingBox(); ctr = t.boundingBox.getCenter(new THREE.Vector3()); } catch { return; }
+  S.body.computeBoundingBox(); const bb = S.body.boundingBox.clone().expandByScalar(1e-3);
+  const n = key === 'dir' ? f.n : f.n2, d = key === 'dir' ? f.d : f.d2; const fk = key === 'dir' ? 'flip' : 'flip2';
+  const inside = (sg) => { let k = 0; for (let i = 1; i < n; i++) if (bb.containsPoint(ctr.clone().addScaledVector(A.d, sg * i * d))) k++; return k; };
+  const plus = inside(1), minus = inside(-1); if (plus !== minus) f[fk] = minus > plus;
 }
 function togglePatternSeed(id) {
   const f = S.pm.feature; const c = featById(id); if (!c || !['extrude', 'revolve', 'hole'].includes(c.type)) { if (c) toast(`«${c.name}» нельзя скопировать массивом`, 'info'); return; }
@@ -4548,14 +4624,14 @@ function renderPatternPM() {
   body.append(seeds);
   const pickRow = (label, key, spec, set) => h('div', { class: 'grp' + (pm.pickFor === key ? ' active' : '') }, h('div', { class: 'lbl' }, label),
     h('button', { class: 'rel pickbox' + (pm.pickFor === key ? ' on' : ''), onclick: () => { pm.pickFor = key; renderSide(); } }, h('b', {}, '↗'), axisLabel(spec)),
-    h('div', { class: 'chips' }, Object.keys(GLOBAL_AXES).map((k) => h('button', { class: 'chip', onclick: () => { set({ axis: k }); pm.pickFor = key; renderSide(); drawPatternRefs(); schedulePreview(); } }, k.toUpperCase()))),
+    h('div', { class: 'chips' }, Object.keys(GLOBAL_AXES).map((k) => h('button', { class: 'chip', onclick: () => { set({ axis: k }); if (key !== 'axis') autoFlipDir(pm.feature, key); pm.pickFor = key; renderSide(); drawPatternRefs(); schedulePreview(); } }, k.toUpperCase()))),
     pm.pickFor === key ? h('div', { class: 'note' }, key === 'axis' ? 'Щёлкните круглое или прямое ребро в окне' : 'Щёлкните прямое ребро в окне') : null);
   if (f.type === 'lpattern') {
     body.append(pickRow('Направление 1', 'dir', f.dir, (v) => { f.dir = v; }));
     body.append(h('div', { class: 'grp' }, numField('Шаг', 'pmStep', f.d, (v) => { f.d = v; schedulePreview(); }), numField('Количество', 'pmCount', f.n, (v) => { f.n = Math.max(2, Math.round(v)); schedulePreview(); }, 'шт'),
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; schedulePreview(); } }), 'Обратное направление')));
     const on2 = !!f.dir2;
-    body.append(h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: on2, onchange: (e) => { f.dir2 = e.target.checked ? { axis: f.dir?.axis === 'z' ? 'x' : 'z' } : null; pm.pickFor = e.target.checked ? 'dir2' : 'dir'; renderSide(); drawPatternRefs(); schedulePreview(); } }), 'Направление 2')));
+    body.append(h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: on2, onchange: (e) => { f.dir2 = e.target.checked ? { axis: f.dir?.axis === 'z' ? 'x' : 'z' } : null; if (f.dir2) autoFlipDir(f, 'dir2'); pm.pickFor = e.target.checked ? 'dir2' : 'dir'; renderSide(); drawPatternRefs(); schedulePreview(); } }), 'Направление 2')));
     if (on2) { body.append(pickRow('Направление 2', 'dir2', f.dir2, (v) => { f.dir2 = v; }));
       body.append(h('div', { class: 'grp' }, numField('Шаг', 'pmStep2', f.d2, (v) => { f.d2 = v; schedulePreview(); }), numField('Количество', 'pmCount2', f.n2, (v) => { f.n2 = Math.max(1, Math.round(v)); schedulePreview(); }, 'шт'),
         h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip2, onchange: (e) => { f.flip2 = e.target.checked; schedulePreview(); } }), 'Обратное направление'))); }
@@ -5727,6 +5803,7 @@ function renderTools() {
       toolBtn('Скругл.', ICON.sfillet, () => setTool('sfillet'), { pressed: S.tool === 'sfillet', disabled: !ed, title: 'Скругление угла эскиза' }),
       toolBtn('Контур грани', ICON.convert, () => setTool('convert'), { pressed: S.tool === 'convert', disabled: !ed || !S.refs?.body, title: 'Перенести в эскиз контур грани модели, по которой щёлкнете (как «Преобразовать объекты»)' }),
       toolBtn('Смещение', ICON.offset, cmdOffset, { pressed: S.skOp?.kind === 'offset', disabled: !ed, title: 'Смещение выделенных объектов' }),
+      toolBtn('Массив', ICON.lpattern, cmdSkPattern, { pressed: S.skOp?.kind === 'pattern', disabled: !ed, title: 'Линейный или круговой массив выделенных объектов' }),
       toolBtn('Зеркало', ICON.mirror, cmdMirror, { disabled: !ed, title: 'Отразить выделенное относительно выделенной линии' }),
       h('div', { class: 'sep' }),
       toolBtn('Размер', ICON.dim, () => setTool('dim'), { pressed: S.tool === 'dim', disabled: !ed, kbd: 'D', title: 'Автоматический размер (D)' }),
@@ -5973,6 +6050,7 @@ function renderSketchPanel() {
       for (const c of related) grp.append(h('div', { class: 'rel' + (S.conflict.has(c.id) ? ' bad' : '') }, h('b', {}, CON_GLYPH[c.t] || (DIM_TYPES.has(c.t) ? '↔' : '')), conName(sk, c) + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''), h('button', { class: 'x', title: 'Удалить взаимосвязь', onclick: () => { delete sk.cons[c.id]; S.sel.delete('c:' + c.id); S.conflict.delete(c.id); commitSketch(); } }, '✕')));
     }
     const lines = sel.filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => sk.ents[k.slice(2)]);
+    { const pt = patternOf(sk, lines.map((e) => e.id)); if (pt) grp.append(patternPanel(pt, (ch) => updatePattern(sk, pt, ch)), h('button', { class: 'ghost-btn', onclick: () => { clearPattern(sk, pt); delete sk.pats[pt.id]; S.sel.clear(); commitSketch(); } }, 'Убрать массив')); }
     if (lines.length === 1) {
       const e = lines[0];
       // An arc drawn the short way between two points that should have gone round the long way (a D profile):
@@ -6452,5 +6530,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdSketch, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
