@@ -4737,27 +4737,41 @@ function stlFaces(tri) {
   const faces = [];
   // Connected pieces of a set of flat groups, through shallow-angle neighbours.
   const comps = (set) => { const left = new Set(set); const out = []; for (const s0 of set) { if (!left.has(s0)) continue; const c = []; const st = [s0]; left.delete(s0); while (st.length) { const x = st.pop(); c.push(x); for (const y of adj.get(x) || []) if (left.has(y)) { left.delete(y); st.push(y); } } out.push(c); } return out; };
-  // A flat wall running tangent into a cylinder (a slot's sides) joins its cluster: the largest flat pieces are
-  // peeled off until what is left falls apart into cylinders, or every piece keeps its own face.
-  const work = [...clusters.values()];
-  while (work.length) {
-    const m = work.pop(); if (m.length === 1) { faces.push(groups[m[0]]); continue; }
-    if (classify(m.flatMap((i) => groups[i])) === 'cyl') { faces.push(m.flatMap((i) => groups[i])); continue; }
-    if (m.length <= 2) { for (const i of m) faces.push(groups[i]); continue; }
-    const big = m.reduce((x, y) => (area(groups[x]) >= area(groups[y]) ? x : y)); faces.push(groups[big]);
-    for (const c of comps(m.filter((i) => i !== big))) work.push(c);
+  // A flat wall running tangent into a cylinder (a slot's sides) joins its cluster: up to four of the largest flat
+  // pieces are peeled off to find the cylinders. Anything else curved (a scanned or organic surface, thousands of
+  // facets) stays one curved face: splitting it facet by facet is what froze the page on a large STL.
+  const areaOf = new Map(); const gArea = (i) => { if (!areaOf.has(i)) areaOf.set(i, area(groups[i])); return areaOf.get(i); };
+  const all = (m) => m.flatMap((i) => groups[i]);
+  for (const cl of clusters.values()) {
+    if (cl.length === 1) { faces.push(groups[cl[0]]); continue; }
+    const tris = cl.reduce((n, i) => n + groups[i].length, 0);
+    if (tris > 20000) { faces.push(all(cl)); continue; }
+    let work = [cl]; let peels = 0; const done = [];
+    while (work.length) {
+      const m = work.pop(); if (m.length === 1) { done.push(groups[m[0]]); continue; }
+      if (classify(all(m)) === 'cyl') { done.push(all(m)); continue; }
+      if (peels >= 4 || m.length <= 2) { done.push(all(m)); continue; }
+      const big = m.reduce((x, y) => (gArea(x) >= gArea(y) ? x : y)); done.push(groups[big]); peels++;
+      for (const c of comps(m.filter((i) => i !== big))) work.push(c);
+    }
+    faces.push(...done);
   }
   const pos = new Float32Array(nT * 9), nrm = new Float32Array(nT * 9); const ranges = []; let j = 0;
   for (const f of faces) { const a = j; for (const t of f) { for (let k = 0; k < 9; k++) pos[9 * j + k] = tri[9 * t + k]; for (let k = 0; k < 3; k++) { nrm[9 * j + 3 * k] = N[t].x; nrm[9 * j + 3 * k + 1] = N[t].y; nrm[9 * j + 3 * k + 2] = N[t].z; } j++; } ranges.push([a, j]); }
   return { pos, nrm, faces: ranges };
 }
 async function importStlFile(file) {
+  const busy = toast(`Читаю «${file.name}»…`, 'info'); await new Promise((r) => setTimeout(r, 30));
   try {
-    const tri = parseStl(new Uint8Array(await file.arrayBuffer())); const { pos, nrm, faces } = stlFaces(tri);
+    const tri = parseStl(new Uint8Array(await file.arrayBuffer())); const nT = tri.length / 9;
+    if (nT > 1500000) throw new Error(`${nT} треугольников, это слишком много для браузера. Упростите сетку до 1,5 млн`);
+    const { pos, nrm, faces } = stlFaces(tri);
     const data = { name: file.name.replace(/\.stl$/i, ''), pos, nrm, faces, zup: false }; setImportUp(data, true); analyzeImport(data);
+    // An STL's normals are only the facets' own, needed for sorting the faces: not kept, half the size to store.
+    data.nrm = null; busy?.remove?.();
     addDoc('import', data.name, data);
     toast(`STL импортирован: ${tri.length / 9} треугольников, ${faces.length} граней, ${data.cyls.length} цилиндрических. Чтобы править, вставьте его в деталь кнопкой «STEP / STL»`, 'info');
-  } catch (e) { toast(`STL не прочитан: ${e.message || e}`, 'err'); }
+  } catch (e) { busy?.remove?.(); toast(`STL не прочитан: ${e.message || e}`, 'err'); }
 }
 // STEP files are usually Z-up; the viewer is Y-up like SolidWorks.
 function setImportUp(data, zup) {
