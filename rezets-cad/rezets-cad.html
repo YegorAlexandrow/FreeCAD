@@ -4042,8 +4042,10 @@ async function cloudInit() {
 async function loadRev(docMeta, rev) {
   // A read can fail on a busy connection (the servo STEP files are ~130 parts each): each part is tried three times.
   const get = async (id) => { for (let k = 0; ; k++) { try { return await dbCall(chunkCol().doc(id).get()); } catch (e) { if (k >= 2) throw e; await new Promise((r) => setTimeout(r, 500 * 2 ** k)); } } };
-  const parts = []; for (let i = 0; i < rev.chunks; i++) { const s = await get(`${docMeta.id}~${rev.rev}~${i}`); if (!s.exists) throw new Error('нет части ' + i); parts.push(s.data().s); }
-  const json = parts.join(''); if (rev.hash && hashStr(json) !== rev.hash) throw new Error('контрольная сумма'); return JSON.parse(json);
+  const read = async (prefix, n, hash) => { const parts = []; for (let i = 0; i < n; i++) { const s = await get(`${prefix}~${i}`); if (!s.exists) throw new Error('нет части ' + i); parts.push(s.data().s); } const json = parts.join(''); if (hash && hashStr(json) !== hash) throw new Error('контрольная сумма'); return JSON.parse(json); };
+  const o = await read(`${docMeta.id}~${rev.rev}`, rev.chunks, rev.hash);
+  if (rev.geo) { const g = await read(geoPrefix(docMeta.id, rev.geo.key), rev.geo.chunks, rev.geo.key); delete o.data.geo; o.data.pos = g.pos; o.data.nrm = g.nrm; }
+  return o;
 }
 // The project as stored in the cloud; a damaged revision falls back to the previous one.
 async function cloudLoadProject(meta) {
@@ -4061,12 +4063,22 @@ async function cloudLoadProject(meta) {
 // A database call that never answers would leave «Сохраняю…» up for good: each one has a time limit, and a failed
 // save is tried again by itself.
 const dbCall = (p, ms = 30000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error('облако не ответило за ' + ms / 1000 + ' с'), { code: 'unavailable' })), ms))]);
-// A STEP model never changes once imported; its stored form (megabytes of base64) is built and hashed once.
-const storeCache = new WeakMap();
+// An imported model is stored in two parts: its triangles (megabytes of base64, kept under a name made from their
+// hash and shared by every revision that has the same ones) and the rest, a few kilobytes. Renaming or rescaling
+// the model then saves only the small part. The triangles are encoded and hashed once per array and orientation.
+const geoCache = new WeakMap(), legacyCache = new WeakMap();
+const geoPrefix = (docId, key) => `${docId}~g${key.replace(/[^A-Za-z0-9]/g, '_')}`;
+function storedGeo(data) {
+  const c = geoCache.get(data.pos); if (c && c.zup === !!data.zup) return c;
+  const json = JSON.stringify({ pos: b64.enc(data.pos), nrm: data.nrm ? b64.enc(data.nrm) : null }); const v = { json, key: hashStr(json), zup: !!data.zup }; geoCache.set(data.pos, v); return v;
+}
 function storedJson(d) {
   if (d.kind !== 'import') { const json = JSON.stringify(docToStore(d)); return { json, hash: hashStr(json) }; }
-  const c = storeCache.get(d.data); if (c && c.name === d.name) return c;
-  const json = JSON.stringify(docToStore(d)); const v = { json, hash: hashStr(json), name: d.name }; storeCache.set(d.data, v); return v;
+  const geo = storedGeo(d.data); const { pos, nrm, ...rest } = d.data; void pos; void nrm;
+  const json = JSON.stringify({ id: d.id, kind: d.kind, name: d.name, data: { ...rest, geo: geo.key } });
+  // Hash of the whole document as versions before the split stored it: an unchanged model is not uploaded again.
+  const legacy = () => { const c = legacyCache.get(d.data); if (c?.json === json) return c.hash; const v = { json, hash: hashStr(JSON.stringify(docToStore(d))) }; legacyCache.set(d.data, v); return v.hash; };
+  return { json, hash: hashStr(json), geo, legacy };
 }
 async function cloudSave() {
   if (!CLOUD.db || CLOUD.conflict || CLOUD.blocked) return; if (CLOUD.saving) { CLOUD.again = true; return; }
@@ -4075,19 +4087,37 @@ async function cloudSave() {
     // Someone saved after us (another tab or device): stop rather than overwrite their work.
     const cur = await dbCall(metaRef().get()); const curMeta = cur.exists ? cur.data() : null;
     if (curMeta && CLOUD.meta && curMeta.savedAt > CLOUD.meta.savedAt && curMeta.writer !== CLOUD.writer) { CLOUD.conflict = true; setCloudState('conflict'); toast('Проект изменён в другом окне. Перезагрузите страницу, иначе изменения здесь не попадут в облако', 'err'); return; }
-    const prev = new Map((curMeta?.docs || []).map((d) => [d.id, d])); const docs = []; const drop = [];
+    const prev = new Map((curMeta?.docs || []).map((d) => [d.id, d])); const docs = []; const drop = []; const puts = [];
+    // Chunks written by a save that did not finish (it failed or the tab closed) are named in the meta's `pending`;
+    // whatever no revision took is removed here, otherwise every failed save of a big model leaks megabytes.
+    const used = new Set(); for (const dm of curMeta?.docs || []) for (const r of dm.revs || []) { used.add(`${dm.id}~${r.rev}`); if (r.geo) used.add(geoPrefix(dm.id, r.geo.key)); }
+    for (const p of curMeta?.pending || []) if (!used.has(p.prefix)) for (let i = 0; i < p.n; i++) await chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {});
     for (const d of S.project.docs) {
-      const { json, hash } = storedJson(d); const old = prev.get(d.id);
-      if (old && old.revs?.[0]?.hash === hash) { docs.push({ ...old, name: d.name, kind: d.kind }); continue; }
+      const st = storedJson(d); const { json, hash } = st; const old = prev.get(d.id); const top = old?.revs?.[0];
+      if (top && (top.hash === hash || (!top.geo && st.legacy && top.hash === st.legacy()))) { docs.push({ ...old, name: d.name, kind: d.kind }); continue; }
       const rev = Date.now().toString(36) + Math.random().toString(36).slice(2, 5); const n = Math.max(1, Math.ceil(json.length / CHUNK));
-      for (let i = 0; i < n; i++) await dbCall(chunkCol().doc(`${d.id}~${rev}~${i}`).set({ s: json.slice(i * CHUNK, (i + 1) * CHUNK) }));
-      const revs = [{ rev, chunks: n, hash, savedAt: Date.now(), size: json.length }, ...(old?.revs || [])]; for (const r of revs.slice(KEEP_REVS)) drop.push([d.id, r]);
+      const entry = { rev, chunks: n, hash, savedAt: Date.now(), size: json.length }; puts.push({ prefix: `${d.id}~${rev}`, n, json });
+      if (st.geo) {
+        const had = (old?.revs || []).find((r) => r.geo?.key === st.geo.key); const gn = had ? had.geo.chunks : Math.max(1, Math.ceil(st.geo.json.length / CHUNK));
+        entry.geo = { key: st.geo.key, chunks: gn }; entry.size += st.geo.json.length; if (!had) puts.push({ prefix: geoPrefix(d.id, st.geo.key), n: gn, json: st.geo.json });
+      }
+      // Earlier revisions of a model are kept only while they share its triangles: another copy of them costs megabytes.
+      const older = (old?.revs || []).filter((r) => !st.geo || r.geo?.key === st.geo.key); for (const r of old?.revs || []) if (!older.includes(r)) drop.push([d.id, r]);
+      const revs = [entry, ...older]; for (const r of revs.slice(KEEP_REVS)) drop.push([d.id, r]);
       docs.push({ id: d.id, kind: d.kind, name: d.name, revs: revs.slice(0, KEEP_REVS) }); CLOUD.lastHash.set(d.id, hash);
     }
+    if (puts.length && cur.exists) await dbCall(metaRef().set({ ...curMeta, pending: puts.map(({ prefix, n }) => ({ prefix, n })) }));
+    try { for (const p of puts) for (let i = 0; i < p.n; i++) await dbCall(chunkCol().doc(`${p.prefix}~${i}`).set({ s: p.json.slice(i * CHUNK, (i + 1) * CHUNK) })); }
+    catch (e) { for (const p of puts) for (let i = 0; i < p.n; i++) chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {}); throw e; }
     for (const [id, old] of prev) if (!docs.some((d) => d.id === id)) for (const r of old.revs || []) drop.push([id, r]);
     const meta = { version: 1, name: S.project.name, active: S.project.active, nid: S.project.nid, docs, savedAt: Date.now(), writer: CLOUD.writer };
     await dbCall(metaRef().set(meta)); CLOUD.meta = meta;
-    for (const [id, r] of drop) for (let i = 0; i < r.chunks; i++) await chunkCol().doc(`${id}~${r.rev}~${i}`).delete().catch(() => {});
+    const keep = new Set(); for (const dm of docs) for (const r of dm.revs) { keep.add(`${dm.id}~${r.rev}`); if (r.geo) keep.add(geoPrefix(dm.id, r.geo.key)); }
+    const gone = new Set();
+    for (const [id, r] of drop) {
+      for (let i = 0; i < r.chunks; i++) await chunkCol().doc(`${id}~${r.rev}~${i}`).delete().catch(() => {});
+      const gp = r.geo && geoPrefix(id, r.geo.key); if (gp && !keep.has(gp) && !gone.has(gp)) { gone.add(gp); for (let i = 0; i < r.geo.chunks; i++) await chunkCol().doc(`${gp}~${i}`).delete().catch(() => {}); }
+    }
     setCloudState('saved');
   } catch (e) {
     console.warn('cloud save', e); const code = e?.code;
@@ -4790,19 +4820,22 @@ function analyzeImport(data) {
 }
 function importGeometry(ent) {
   const d = ent.data; if (d._geo) return d._geo;
-  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(d.pos.slice(), 3)); g.computeVertexNormals();
+  const p = d.pos.slice(); const k = importMul(d); if (k !== 1) for (let i = 0; i < p.length; i++) p[i] *= k;
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p, 3)); g.computeVertexNormals();
   Object.defineProperty(d, '_geo', { value: g, writable: true, configurable: true, enumerable: false }); return g;
 }
-const importCyls = (ent) => (ent.data.cyls || []).map((c) => ({ p: V3(c.p), dir: V3(c.dir), r: c.r }));
+const importCyls = (ent) => { const k = importMul(ent.data); return (ent.data.cyls || []).map((c) => ({ p: V3(c.p).multiplyScalar(k), dir: V3(c.dir), r: c.r * k })); };
 function geoVolume(g) { const pos = g.getAttribute('position'); let v = 0; const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); v += a.dot(b.clone().cross(c)); } return v / 6; }
 $('stepIn').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; if (/\.stl$/i.test(f.name)) await importStlFile(f); else await importStepFile(f); };
-// Scales an imported body about the origin. Parts built on it and assemblies showing it rebuild from scratch,
-// since their caches are keyed by features, not by the import's coordinates.
+// Scales an imported body about the origin. The triangles stay as read (`mul` is applied when the body is built), so
+// a rescaled model of megabytes is saved as one changed number. Parts built on it and assemblies showing it rebuild
+// from scratch, since their caches are keyed by features, not by the import's coordinates.
+// `scale` is what versions before `mul` multiplied into the triangles themselves; it only counts toward the total.
+const importMul = (d) => d.mul || 1;
+const importTotalScale = (d) => (d.scale || 1) * (d.mul || 1);
 function scaleImport(ent, k) {
   if (!(k > 0) || k === 1) return; const d = ent.data;
-  for (let i = 0; i < d.pos.length; i++) d.pos[i] *= k;
-  for (const c of d.cyls || []) { c.p = c.p.map((v) => v * k); c.r *= k; }
-  d.scale = (d.scale || 1) * k; Object.defineProperty(d, '_geo', { value: null, writable: true, configurable: true, enumerable: false });
+  d.mul = importMul(d) * k; if (Math.abs(d.mul - 1) < 1e-12) delete d.mul; Object.defineProperty(d, '_geo', { value: null, writable: true, configurable: true, enumerable: false });
   for (const e of S.project.docs) if (e._info) e._info = null;
   S.cache.clear();
 }
@@ -4817,12 +4850,12 @@ function renderImportPanel() {
     h('div', { class: 'grp' }, h('div', { class: 'note' }, `Импортированное тело без истории: ${d.faces.length} граней, из них ${d.cyls.length} цилиндрических. Рулетка (M) работает по его рёбрам и окружностям.`),
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!d.zup, onchange: (e) => { setImportUp(d, e.target.checked); rebuild(); fitView(); saveProjectSoon(); } }), 'В файле ось Z направлена вверх'),
       h('button', { class: 'ghost-btn', onclick: () => { const a = addDoc('asm', 'Сборка', newAsm()); asmInsert(ent.id); void a; } }, 'Вставить в новую сборку')),
-    h('div', { class: 'sec-h' }, h('span', {}, 'Масштаб'), h('span', { class: 'meta' }, d.scale && d.scale !== 1 ? `×${fmt(d.scale, 4)} от файла` : '')),
+    h('div', { class: 'sec-h' }, h('span', {}, 'Масштаб'), h('span', { class: 'meta' }, importTotalScale(d) !== 1 ? `×${fmt(importTotalScale(d), 4)} от файла` : '')),
     h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Габарит, мм. Введите нужный размер по любой оси: тело масштабируется целиком, пропорции сохраняются'),
       h('div', { class: 'chips', style: 'align-items:center' }, ...dims.map((v, i) => { const inp = h('input', { type: 'text', value: fmt(v, 3), style: 'width:64px', title: `Размер по ${'XYZ'[i]}`, onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); }, onchange: (e) => { const t = evalWith(e.target.value.replace(',', '.'), {}); if (!(t > 0) || !(v > 0)) { toast('Размер должен быть больше нуля', 'warn'); e.target.value = fmt(v, 3); return; } apply(t / v); } }); return [h('span', { class: 'note' }, 'XYZ'[i]), inp]; }).flat()),
       h('div', { class: 'chips', style: 'align-items:center' }, h('span', { class: 'note' }, 'Умножить на'), kIn, h('button', { class: 'chip', onclick: go }, 'Применить')),
       h('div', { class: 'chips' }, ...[['дюймы → мм', 25.4], ['см → мм', 10], ['м → мм', 1000], ['×0.1', 0.1]].map(([t, k]) => h('button', { class: 'chip', onclick: () => apply(k) }, t))),
-      d.scale && d.scale !== 1 ? h('button', { class: 'ghost-btn', onclick: () => apply(1 / d.scale) }, 'Вернуть размер из файла') : null));
+      importTotalScale(d) !== 1 ? h('button', { class: 'ghost-btn', onclick: () => apply(1 / importTotalScale(d)) }, 'Вернуть размер из файла') : null));
 }
 
 // ============================================================================================
