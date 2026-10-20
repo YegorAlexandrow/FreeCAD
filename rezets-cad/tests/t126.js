@@ -11,5 +11,5 @@ const open = require('./harness.js');
     const out = { c1: circles(), regions1: R.sketchRegionsOf(f).faces.length };
     sk.ents.h.r = 3; sk.pts.c.x = 5; R.solveSketch(sk); out.follow = circles();
     R.updatePattern(sk, lin, { n: 4, dx: 8 }); out.c2 = circles(); out.regions2 = R.sketchRegionsOf(f).faces.length; out.dof = R.analyzeSketch(sk).dofMain; return out; })));
-  console.log('expect c1 at x 0,10,20 y 30 r 2; regions1 7 (3 circles + 4 rectangles); follow: copies stay 10 apart with the original's radius; c2 four, 8 apart; regions2 8');
+  console.log('expect c1 at x 0,10,20 y 30 r 2; regions1 7 (3 circles + 4 rectangles); follow: copies stay 10 apart with the radius of the original; c2 four, 8 apart; regions2 8');
   console.log(logs.join('\n')); await b.close(); })();
