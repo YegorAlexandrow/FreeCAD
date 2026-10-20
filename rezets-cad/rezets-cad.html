@@ -3075,6 +3075,9 @@ const topoCache = new WeakMap();
 function edgeTopology(body, cyls) {
   if (topoCache.has(body)) return topoCache.get(body);
   const e = featureEdges(body); const segs = []; for (let i = 0; i < e.length; i += 6) segs.push(e.slice(i, i + 6));
+  // How sharply the two faces meet at each segment: a wall running into a cylinder at a corner is a real edge
+  // even though it lies on the cylinder along its axis, unlike a seam of the cylinder's own facets.
+  const sharp = segs.map((sg, i) => { const tt = e.tris?.[i]; if (!tt || tt[0] < 0 || tt[1] < 0) return false; const pos = body.getAttribute('position'); const nrm = (t) => { const A = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), B = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), C = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2); return B.sub(A).cross(C.sub(A)).normalize(); }; return nrm(tt[0]).dot(nrm(tt[1])) < Math.cos(20 * Math.PI / 180); });
   // A crease between two triangles of one cylinder is a sliver left by a boolean, not an edge.
   { const pos = body.getAttribute('position'); const memo = new Map(); const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
     const cylOf = (t) => { if (memo.has(t)) return memo.get(t); A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); const k = faceKeyOfTri(A, B, C, cyls); const i = k?.kind === 'cyl' ? (cyls || []).findIndex((cy) => sameFace(k, { kind: 'cyl', p: cy.p.toArray(), dir: cy.dir.toArray(), r: cy.r })) : -1; memo.set(t, i); return i; };
@@ -3082,7 +3085,7 @@ function edgeTopology(body, cyls) {
     // running across the wall of its own cylinder (not around it like a rim) is one of those.
     const across = (sg, c) => { const cy = cyls[c]; const ax = (k) => (sg[k] - cy.p.x) * cy.dir.x + (sg[k + 1] - cy.p.y) * cy.dir.y + (sg[k + 2] - cy.p.z) * cy.dir.z; const on = (k) => { const w = new THREE.Vector3(sg[k], sg[k + 1], sg[k + 2]).sub(cy.p); return Math.abs(w.addScaledVector(cy.dir, -w.dot(cy.dir)).length() - cy.r) < 5e-3; }; return on(0) && on(3) && Math.abs(ax(0) - ax(3)) > 1e-3; };
     const keep = segs.map((sg, i) => { const tt = e.tris?.[i]; if (!tt || tt[0] < 0) return true; const c = cylOf(tt[0]); if (c < 0) return true; if (tt[1] < 0) return !across(sg, c); return c !== cylOf(tt[1]); });
-    for (let i = segs.length - 1; i >= 0; i--) if (!keep[i]) segs.splice(i, 1); }
+    for (let i = segs.length - 1; i >= 0; i--) if (!keep[i]) { segs.splice(i, 1); sharp.splice(i, 1); } }
   const onCircle = new Array(segs.length).fill(false); const circles = [];
   for (const cy of cyls || []) {
     const groups2 = new Map();
@@ -3104,7 +3107,7 @@ function edgeTopology(body, cyls) {
   }
   // Seams along cylinder walls are artefacts of the mesh, not edges of the part.
   const onCylAx = (a, b) => (cyls || []).some((cy) => { const on = (v) => { const w = v.clone().sub(cy.p); const t = w.dot(cy.dir); return Math.abs(w.addScaledVector(cy.dir, -t).length() - cy.r) < 5e-3; }; return on(a) && on(b) && Math.abs(b.clone().sub(a).normalize().dot(cy.dir)) > 0.999; });
-  const cl = classifyChains(chainSegments(segs.filter((sg, i) => !onCircle[i] && !onCylAx(new THREE.Vector3(sg[0], sg[1], sg[2]), new THREE.Vector3(sg[3], sg[4], sg[5]))), 3));
+  const cl = classifyChains(chainSegments(segs.filter((sg, i) => !onCircle[i] && (sharp[i] || !onCylAx(new THREE.Vector3(sg[0], sg[1], sg[2]), new THREE.Vector3(sg[3], sg[4], sg[5])))), 3));
   // Only chords of one rim are mesh artefacts; a line joining two rims (a slot side) is an edge.
   const onC = (v, c) => { const w = v.clone().sub(c.c); return Math.abs(w.dot(c.n)) < 1e-2 && Math.abs(w.length() - c.r) < 1e-2; };
   cl.lines = cl.lines.filter(([a, b]) => !circles.some((c) => onC(a, c) && onC(b, c)));
