@@ -488,7 +488,10 @@ function buildSystem(sk, opts = {}) {
     const e = sk.ents[id];
     if (e.t === 'arc') {
       const c = P(e.c), a = P(e.p1), b = P(e.p2), r = R(id);
-      add('arc:' + id, [c, a, b, r], (x) => { const C = c.g(x), A = a.g(x), B = b.g(x), rr = r.g(x); return [Math.hypot(A[0] - C[0], A[1] - C[1]) - rr, Math.hypot(B[0] - C[0], B[1] - C[1]) - rr]; }, 2);
+      // A pattern copy has its centre and both ends placed by the pattern: one end is enough to give its radius,
+      // the other would only repeat it (and show the copy as overdefined).
+      if (e.pat && sk.pats?.[e.pat]) add('arc:' + id, [c, a, r], (x) => { const C = c.g(x), A = a.g(x); return [Math.hypot(A[0] - C[0], A[1] - C[1]) - r.g(x)]; }, 1);
+      else add('arc:' + id, [c, a, b, r], (x) => { const C = c.g(x), A = a.g(x), B = b.g(x), rr = r.g(x); return [Math.hypot(A[0] - C[0], A[1] - C[1]) - rr, Math.hypot(B[0] - C[0], B[1] - C[1]) - rr]; }, 2);
     }
   }
   for (const cid in sk.cons) {
@@ -536,6 +539,8 @@ function buildSystem(sk, opts = {}) {
       }
       case 'equal': {
         const e1 = ge(sk, r[0]), e2 = ge(sk, r[1]);
+        // Patterns made before kept an equal radius on copied arcs too, which their placed points already give.
+        if (c.pat && e2?.t === 'arc') break;
         if (e1.t === 'line') { const [a, b] = L(r[0]); const [m, n] = L(r[1]); add(cid, [a, b, m, n], (x) => [len(dir(a.g(x), b.g(x))) - len(dir(m.g(x), n.g(x)))], 1); }
         else { const r1 = R(r[0]), r2 = R(r[1]); add(cid, [r1, r2], (x) => [r1.g(x) - r2.g(x)], 1); }
         void e2; break;
@@ -2099,7 +2104,7 @@ function layoutOverlay() {
         el.addEventListener('pointerdown', (ev) => startDimDrag(ev, c));
         el.addEventListener('dblclick', (ev) => { ev.stopPropagation(); openDimEditor(c); });
         overlay.append(el);
-      } else if (S.showRel !== false && CON_GLYPH[c.t]) {
+      } else if (S.showRel !== false && CON_GLYPH[c.t] && !c.pat) {
         const at = glyphAnchor(sk, c); if (!at) continue; const s = sScreen(at.x, at.y);
         const stack = (glyphAnchor.count[at.key] = (glyphAnchor.count[at.key] || 0) + 1) - 1;
         const spots = [[12, -12], [12, 12], [-12, -12], [-12, 12], [26, -26], [26, 26], [-26, -26], [-26, 26]].map(([dx, dy]) => [s.x + Math.sign(dx) * stack * 19 + dx, s.y + dy]);
@@ -2603,7 +2608,7 @@ function buildPattern(sk, pt) {
       else if (e.t === 'spline') { const pts = e.pts.map(mp); ne = { id, t: 'spline', pts, p1: pts[0], p2: pts[pts.length - 1], closed: e.closed }; }
       else continue;
       if (e.constr) ne.constr = true; ne.pat = pt.id; sk.ents[id] = ne;
-      if (ne.r != null) { const k = nid(sk); sk.cons[k] = { id: k, t: 'equal', refs: [e.id, id], pat: pt.id }; }
+      if (ne.r != null && ne.t !== 'arc') { const k = nid(sk); sk.cons[k] = { id: k, t: 'equal', refs: [e.id, id], pat: pt.id }; }
     }
   }
 }
@@ -2633,7 +2638,10 @@ function okPattern() { const op = S.skOp; S.skOp = null; S.draw = null; const r 
 // Panel for a pattern being made (op) or already made (pt, picked through one of its curves).
 function patternPanel(o, onChange, onOk) {
   const num = (label, key, unit, int) => { const inp = h('input', { type: 'text', value: fmt(o[key], 4), inputmode: 'decimal' }); const apply = () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) { inp.value = fmt(o[key], 4); return; } if (int) v = Math.max(2, Math.round(v)); onChange({ [key]: v }); };
-    inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); onOk?.(); } if (e.key === 'Escape' && S.skOp) cancelSkOp(); });
+    inp.addEventListener('change', apply);
+    // While a pattern is being made the preview follows the typing; Enter takes the value and makes it.
+    if (S.skOp) inp.addEventListener('input', () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) return; if (int) v = Math.max(2, Math.round(v)); o[key] = v; previewPattern(); });
+    inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); onOk?.(); } if (e.key === 'Escape' && S.skOp) cancelSkOp(); });
     return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit)); };
   return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Массив'), seg([['lin', 'Линейный'], ['circ', 'Круговой']], o.kind, (v) => onChange({ kind: v })),
     num('Количество', 'n', 'шт', true), ...(o.kind === 'lin' ? [num('Шаг по X', 'dx', 'мм'), num('Шаг по Y', 'dy', 'мм')] : [num('Угол', 'ang', '°'), h('div', { class: 'note' }, o.c && o.c !== 'O' ? 'Вокруг выделенной точки' : 'Вокруг исходной точки. Чтобы вокруг другой, выделите и её перед «Массив»')]),
