@@ -471,12 +471,42 @@ const CON_GLYPH = { tanpt: '⌒', horizontal: '—', vertical: '|', hpts: '—',
 function buildSystem(sk, opts = {}) {
   upgradeFillets(sk);
   const idx = {}; const X = []; const owner = [];
-  for (const id in sk.pts) { if (sk.pts[id].fixed) continue; idx['p' + id] = X.length; X.push(sk.pts[id].x, sk.pts[id].y); owner.push('p' + id, 'p' + id); }
+  // A pattern copy or a mirror image is placed by its source point: it is computed from it, not solved for. Hundreds
+  // of copied points would otherwise each add two unknowns and two equations, and the solve then takes seconds.
+  // A point gets one such definition; any further one stays an ordinary equation.
+  const defs = new Map(), used = new Set();
+  if (!opts.noDerive) for (const cid in sk.cons) {
+    const c = sk.cons[cid]; if (c.driven || (opts.skip && opts.skip.has(cid))) continue; let q, src;
+    if (c.t === 'patpt' && sk.pats?.[c.pat]) { q = c.refs[1]; src = c.refs[0]; }
+    else if (c.t === 'symmetric') { const ax = ge(sk, c.refs[2]); if (!ax) continue; const axPts = ax.t === 'ellipse' ? [ax.c, ax.p1] : [ax.p1, ax.p2]; [src, q] = sk.pts[c.refs[1]]?.fixed ? [c.refs[1], c.refs[0]] : [c.refs[0], c.refs[1]]; if (axPts.includes(q)) continue; }
+    else continue;
+    if (!sk.pts[q] || sk.pts[q].fixed || isRefPt(q) || q === src || defs.has(q)) continue;
+    defs.set(q, { c, src });
+  }
+  // A chain of definitions that comes back to its start defines nothing: those stay equations.
+  const rootOf = {}; const root = (id, seen = new Set()) => { if (!defs.has(id)) return id; if (seen.has(id)) return null; seen.add(id); return root(defs.get(id).src, seen); };
+  for (const q of [...defs.keys()]) { const r = root(q); if (r == null) defs.delete(q); }
+  for (const q of defs.keys()) { rootOf[q] = root(q); used.add(defs.get(q).c.id); }
+  for (const id in sk.pts) { if (sk.pts[id].fixed || defs.has(id)) continue; idx['p' + id] = X.length; X.push(sk.pts[id].x, sk.pts[id].y); owner.push('p' + id, 'p' + id); }
   for (const id in sk.ents) { const e = sk.ents[id]; if ((e.t === 'circle' || e.t === 'arc' || e.t === 'ellipse') && !e.ext) { idx['r' + id] = X.length; X.push(e.r); owner.push('r' + id); } }
+  const Pmemo = new Map();
   const P = (id) => {
-    const i = idx['p' + id];
-    if (i === undefined) { const r = sk.pts[id] || REF_PTS[id] || { x: 0, y: 0 }; const c = [r.x, r.y]; return { v: [], g: () => c }; }
-    return { v: [i, i + 1], g: (x) => [x[i], x[i + 1]] };
+    if (Pmemo.has(id)) return Pmemo.get(id); let res;
+    const d = defs.get(id); const i = idx['p' + id];
+    if (d) {
+      const o = P(d.src); const c = d.c;
+      if (c.t === 'patpt') {
+        const pt = sk.pats[c.pat]; const k = c.i;
+        if (pt.kind === 'lin') res = { v: o.v, g: (x) => { const O = o.g(x); return [O[0] + k * pt.dx, O[1] + k * pt.dy]; } };
+        else { const cc = P(pt.c || 'O'); const step = (pt.ang >= 360 - 1e-9 ? 360 / pt.n : pt.ang / Math.max(1, pt.n - 1)) * k * Math.PI / 180; const cs = Math.cos(step), sn = Math.sin(step);
+          res = { v: [...new Set([...o.v, ...cc.v])], g: (x) => { const O = o.g(x), C = cc.g(x); const ux = O[0] - C[0], uy = O[1] - C[1]; return [C[0] + ux * cs - uy * sn, C[1] + ux * sn + uy * cs]; } }; }
+      } else {
+        const [a, b] = L(c.refs[2]);
+        res = { v: [...new Set([...o.v, ...a.v, ...b.v])], g: (x) => { const A = a.g(x), B = b.g(x), O = o.g(x); const dx = B[0] - A[0], dy = B[1] - A[1]; const l2 = dx * dx + dy * dy || 1e-24; const t = ((O[0] - A[0]) * dx + (O[1] - A[1]) * dy) / l2; return [2 * (A[0] + t * dx) - O[0], 2 * (A[1] + t * dy) - O[1]]; } };
+      }
+    } else if (i === undefined) { const r = sk.pts[id] || REF_PTS[id] || { x: 0, y: 0 }; const c = [r.x, r.y]; res = { v: [], g: () => c }; }
+    else res = { v: [i, i + 1], g: (x) => [x[i], x[i + 1]] };
+    Pmemo.set(id, res); return res;
   };
   const R = (id) => { const i = idx['r' + id]; if (i === undefined) { const r = ge(sk, id).r; return { v: [], g: () => r }; } return { v: [i], g: (x) => x[i] }; };
   // An ellipse stands for its major axis, from the centre to the end point.
@@ -488,16 +518,16 @@ function buildSystem(sk, opts = {}) {
     const e = sk.ents[id];
     if (e.t === 'arc') {
       const c = P(e.c), a = P(e.p1), b = P(e.p2), r = R(id);
-      // A pattern copy has its centre and both ends placed by the pattern: one end is enough to give its radius,
-      // the other would only repeat it (and show the copy as overdefined).
-      if (e.pat && sk.pats?.[e.pat]) add('arc:' + id, [c, a, r], (x) => { const C = c.g(x), A = a.g(x); return [Math.hypot(A[0] - C[0], A[1] - C[1]) - r.g(x)]; }, 1);
+      // A copy (pattern or mirror) has its centre and both ends placed by its source: one end is enough to give its
+      // radius, the other would only repeat it (and show the copy as overdefined).
+      if ((e.pat && sk.pats?.[e.pat] && opts.noDerive) || (defs.has(e.c) && defs.has(e.p1) && defs.has(e.p2))) add('arc:' + id, [c, a, r], (x) => { const C = c.g(x), A = a.g(x); return [Math.hypot(A[0] - C[0], A[1] - C[1]) - r.g(x)]; }, 1);
       else add('arc:' + id, [c, a, b, r], (x) => { const C = c.g(x), A = a.g(x), B = b.g(x), rr = r.g(x); return [Math.hypot(A[0] - C[0], A[1] - C[1]) - rr, Math.hypot(B[0] - C[0], B[1] - C[1]) - rr]; }, 2);
     }
   }
   for (const cid in sk.cons) {
     const c = sk.cons[cid];
     if (opts.skip && opts.skip.has(cid)) continue;
-    if (c.driven) continue;
+    if (c.driven || used.has(cid)) continue;
     const r = c.refs;
     const dir = (A, B) => [B[0] - A[0], B[1] - A[1]];
     const cross = (u, v) => u[0] * v[1] - u[1] * v[0];
@@ -618,7 +648,7 @@ function buildSystem(sk, opts = {}) {
       }
     }
   }
-  return { idx, X: Float64Array.from(X), owner, eqs };
+  return { idx, X: Float64Array.from(X), owner, eqs, derived: [...defs.keys()].map((id) => [id, P(id)]), rootOf };
 }
 const residual = (sys, X) => { const F = []; for (const e of sys.eqs) F.push(...e.f(X)); return F; };
 function jacobian(sys, X, step = 1e-7) {
@@ -680,6 +710,7 @@ function solveSystem(sys, X, weights, tol = 1e-10) {
 }
 function writeBack(sk, sys, X) {
   for (const id in sk.pts) { const i = sys.idx['p' + id]; if (i === undefined) continue; sk.pts[id].x = X[i]; sk.pts[id].y = X[i + 1]; }
+  for (const [id, p] of sys.derived || []) { const q = p.g(X); sk.pts[id].x = q[0]; sk.pts[id].y = q[1]; }
   for (const id in sk.ents) { const i = sys.idx['r' + id]; if (i !== undefined) sk.ents[id].r = Math.abs(X[i]); }
 }
 function solveSketch(sk, weights) {
@@ -820,13 +851,14 @@ const lineLens = (sk) => Object.values(sk.ents).filter((e) => e.t === 'line').ma
 // Adds a constraint the way SolidWorks does: a duplicate relation is dropped, a dimension that
 // would over-define the sketch becomes a reference (driven) dimension, a conflict is refused and
 // reported together with the constraints it conflicts with.
-function tryAddConstraint(sk, con) {
+function tryAddConstraint(sk, con, opt = {}) {
   const before = snapshotGeo(sk); const lensBefore = new Map(lineLens(sk));
   const isDim = DIM_TYPES.has(con.t);
   if (isDim && con.v == null) con.v = measure(sk, con);
   initSigns(sk, con);
   sk.cons[con.id] = con;
-  const sys = buildSystem(sk); const X = Float64Array.from(sys.X);
+  // The plain system (copies as unknowns): a new symmetry or pattern relation must show up as rows to be checked.
+  const sys = buildSystem(sk, { noDerive: !opt.derive }); const X = Float64Array.from(sys.X);
   const rows = jacobian(sys, X);
   const own = rows.filter((r) => r.cid === con.id); const others = rows.filter((r) => r.cid !== con.id);
   const { dependent, basis } = eliminate([...others, ...own], X.length);
@@ -1951,11 +1983,11 @@ function entState(sk, e) {
   if (e.constr) return 'constr';
   const a = S.analysis; if (!a) return 'under';
   const vars = [];
-  const pv = (id) => { const i = a.sys.idx['p' + id]; if (i !== undefined) vars.push(i, i + 1); };
+  const pv = (id) => { const i = a.sys.idx['p' + (a.sys.rootOf?.[id] ?? id)]; if (i !== undefined) vars.push(i, i + 1); };
   if (e.t === 'spline') e.pts.forEach(pv); else if (e.t === 'ellipse') { pv(e.c); pv(e.p1); const i = a.sys.idx['r' + e.id]; if (i !== undefined) vars.push(i); } else if (e.t === 'line') { pv(e.p1); pv(e.p2); } else { pv(e.c); const i = a.sys.idx['r' + e.id]; if (i !== undefined) vars.push(i); if (e.t === 'arc') { pv(e.p1); pv(e.p2); } }
   return vars.some((v) => a.free.has(v)) ? 'under' : 'full';
 }
-function ptState(id) { const a = S.analysis; if (!a || isRefPt(id) || editSk()?.pts[id]?.fixed) return 'full'; const i = a.sys.idx['p' + id]; return a.free.has(i) || a.free.has(i + 1) ? 'under' : 'full'; }
+function ptState(id) { const a = S.analysis; if (!a || isRefPt(id) || editSk()?.pts[id]?.fixed) return 'full'; const i = a.sys.idx['p' + (a.sys.rootOf?.[id] ?? id)]; return a.free.has(i) || a.free.has(i + 1) ? 'under' : 'full'; }
 
 // ---------------- rendering of sketches ----------------
 function sketchVisible(f) { return f.show === true || (f.show !== false && !S.doc.features.some((g) => g.sketch === f.id || g.path === f.id || g.sketches?.includes(f.id))); }
@@ -2324,7 +2356,19 @@ function dragTo(m) {
   const moveIds = new Set(); let radiusOf = null;
   if (D.key.startsWith('p:')) { const id = D.key.slice(2); if (!isRefPt(id)) moveIds.add(id); }
   else if (D.key.startsWith('e:')) { const e = sk.ents[D.key.slice(2)]; if (!e) return; if (e.t === 'line') { moveIds.add(e.p1); moveIds.add(e.p2); } else if (e.t === 'spline') e.pts.forEach((q) => moveIds.add(q)); else if (e.t === 'ellipse') { moveIds.add(e.c); moveIds.add(e.p1); } else if (!e.ext) { radiusOf = e; } }
-  for (const id of moveIds) if (sk.pts[id] && !sk.pts[id].fixed) { sk.pts[id].x += du; sk.pts[id].y += dv; }
+  // A copy or mirror image is moved through its source: the source takes the motion carried back through the
+  // copy's placement (found numerically, so patterns, rotations and mirrors all work the same).
+  const sys0 = buildSystem(sk); const direct = [], lifted = new Map();
+  for (const id of moveIds) {
+    if (!sk.pts[id] || sk.pts[id].fixed) continue; const r = sys0.rootOf[id]; if (!r) { direct.push(id); continue; }
+    const i = sys0.idx['p' + r]; if (i === undefined) continue; const g = sys0.derived.find(([q]) => q === id)[1].g; const X0 = Float64Array.from(sys0.X); const base = g(X0); const J = [[0, 0], [0, 0]];
+    for (let k = 0; k < 2; k++) { const X1 = Float64Array.from(X0); X1[i + k] += 1e-3; const q = g(X1); J[0][k] = (q[0] - base[0]) / 1e-3; J[1][k] = (q[1] - base[1]) / 1e-3; }
+    const det = J[0][0] * J[1][1] - J[0][1] * J[1][0]; if (Math.abs(det) < 1e-9) continue;
+    lifted.set(r, [(J[1][1] * du - J[0][1] * dv) / det, (-J[1][0] * du + J[0][0] * dv) / det]);
+  }
+  moveIds.clear();
+  for (const id of direct) { sk.pts[id].x += du; sk.pts[id].y += dv; moveIds.add(id); }
+  for (const [r, [sx, sy]] of lifted) if (!moveIds.has(r)) { sk.pts[r].x += sx; sk.pts[r].y += sy; moveIds.add(r); }
   if (radiusOf) { const c = gp(sk, radiusOf.c); radiusOf.r = Math.max(1e-3, Math.hypot(m.u - c.x, m.v - c.y)); }
   const sys = buildSystem(sk); const X = Float64Array.from(sys.X); const w = [];
   for (const id of moveIds) { const i = sys.idx['p' + id]; if (i !== undefined) w.push([i, 1e-4], [i + 1, 1e-4]); }
@@ -3021,15 +3065,22 @@ function mirrorEntities(sk, ids, axisId) {
     else if (e.t === 'circle') { sk.ents[nidE] = { id: nidE, t: 'circle', c: mp(e.c), r: e.r, constr: e.constr }; pending.push({ t: 'equal', refs: [e.id, nidE] }); }
     else if (e.t === 'spline') { const pts = e.pts.map(mp); sk.ents[nidE] = { id: nidE, t: 'spline', pts, p1: pts[0], p2: pts[pts.length - 1], closed: e.closed, constr: e.constr }; }
     else if (e.t === 'ellipse') { sk.ents[nidE] = { id: nidE, t: 'ellipse', c: mp(e.c), p1: mp(e.p1), r: e.r, constr: e.constr }; pending.push({ t: 'equal', refs: [e.id, nidE] }); }
-    else { sk.ents[nidE] = { id: nidE, t: 'arc', c: mp(e.c), p1: mp(e.p2), p2: mp(e.p1), r: e.r, constr: e.constr }; pending.push({ t: 'equal', refs: [e.id, nidE] }); }
+    else sk.ents[nidE] = { id: nidE, t: 'arc', c: mp(e.c), p1: mp(e.p2), p2: mp(e.p1), r: e.r, constr: e.constr };
     if (!sk.ents[nidE].constr) delete sk.ents[nidE].constr;
   }
-  addRelations(sk, pending); return n;
+  // The image is consistent by construction: its relations go in at once. Checking each one against the whole
+  // sketch (hundreds of them for a pattern) froze the page for minutes.
+  // A point already on the axis (an end of it, or tied to one) may already be held there: that check is cheap and kept.
+  for (const c of pending) { c.id = nid(sk); if (c.t === 'online') tryAddConstraint(sk, c, { derive: true }); else sk.cons[c.id] = c; }
+  return n;
 }
 function cmdMirror() {
   const sk = editSk(); const ents = [...S.sel].filter((k) => k.startsWith('e:')).map((k) => k.slice(2));
   const lines = ents.filter((id) => ge(sk, id)?.t === 'line');
-  const axis = lines.find((id) => id === 'H' || id === 'V' || ge(sk, id).constr) || lines[lines.length - 1];
+  // The axis: an origin axis if picked, else the longest construction line (a box around a pattern also takes the
+  // pattern's own construction lines), else the last line picked.
+  const lenOf = (id) => { const e = ge(sk, id); const a = gp(sk, e.p1), b = gp(sk, e.p2); return Math.hypot(b.x - a.x, b.y - a.y); };
+  const axis = lines.find((id) => id === 'H' || id === 'V') || lines.filter((id) => ge(sk, id).constr).sort((a, b) => lenOf(b) - lenOf(a))[0] || lines[lines.length - 1];
   const rest = ents.filter((id) => id !== axis && sk.ents[id]);
   if (!axis || !rest.length) { toast('Выделите элементы и линию (лучше вспомогательную), относительно которой отразить', 'info'); return; }
   const n = mirrorEntities(sk, rest, axis); S.sel.clear(); commitSketch(); toast(`Отражено: ${n}`, 'info');
@@ -6725,5 +6776,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
