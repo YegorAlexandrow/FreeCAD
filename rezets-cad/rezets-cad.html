@@ -5947,15 +5947,16 @@ function asmSolve(asm, weights, extra) {
 }
 function asmAnalyze(asm) {
   const sys = asmSystem(asm); const X = new Float64Array(sys.n);
-  if (!sys.n) { const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > ASM_FIT) bad.add(e.cid); return { dof: 0, free: new Set(), redundant: bad }; }
+  const misses = () => { const bad = new Set(), miss = new Map(); for (const e of sys.eqs) { const v = maxAbs(e.f(X)); if (v > ASM_FIT) { bad.add(e.cid); miss.set(e.cid, Math.max(miss.get(e.cid) || 0, v)); } } return { bad, miss }; };
+  if (!sys.n) { const { bad, miss } = misses(); return { dof: 0, free: new Set(), redundant: bad, miss }; }
   const rows = jacobian(sys, X, 1e-5); const { basis, dependent } = eliminate(rows, sys.n, rankTol(sys));
   for (let i = basis.length - 1; i >= 0; i--) for (let j = 0; j < basis.length; j++) if (j !== i) { const f = basis[j].vec[basis[i].piv]; if (Math.abs(f) > 1e-14) for (let k = 0; k < sys.n; k++) basis[j].vec[k] -= f * basis[i].vec[k]; }
   const piv = new Set(basis.map((b) => b.piv)); const freeCols = [...Array(sys.n).keys()].filter((k) => !piv.has(k)); const free = new Set(freeCols);
   for (const b of basis) if (freeCols.some((f) => Math.abs(b.vec[f]) > 1e-7)) free.add(b.piv);
   const freeComps = new Set(); for (const [id, i] of sys.idx) for (let k = 0; k < 6; k++) if (free.has(6 * i + k)) { freeComps.add(id); break; }
   // Consistent overlap between mates is normal in assemblies; only unsatisfied mates are errors.
-  const bad = new Set(); for (const e of sys.eqs) if (maxAbs(e.f(X)) > ASM_FIT) bad.add(e.cid); void dependent;
-  return { dof: sys.n - basis.length, free: freeComps, redundant: bad };
+  const { bad, miss } = misses(); void dependent;
+  return { dof: sys.n - basis.length, free: freeComps, redundant: bad, miss };
 }
 const snapPoses = (asm) => asm.comps.map((c) => [c.id, c.T.slice()]);
 const restorePoses = (asm, s) => { for (const [id, T] of s) { const c = asm.comps.find((x) => x.id === id); if (c) c.T = T; } };
@@ -6304,7 +6305,7 @@ function renderAsmTree() {
   for (const m of asm.mates) {
     const na = compOf(asm, m.a.comp)?.name, nb = compOf(asm, m.b.comp)?.name;
     const bad = an?.redundant.has(m.id) || m.broken;
-    const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : '') + (S.mateSel === m.id ? ' sel' : '') + (S.asmSel && (m.a.comp === S.asmSel || m.b.comp === S.asmSel) ? ' of-sel' : ''), tabindex: '0', role: 'treeitem', title: m.broken ? `${m.name}: ${m.broken}. Отредактируйте сопряжение и выберите элементы заново` : `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, m.broken ? '!' : MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
+    const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : '') + (S.mateSel === m.id ? ' sel' : '') + (S.asmSel && (m.a.comp === S.asmSel || m.b.comp === S.asmSel) ? ' of-sel' : ''), tabindex: '0', role: 'treeitem', title: m.broken ? `${m.name}: ${m.broken}. Отредактируйте сопряжение и выберите элементы заново` : an?.redundant.has(m.id) ? `${m.name}: не выполняется, расхождение ${fmt(an.miss?.get(m.id) || 0, 3)}. Другие сопряжения не дают его выполнить: погасите или измените одно из них` : `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, m.broken ? '!' : MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
     r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
     r.ondblclick = (e) => (e.target.classList.contains('meta') ? editMateValue(m, r) : editMate(m));
     r.onclick = () => { S.mateSel = S.mateSel === m.id ? null : m.id; if (S.mateSel) S.asmSel = null; asmRefresh(); drawMatePicks(); };
