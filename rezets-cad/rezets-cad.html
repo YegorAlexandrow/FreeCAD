@@ -1584,7 +1584,7 @@ function computeBody(features) {
     try {
       // A STEP model from the project as a body to build on: sketch on its faces, cut, drill, add to it.
       if (f.type === 'stepbody') {
-        const ent = docEntry(f.doc); if (!ent || ent.kind !== 'import') throw new Error('STEP-модели больше нет в проекте');
+        const ent = docEntry(f.doc); if (!ent || ent.kind !== 'import') throw new Error('Импортированной модели (STEP или STL) больше нет в проекте');
         const g = cleanGeo(importGeometry(ent)); cyls = cyls.concat(importCyls(ent)); body = body ? boolean(body, g, ADDITION) : g; S.cache.set(k, { body, err: null, cyls }); continue;
       }
       if (f.type === 'fillet' || f.type === 'chamfer') { body = applyEdgeFeature(f, body); S.cache.set(k, { body, err: null, cyls }); continue; }
@@ -3766,7 +3766,7 @@ function drawEdgeSelection() {
 function cmdStepBody() {
   if (S.editing) exitSketch(); const imps = S.project.docs.filter((d) => d.kind === 'import');
   if (!imps.length) { toast('В проекте нет STEP- или STL-моделей. Сначала «Файл» → «Импорт STEP / STL…», потом вернитесь в деталь', 'info'); return; }
-  const add = (ent) => { const f = { id: fid(), type: 'stepbody', name: nextName('STEP-тело'), doc: ent.id }; const at = rollbackIndex(); S.doc.features.splice(at, 0, f); if (S.doc.rollback != null) S.doc.rollback++; rebuild(); pushUndo(); renderSide(); if (!S.errors[f.id]) toast(`«${ent.name}» стало телом детали: выбирайте его грани для эскизов`, 'info'); };
+  const add = (ent) => { const f = { id: fid(), type: 'stepbody', name: nextName('Импорт-тело'), doc: ent.id }; const at = rollbackIndex(); S.doc.features.splice(at, 0, f); if (S.doc.rollback != null) S.doc.rollback++; rebuild(); pushUndo(); renderSide(); if (!S.errors[f.id]) toast(`«${ent.name}» стало телом детали: выбирайте его грани для эскизов`, 'info'); };
   if (imps.length === 1) { add(imps[0]); return; }
   const b = document.querySelector('[title^="Взять STEP-модель"]')?.getBoundingClientRect() || { left: 200, bottom: 120 };
   openMenu(b.left, b.bottom + 4, imps.map((d) => [d.name, () => add(d)]));
@@ -4418,7 +4418,7 @@ function storedJson(d) {
 }
 async function cloudSave() {
   if (!CLOUD.db || CLOUD.conflict || CLOUD.blocked) return; if (CLOUD.saving) { CLOUD.again = true; return; }
-  CLOUD.saving = true; CLOUD.lastStart = Date.now(); setCloudState('saving'); let failed = false;
+  CLOUD.saving = true; CLOUD.lastStart = Date.now(); CLOUD.dueAt = 0; setCloudState('saving'); let failed = false;
   try {
     // Someone saved after us (another tab or device): stop rather than overwrite their work.
     const cur = await dbCall(metaRef().get()); const curMeta = cur.exists ? cur.data() : null;
@@ -4481,7 +4481,10 @@ function cloudSaveSoon() {
   // While the cloud copy is being read (or could not be read) nothing goes up: say that, not «Сохраняю…».
   if (CLOUD.blocked) { if (CLOUD.state !== 'error') setCloudState('loading'); return; }
   // Saves are at least 5 s apart: each one is several calls, and the cloud limits how many a viewer makes.
-  clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, Math.max(1500, (CLOUD.lastStart || 0) + 5000 - Date.now()));
+  // A save already due is not pushed back by the next edit (editing every second used to put it off for good): it
+  // takes whatever the project is when it runs.
+  setCloudState('saving'); if (CLOUD.dueAt > Date.now()) return;
+  clearTimeout(cloudTimer); const wait = Math.max(1500, (CLOUD.lastStart || 0) + 5000 - Date.now()); CLOUD.dueAt = Date.now() + wait; cloudTimer = setTimeout(cloudSave, wait);
 }
 document.getElementById('saveState')?.addEventListener('click', () => { if (CLOUD.choice) { CLOUD.choice(); return; } if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
 // Closing while the cloud copy is behind (saving, waiting out a limit, offline, failed) asks first: the edits live only in this browser then.
@@ -4489,13 +4492,13 @@ window.addEventListener('beforeunload', (e) => { if (CLOUD.db && !CLOUD.conflict
 // Earlier revisions of a document, to roll back from the tab's menu.
 function docVersionsMenu(d, x, y) {
   const dm = CLOUD.meta?.docs.find((q) => q.id === d.id); if (!dm || (dm.revs || []).length < 2) { toast('Других версий в облаке нет', 'info'); return; }
-  openMenu(x, y, dm.revs.slice(1).map((r) => [`Вернуть версию от ${new Date(r.savedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`, async () => {
+  openMenu(x, y, dm.revs.slice(1).map((r) => [`Вернуть версию от ${new Date(r.savedAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}${r.size ? ', ' + (r.size < 1e6 ? Math.max(1, Math.round(r.size / 1024)) + ' КБ' : fmt(r.size / 1048576, 1) + ' МБ') : ''}`, async () => {
     try { const o = docFromStore(await loadRev(dm, r)); leaveCurrentDoc(); d.data = o.data; d._hist = undefined; S.project.active = d.id; S.mode = null; S.cache.clear(); enterDoc(); saveProjectSoon(); toast(`«${d.name}»: восстановлена версия от ${new Date(r.savedAt).toLocaleTimeString('ru-RU')}`, 'info', [{ label: 'Отменить', act: undo }]); }
     catch (e) { toast('Версия повреждена: ' + e.message, 'err'); } }]));
 }
 async function exportProjectFile() {
   if (SRV.on) { await serverSave(); const a = h('a', { href: `/api/projects/${SRV.pid}/export`, download: '' }); document.body.append(a); a.click(); a.remove(); return; }
-  const json = JSON.stringify(projectToJSON()); const name = (S.project.name || 'Проект') + ' ' + new Date().toISOString().slice(0, 10) + '.rezets.json';
+  const json = JSON.stringify(projectToJSON()); const now = new Date(); const pad = (v) => String(v).padStart(2, '0'); const name = (S.project.name || 'Проект').replace(/[\\/:*?"<>|]+/g, '_') + ` ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}.rezets.json`;
   if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: name, data: json }); return; } catch (e) { if (e?.code === 'declined' || e?.code === 'cancelled') return; console.warn('download', e); } }
   showModal('Сохранить проект', 'Скопируйте текст в файл .json. Открыть его можно кнопкой «Открыть…».', json, [['Копировать', copyText], ['Закрыть', closeModal]]);
 }
@@ -6403,7 +6406,7 @@ function startRollDrag(ev) {
   window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
 }
 function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? null : i; rebuild(); if (!live) pushUndo(); }
-function editFeature(f) { if (!f) return; if (f.type === 'stepbody') { const imps = S.project.docs.filter((d) => d.kind === 'import'); if (imps.length < 2) { toast('Других STEP-моделей в проекте нет', 'info'); return; } const r = side.getBoundingClientRect(); openMenu(r.left + 40, r.top + 120, imps.map((d) => [(d.id === f.doc ? '✓ ' : '') + d.name, () => { f.doc = d.id; rebuild(); pushUndo(); renderSide(); }])); return; } if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
+function editFeature(f) { if (!f) return; if (f.type === 'stepbody') { const imps = S.project.docs.filter((d) => d.kind === 'import'); if (imps.length < 2) { toast('Других импортированных моделей в проекте нет', 'info'); return; } const r = side.getBoundingClientRect(); openMenu(r.left + 40, r.top + 120, imps.map((d) => [(d.id === f.doc ? '✓ ' : '') + d.name, () => { f.doc = d.id; rebuild(); pushUndo(); renderSide(); }])); return; } if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; } }
@@ -6730,7 +6733,7 @@ function renderDocTabs() {
   b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, b)); };
   box.append(b);
 }
-const GROUP_NAME = { part: 'Детали', asm: 'Сборки', import: 'STEP-модели', drw: 'Чертежи' };
+const GROUP_NAME = { part: 'Детали', asm: 'Сборки', import: 'Импорт (STEP, STL)', drw: 'Чертежи' };
 function openDocList(btn) {
   if (!menu.hidden && menu.dataset.kind === 'docs') { closeMenu(); return; }
   menu.textContent = ''; menu.onHover = null; menu.dataset.kind = 'docs'; menu.classList.add('doclist');

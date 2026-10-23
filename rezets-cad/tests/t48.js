@@ -14,7 +14,7 @@ const mock = () => {
   await p.waitForTimeout(2500);
   L('state after start', await p.$eval('#saveState', (e) => e.dataset.state + ' ' + e.textContent), await p.evaluate(() => [...window.__store.keys()].length));
   await p.setInputFiles('#stepIn', __dirname + '/../testdata/servo.step'); await p.waitForFunction(() => window.__rezets.S.mode === 'import', null, { timeout: 60000 });
-  await p.waitForTimeout(3000);
+  await p.waitForTimeout(9000);
   L('after import', await p.$eval('#saveState', (e) => e.dataset.state), await p.evaluate(() => { const m = JSON.parse(window.__store.get('data/users/u1/project')); return JSON.stringify(m.docs.map((d) => [d.name, d.revs.length, d.revs[0].chunks, d.revs[0].size])); }));
   // reload the stored project into a fresh object and compare
   const same = await p.evaluate(async () => { const R = window.__rezets; const meta = await R.cloudInit(); const pr = await R.cloudLoadProject(meta); const a = JSON.stringify(pr.docs.map(R.docToStore)), b2 = JSON.stringify(R.S.project.docs.map(R.docToStore)); return [a.length, a === b2]; });
