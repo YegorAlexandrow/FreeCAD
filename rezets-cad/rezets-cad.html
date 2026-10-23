@@ -2489,7 +2489,7 @@ canvas.addEventListener('pointermove', (ev) => {
 });
 canvas.addEventListener('pointerup', (ev) => {
   const d = down; down = null;
-  if (S.editing) { if (d && d.button === 0) sketchUp(ev, d); return; }
+  if (S.editing) { if (d && d.button === 0) sketchUp(ev, d); if (d && d.button === 2 && !d.moved) sketchContext(ev); return; }
   if (S.mode === 'asm' && !S.measure) {
     // Inside the mate panel a right click hides the component in the way, to reach the face behind it.
     if (d && d.button === 2 && !d.moved && S.pm?.kind === 'mate') { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); const items = []; if (c) items.push([`Скрыть «${c.name}»`, () => toggleCompHidden(c)]); if (S.doc.comps.some((x) => x.hidden)) items.push(['Показать скрытые', () => { for (const x of S.doc.comps) delete x.hidden; asmRefresh(); pushUndo(); }]); if (items.length) openMenu(ev.clientX, ev.clientY, items); return; }
@@ -7102,6 +7102,20 @@ function renderSketchPanel() {
     h('button', { class: 'big-btn', onclick: exitSketch }, 'Выйти из эскиза'),
     h('button', { class: 'ghost-btn', onclick: discardSketch }, 'Отменить изменения')));
   side.append(pmEl);
+}
+// Right click in a sketch: what can be done with the item under the cursor (picked if it was not), or with the sketch.
+function sketchContext(ev) {
+  const sk = editSk(); if (!sk) return; if (S.draw) { endDrawing(); setTool('select'); return; }
+  const p = pick(mouseToSketch(ev)); if (p?.key.startsWith('r:')) p.key = materialize(sk, p.key);
+  if (p && !S.sel.has(p.key)) { S.sel = new Set([p.key]); refreshSketch(); }
+  const items = [];
+  if (S.sel.size) {
+    for (const [, l, fn] of relationOptions(sk)) items.push([l, () => applyRelation(fn)]);
+    if ([...S.sel].some((k) => k.startsWith('e:') && sk.ents[k.slice(2)])) items.push(['Вспомогательная геометрия (G)', toggleConstruction]);
+    if (S.sel.size <= 2 && [...S.sel].every((k) => k.startsWith('e:') || k.startsWith('p:'))) items.push(['Размер (D)', () => setTool('dim')]);
+    items.push(['Удалить (Delete)', deleteSelection]);
+  } else items.push(['Линия (L)', () => setTool('line')], ['Окружность (C)', () => setTool('circle')], ['Прямоугольник (R)', () => setTool('rect')], ['Выйти из эскиза', exitSketch], ['Выйти без сохранения изменений', discardSketch]);
+  openMenu(ev.clientX, ev.clientY, items);
 }
 function discardSketch() { const fb = editF(); fb.sk = JSON.parse(S.editBackup); S.editing = fb.id; exitSketch(); toast('Изменения эскиза отменены', 'info'); }
 function renderCorner() {
