@@ -1695,6 +1695,7 @@ function computeBody(features) {
     let err = null; let warn = null;
     try {
       if (f.varErr) throw new Error(f.varErr);
+      if (f.end === 'face' && f.target?.face?.by && body && !onSomeFace(body, f.target)) throw new Error('Грани, до которой идёт вытягивание, больше нет. Выберите другую');
       if (f.type === 'mirror' && f.lostFeats && !f.feats?.length) throw new Error('Отражаемые элементы удалены. Выберите элементы или «Всё тело»');
       // A STEP model from the project as a body to build on: sketch on its faces, cut, drill, add to it.
       if (f.type === 'stepbody') {
