@@ -2906,6 +2906,8 @@ function relationOptions(sk) {
     if (circs.length === 2) out.push(['tangent', 'Касательно', () => pairs.map(([a, b]) => ({ t: 'tangent', refs: [a.id, b.id] }))]);
   }
   if (pts.length && !ents.length) out.push(['fix', 'Зафиксировать', () => pts.filter((p) => !isRefPt(p)).map((p) => ({ t: 'fix', refs: [p] }))]);
+  // Curves are fixed by their points (a circle by its centre; its size stays for a dimension).
+  if (!pts.length && ents.length && ents.every((e) => !e.ext && !REF_ENTS[e.id])) out.push(['fix', 'Зафиксировать', () => [...new Set(ents.flatMap(entPts))].filter((p) => !isRefPt(p)).map((p) => ({ t: 'fix', refs: [p] }))]);
   // A relation already there, or its opposite (horizontal on a vertical line), is not offered.
   const OPP = { horizontal: 'vertical', vertical: 'horizontal', parallel: 'perpendicular', perpendicular: 'parallel', hpts: 'vpts', vpts: 'hpts' };
   const has = (t, refs) => Object.values(sk.cons).some((x) => x.t === t && x.refs.length === refs.length && x.refs.every((r) => refs.includes(r)));
@@ -7637,7 +7639,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:') && !S.pm) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
   if (k === 'f') return fitView();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
-  if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase()); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
+  if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase() && (t !== 'fix' || [...S.sel].every((x) => x.startsWith('p:')))); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
   if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); if (k === 'e' || k === 'x') { if (S.draw) endDrawing(); return cmdFeature('extrude', k === 'e' ? 'add' : 'cut'); } }
   // An open operation panel is not dropped by a command key: what was typed into it would be lost.
   else if (S.pm && ['m', 's', 'e', 'x'].includes(k)) { toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); }
