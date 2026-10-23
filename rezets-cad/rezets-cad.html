@@ -2837,7 +2837,10 @@ function relationOptions(sk) {
     if (circs.length === 2) out.push(['tangent', 'Касательно', () => pairs.map(([a, b]) => ({ t: 'tangent', refs: [a.id, b.id] }))]);
   }
   if (pts.length && !ents.length) out.push(['fix', 'Зафиксировать', () => pts.filter((p) => !isRefPt(p)).map((p) => ({ t: 'fix', refs: [p] }))]);
-  return out;
+  // A relation already there, or its opposite (horizontal on a vertical line), is not offered.
+  const OPP = { horizontal: 'vertical', vertical: 'horizontal', parallel: 'perpendicular', perpendicular: 'parallel', hpts: 'vpts', vpts: 'hpts' };
+  const has = (t, refs) => Object.values(sk.cons).some((x) => x.t === t && x.refs.length === refs.length && x.refs.every((r) => refs.includes(r)));
+  return out.filter(([, , fn]) => { const list = fn(); return !list.length || !list.every((c) => has(c.t, c.refs) || (OPP[c.t] && has(OPP[c.t], c.refs))); });
 }
 function applyRelation(fn) {
   const sk = editSk(); const list = fn(); S.conflict = new Set();
