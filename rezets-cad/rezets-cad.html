@@ -339,7 +339,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
   <footer id="status"><span id="stState"></span><span id="hint"></span><span class="spacer"></span><span class="num" id="stXY"></span><span>мм</span></footer>
 </div>
 <div id="menu" hidden></div>
-<div id="modal" hidden><div class="mbox"><h2 id="mTitle"></h2><div class="note" id="mNote"></div><textarea id="mText" spellcheck="false"></textarea><div class="acts" id="mActs"></div></div></div>
+<div id="modal" hidden><div class="mbox" role="dialog" aria-modal="true" aria-labelledby="mTitle" aria-describedby="mNote"><h2 id="mTitle"></h2><div class="note" id="mNote"></div><textarea id="mText" spellcheck="false"></textarea><div class="acts" id="mActs"></div></div></div>
 <div id="projModal" hidden><div class="mbox projbox" id="projBox"></div></div>
 <input type="file" id="fileIn" accept=".json,.rezets,application/json,.step,.stp,.stl" hidden>
 <input type="file" id="stepIn" accept=".step,.stp,.STEP,.STP,.stl,.STL" hidden>
@@ -4991,7 +4991,7 @@ function setCloudState(st, note) {
   if (st === 'saved') CLOUD.savedAt = new Date();
   const hm = CLOUD.savedAt ? CLOUD.savedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
   const txt = { local: 'В браузере', saving: 'Сохраняю…', saved: 'Сохранено ' + hm, loading: 'Загружаю из облака…', wait: 'Жду облако', error: 'Не сохранено', conflict: 'Изменён в другом окне', offline: 'Нет связи' }[st] || st;
-  el.textContent = txt; el.dataset.state = st === 'loading' || st === 'wait' ? 'saving' : st; el.style.cursor = ['error', 'offline', 'wait'].includes(st) ? 'pointer' : ''; el.title = note || (st !== 'saved' && CLOUD.savedAt ? `Последнее сохранение в облако: ${hm}. ` : '') + ({ local: 'Облако недоступно: проект хранится только в этом браузере. Делайте резервные копии кнопкой «Сохранить…»', saved: 'Проект сохранён в облаке Claude и доступен на любом устройстве', saving: 'Идёт сохранение в облако', error: 'Последнее сохранение в облако не удалось, повторю при следующем изменении', conflict: 'Проект сохранили в другом окне или на другом устройстве. Перезагрузите страницу, чтобы не затереть те изменения', offline: 'Облако временно недоступно, повторю сам', loading: 'Проект читается из облака; пока он не прочитан, в облако ничего не пишется' }[st] || '');
+  el.textContent = txt; el.dataset.state = st === 'loading' || st === 'wait' ? 'saving' : st; el.style.cursor = ['error', 'offline', 'wait', 'conflict'].includes(st) ? 'pointer' : ''; el.title = note || (st !== 'saved' && CLOUD.savedAt ? `Последнее сохранение в облако: ${hm}. ` : '') + ({ local: 'Облако недоступно: проект хранится только в этом браузере. Делайте резервные копии кнопкой «Сохранить…»', saved: 'Проект сохранён в облаке Claude и доступен на любом устройстве', saving: 'Идёт сохранение в облако', error: 'Последнее сохранение в облако не удалось, повторю при следующем изменении', conflict: 'Проект сохранили в другом окне или на другом устройстве. Перезагрузите страницу, чтобы не затереть те изменения', offline: 'Облако временно недоступно, повторю сам', loading: 'Проект читается из облака; пока он не прочитан, в облако ничего не пишется' }[st] || '');
 }
 const metaRef = () => CLOUD.db.doc(`data/users/${CLOUD.uid}/project`);
 const chunkCol = () => metaRef().collection('chunks');
@@ -5127,7 +5127,9 @@ function cloudSaveSoon() {
   setCloudState('saving'); if (CLOUD.dueAt > Date.now()) return;
   clearTimeout(cloudTimer); const wait = Math.max(1500, (CLOUD.lastStart || 0) + 5000 - Date.now()); CLOUD.dueAt = Date.now() + wait; cloudTimer = setTimeout(cloudSave, wait);
 }
-document.getElementById('saveState')?.addEventListener('click', () => { if (CLOUD.choice) { CLOUD.choice(); return; } if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
+document.getElementById('saveState')?.addEventListener('click', () => { if (CLOUD.choice) { CLOUD.choice(); return; }
+  // In a conflict the only way on is the copy in the cloud: the badge says so and reloads.
+  if (CLOUD.state === 'conflict') { showModal('Проект изменён в другом окне', 'Изменения в этой вкладке больше не попадают в облако. Перезагрузите страницу, чтобы открыть сохранённую там версию; то, что сделано здесь после неё, пропадёт.', null, [['Перезагрузить', () => location.reload()], ['Закрыть', closeModal]]); return; } if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
 // Closing while the cloud copy is behind (saving, waiting out a limit, offline, failed) asks first: the edits live only in this browser then.
 window.addEventListener('beforeunload', (e) => { if (CLOUD.db && !CLOUD.conflict && (CLOUD.saving || ['saving', 'wait', 'offline'].includes(CLOUD.state) || (CLOUD.state === 'error' && SYNC.get()?.dirty))) { e.preventDefault(); e.returnValue = ''; } });
 // Earlier revisions of a document, to roll back from the tab's menu.
@@ -7457,6 +7459,11 @@ function openMenu(x, y, items) {
   for (const it of items) { if (!it) { menu.append(h('hr')); continue; } const b = h('button', { onclick: () => { closeMenu(); it[1](); } }, it[0]);
     if (it[2]) { b.addEventListener('pointerenter', () => { menu.onHover?.(false); menu.onHover = it[2]; it[2](true); }); b.addEventListener('pointerleave', () => { it[2](false); menu.onHover = null; }); } menu.append(b); }
   menu.hidden = false; const r = menu.getBoundingClientRect(); menu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px'; menu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
+  // Arrows walk the items, Home and End jump, Enter takes one, Esc closes: the first item has the focus.
+  menu.querySelector('button')?.focus({ preventScroll: true });
+  menu.onkeydown = (e) => { const bs = [...menu.querySelectorAll(':scope > button')]; const k = bs.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); bs[(k + (e.key === 'ArrowDown' ? 1 : -1) + bs.length) % bs.length]?.focus(); }
+    else if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); (e.key === 'Home' ? bs[0] : bs.at(-1))?.focus(); } };
 }
 function closeMenu() { menu.hidden = true; delete menu.dataset.kind; menu.classList.remove('doclist', 'docgrid'); menu.onHover?.(false); menu.onHover = null; }
 document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target) && !(menu.dataset.kind === 'docs' && e.target.closest?.('.doccur'))) closeMenu(); });
@@ -7844,9 +7851,17 @@ function sampleDoc() {
 // ---------------- files ----------------
 function showModal(title, note, text, acts) {
   $('mTitle').textContent = title; $('mNote').textContent = note; $('mText').hidden = text == null; $('mText').value = text ?? ''; const ma = $('mActs'); ma.textContent = '';
-  for (const [l, fn] of acts) ma.append(h('button', { class: l === 'Закрыть' ? 'ghost-btn' : 'big-btn', onclick: fn }, l)); $('modal').hidden = false;
+  for (const [l, fn] of acts) ma.append(h('button', { class: l === 'Закрыть' ? 'ghost-btn' : 'big-btn', onclick: fn }, l));
+  // The dialog takes the focus (and gives it back when it closes); Tab stays inside it, Esc closes it.
+  if ($('modal').hidden) modalReturn = document.activeElement; $('modal').hidden = false; (ma.querySelector('button') || $('mText')).focus();
 }
-const closeModal = () => { $('modal').hidden = true; };
+let modalReturn = null;
+const closeModal = () => { $('modal').hidden = true; const r = modalReturn; modalReturn = null; if (r?.isConnected) r.focus?.(); };
+$('modal').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeModal(); return; }
+  if (e.key !== 'Tab') return; const f = [...$('modal').querySelectorAll('button, textarea, input')].filter((x) => !x.hidden && x.offsetParent); if (!f.length) return;
+  const i = f.indexOf(document.activeElement); if (e.shiftKey && i <= 0) { e.preventDefault(); f.at(-1).focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
+});
 // F1 or «?»: every keyboard shortcut in one place, grouped by where it works.
 const HELP_KEYS = [
   ['Везде', [['Ctrl+Z / Ctrl+Y', 'Отменить / вернуть'], ['Ctrl+S', 'Сохранить сейчас'], ['F', 'Вписать модель в окно'], ['Стрелки', 'Повернуть вид на 15°, с Shift на 90°'], ['Alt+← / →', 'Повернуть вид вокруг направления взгляда'], ['Enter', 'OK в открытой панели'], ['Esc', 'Отмена: инструмент, выделение, панель'], ['F2', 'Переименовать выделенный элемент или компонент'], ['F1 или ?', 'Эта справка']]],
@@ -8048,8 +8063,8 @@ window.addEventListener('keydown', (e) => {
   // Esc in a panel field drops what was typed there (it used to apply it on leaving the field) and, as in SolidWorks,
   // cancels the operation; elsewhere it only leaves the field.
   if (typing) { if (e.key === 'Escape' && !e.defaultPrevented) { const t = e.target; if (t.dataset.v0 != null) t.value = t.dataset.v0; t.blur(); if (S.pm && S.mode === 'part' && t.closest('#side .pm')) closePM(); } return; }
-  // In the document switcher the keys move between its tiles, not the view behind it.
-  if (menu.dataset.kind === 'docs' && e.target.closest?.('#menu')) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } return; }
+  // In a menu or the document switcher the keys move between its items, not the view behind it.
+  if (!menu.hidden && e.target.closest?.('#menu')) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } return; }
   // Enter and Space belong to the focused button or checkbox (pressing it), not to the shortcuts behind it.
   if ((tag === 'BUTTON' || (tag === 'INPUT' && ['checkbox', 'radio', 'button'].includes(e.target.type))) && (e.key === 'Enter' || e.key === ' ')) return;
   if (tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
