@@ -2773,7 +2773,7 @@ function setRadii(sk, ents, r) {
 function convertFace(sk, m) {
   const f = editF(); const body = S.refs?.body; if (!body) return 'Под эскизом нет тела';
   const N = V3(f.plane.n).normalize(), X = V3(f.plane.x), Y = V3(f.plane.y); const w = toWorld(f.plane, m.u, m.v);
-  let L = null; for (const n of [N, N.clone().negate()]) { L = faceLoops(body, n, w); if (L) break; }
+  let L = null; for (const n of [N, N.clone().negate()]) { L = faceLoops(body, n, w); if (L) break; } const onPlane = !!L;
   // A face parallel to the sketch but off its plane (a sketch on an offset plane) is projected onto it, as
   // SolidWorks' «Convert Entities» does: the face is found straight below or above the click.
   if (!L) { const m = bodyMesh(body); const rc = new THREE.Raycaster(); for (const d of [N.clone().negate(), N]) { rc.set(w.clone().addScaledVector(d, -1e-4), d); const hit = rc.intersectObject(m)[0]; if (!hit) continue; const hn = hit.face.normal.clone(); if (Math.abs(Math.abs(hn.dot(N)) - 1) > 1e-6) continue; for (const n of [N, N.clone().negate()]) { L = faceLoops(body, n, hit.point); if (L) break; } if (L) break; } }
@@ -2787,15 +2787,18 @@ function convertFace(sk, m) {
     // Facets lying on a known circle of the model (a hole, a boss, a fillet) come back as that circle or an arc of
     // it, not as dozens of short lines that can't be dimensioned.
     const circs = [...(S.refs?.circles || []), ...(S.refs?.projCircles || [])]; const onC = pts.map(([x, y]) => circs.findIndex((c) => Math.abs(Math.hypot(x - c.x, y - c.y) - c.r) < Math.max(1e-3, c.r * 2e-3)));
-    const P = (q) => { const id = nid(sk); sk.pts[id] = { id, x: q[0], y: q[1], fixed: true }; return id; };
-    if (onC[0] >= 0 && onC.every((k) => k === onC[0])) { const c = circs[onC[0]]; const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: P([c.x, c.y]), r: c.r }; nLines++; continue; }
+    // On the sketch's own plane the converted outline stays tied to the model (SolidWorks' On Edge): its corners and
+    // circle centres follow when an earlier feature changes.
+    const refOf = (q, circle) => { if (!onPlane || !S.refs?.mref) return null; if (circle) { const i = (S.refs.circles || []).findIndex((c) => Math.hypot(c.x - q[0], c.y - q[1]) < 1e-5); return i >= 0 ? S.refs.mref('c', i) : null; } return S.refs.mref('p', q); };
+    const P = (q, circle) => { const id = nid(sk); const ref = refOf(q, circle); sk.pts[id] = { id, x: q[0], y: q[1], fixed: true, ...(ref ? { free: true, mref: ref } : {}) }; return id; };
+    if (onC[0] >= 0 && onC.every((k) => k === onC[0])) { const c = circs[onC[0]]; const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: P([c.x, c.y], true), r: c.r }; nLines++; continue; }
     // Start at a point where a run changes, so that no arc is cut in two at the loop's seam.
     const n = pts.length; let s0 = 0; for (let i = 0; i < n; i++) if (onC[i] < 0 || onC[i] !== onC[(i - 1 + n) % n]) { s0 = i; break; }
     const seq = Array.from({ length: n + 1 }, (_, k) => (s0 + k) % n); const ids = new Map(); const pid = (i) => { if (!ids.has(i)) ids.set(i, P(pts[i])); return ids.get(i); };
     for (let k = 0; k < n;) {
       const i = seq[k]; const ci = onC[i]; let j = k; if (ci >= 0) while (j + 1 <= n && onC[seq[j + 1]] === ci) j++;
       if (ci >= 0 && j - k >= 2) { const c = circs[ci]; const a = pts[i], b = pts[seq[j]], m2 = pts[seq[k + 1]]; const ccw = (a[0] - c.x) * (m2[1] - c.y) - (a[1] - c.y) * (m2[0] - c.x) > 0;
-        const cp = P([c.x, c.y]); const id = nid(sk); const p1 = pid(i), p2 = pid(seq[j]); sk.ents[id] = { id, t: 'arc', c: cp, p1: ccw ? p1 : p2, p2: ccw ? p2 : p1, r: c.r }; nLines++; k = j; continue; }
+        const cp = P([c.x, c.y], true); const id = nid(sk); const p1 = pid(i), p2 = pid(seq[j]); sk.ents[id] = { id, t: 'arc', c: cp, p1: ccw ? p1 : p2, p2: ccw ? p2 : p1, r: c.r }; nLines++; k = j; continue; }
       const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: pid(i), p2: pid(seq[k + 1]) }; nLines++; k++;
     }
   }
