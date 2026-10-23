@@ -2580,7 +2580,7 @@ function sketchDown(ev) {
   }
   if (S.tool === 'dim') { dimClick(m); return; }
   if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
-  if (S.tool === 'convert') { const r = convertFace(sk, m); if (typeof r === 'string') { toast(r, 'warn'); return; } commitSketch(); toast(`Контур грани в эскизе: ${r} ${plural(r, 'линия', 'линии', 'линий')}. Можно щёлкнуть ещё грань, Esc завершает`, 'info'); return; }
+  if (S.tool === 'convert') { const r = convertEdge(sk, m) || convertFace(sk, m); if (typeof r === 'string') { toast(r, 'warn'); return; } commitSketch(); toast(`Контур грани в эскизе: ${r} ${plural(r, 'линия', 'линии', 'линий')}. Можно щёлкнуть ещё грань, Esc завершает`, 'info'); return; }
   if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true });
     // Two lines clicked one after the other round the corner where they meet.
     if (!p) { const q = pick(m); const L = q?.key.startsWith('e:') && sk.ents[q.key.slice(2)]; if (L?.t === 'line' && !L.ext) { const first = S.filletFirst && sk.ents[S.filletFirst];
@@ -2934,6 +2934,14 @@ function setRadii(sk, ents, r) {
 }
 // «Контур грани», like Convert Entities: the outline of the model face clicked in the sketch plane becomes sketch
 // lines (a STEP gear's teeth and its holes included), fixed where the model has them, ready to extrude.
+// A click right on a model edge or hole rim takes just that edge (SolidWorks' «Convert Entities» on one edge); the
+// copy is ordinary geometry tied to the model, so it can be part of a profile.
+function convertEdge(sk, m) {
+  const p = pick(m, { tol: 6 }); if (!p || !(p.key.startsWith('r:l:') || p.key.startsWith('r:c:')) || !S.refs) return 0; const i = +p.key.split(':')[2];
+  const P = (q, ref) => { const id = nid(sk); sk.pts[id] = { id, x: q[0], y: q[1], fixed: true, ...(ref ? { free: true, mref: ref } : {}) }; return id; };
+  if (p.key.startsWith('r:l:')) { const [x1, y1, x2, y2] = S.refs.lines[i]; const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: P([x1, y1], S.refs.mref?.('p', [x1, y1])), p2: P([x2, y2], S.refs.mref?.('p', [x2, y2])) }; return 1; }
+  const c = S.refs.circles[i]; const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: P([c.x, c.y], S.refs.mref?.('c', i)), r: c.r }; return 1;
+}
 function convertFace(sk, m) {
   const f = editF(); const body = S.refs?.body; if (!body) return 'Под эскизом нет тела';
   const N = V3(f.plane.n).normalize(), X = V3(f.plane.x), Y = V3(f.plane.y); const w = toWorld(f.plane, m.u, m.v);
