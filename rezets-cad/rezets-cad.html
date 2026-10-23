@@ -6708,7 +6708,10 @@ function asmUp(ev, d) {
 // ============================================================================================
 const toolsEl = $('tools');
 function toolBtn(label, icon, onclick, opts = {}) {
-  const b = h('button', { class: 'tool', 'aria-pressed': opts.pressed ? 'true' : 'false', disabled: !!opts.disabled, title: opts.title || label, onclick }, svg(icon), h('span', {}, label));
+  // A part operation started from the toolbar is the one Enter repeats (SolidWorks' «Повторить последнюю команду»).
+  const NO_REPEAT = ['Эскиз', 'Масса', 'Рулетка', 'Выйти', 'Выбор', 'Удалить'];
+  const run = (e) => { if (S.mode === 'part' && !S.editing && !NO_REPEAT.includes(label)) S.lastCmd = { label, fn: onclick }; onclick(e); };
+  const b = h('button', { class: 'tool', 'aria-pressed': opts.pressed ? 'true' : 'false', disabled: !!opts.disabled, title: opts.title || label, onclick: run }, svg(icon), h('span', {}, label));
   if (opts.kbd) b.append(h('kbd', {}, opts.kbd)); return b;
 }
 function renderTools() {
@@ -7670,6 +7673,7 @@ window.addEventListener('keydown', (e) => {
   if (k === 'z' && !e.ctrlKey && !e.metaKey && !e.altKey) { camera.zoom = Math.min(1e4, Math.max(1e-4, camera.zoom * (e.shiftKey ? 1.25 : 0.8))); camera.updateProjectionMatrix(); controls.dispatchEvent({ type: 'change' }); requestRender(); return; }
   if (e.key === 'Enter' && S.editing && S.skOp?.kind === 'offset') { okOffset(); return; }
   if (e.key === 'Enter' && S.pm) { okPM(); return; }
+  if (e.key === 'Enter' && S.mode === 'part' && !S.editing && !S.measure && !S.pickSketch && S.lastCmd) { e.preventDefault(); setHint(`Повтор: ${S.lastCmd.label}`); S.lastCmd.fn(); return; }
   if (e.key === 'Enter' && S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
   if (S.mode === 'asm') {
     if (k === 'f') return fitView();
