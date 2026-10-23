@@ -5312,7 +5312,10 @@ function cmdPattern(type) {
   if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
   const okSeed = (x) => x && (x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole') && !x.suppressed;
   const last = [...S.doc.features.slice(0, rollbackIndex())].reverse().find(okSeed);
-  const sel = S.selectedTree?.startsWith('feat:') ? featById(S.selectedTree.slice(5)) : null; const seed = okSeed(sel) ? sel : type === 'mirror' ? null : last;
+  const sel = S.selectedTree?.startsWith('feat:') ? featById(S.selectedTree.slice(5)) : null;
+  // A face picked first (a hole's wall, a boss's top) means the operation that made it, as SolidWorks takes it.
+  const byFace = type !== 'mirror' && S.selFace && S.faceOrigin ? featById(S.faceOrigin) : null;
+  const seed = okSeed(sel) ? sel : okSeed(byFace) ? byFace : type === 'mirror' ? null : last;
   // A mirror is most often made about a plane just built for it.
   const lastPlane = [...S.doc.features.slice(0, rollbackIndex())].reverse().find((x) => x.type === 'plane' && !x.suppressed);
   const f = type === 'lpattern' ? { id: fid(), type, name: nextName('ЛинейныйМассив'), feats: seed ? [seed.id] : [], dir: { axis: 'x' }, n: 3, d: 20, flip: false, dir2: null, n2: 2, d2: 20, flip2: false }
