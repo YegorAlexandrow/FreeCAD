@@ -28,6 +28,7 @@ const open = require('./harness.js');
     const a1 = R.addDoc('asm', 'Сб1', R.newAsm()); R.asmInsert(part.id); R.asmInsert(part.id); const c2 = S.doc.comps[1].id; S.asmSel = c2;
     const names1 = S.doc.comps.map((c) => c.name); S.doc.comps.splice(0, 1); R.asmInsert(part.id); const names2 = S.doc.comps.map((c) => c.name);
     R.addDoc('asm', 'Сб2', R.newAsm()); return { selInOther: S.asmSel, names1, names2 }; });
+  out.empty = await p.evaluate(() => { const R = window.__rezets; const S = R.S; const n0 = S.doc.features.length; R.startSketch({ ...R.PLANES.right }); R.exitSketch(); const n1 = S.doc.features.length; R.undo(); return { added: n1 - n0, back: S.doc.features.length - n0, editing: !!S.editing }; });
   console.log(JSON.stringify(out));
-  console.log('expect undo editing true sketchKept true; afterEsc = name0; afterEnter name Бобышка-база pm false; failOk pmOpen true added 0; focus INPUT:Глубина...; depth 35; asm selInOther null, names2 without a repeated number');
+  console.log('expect undo editing true sketchKept true; afterEsc = name0; afterEnter name Бобышка-база pm false; failOk pmOpen true added 0; focus INPUT:Глубина...; depth 35; asm selInOther null, names2 without a repeated number; empty: added 0, undo brings it back (back 1, editing true)');
   console.log(logs.join('\n')); await b.close(); })();

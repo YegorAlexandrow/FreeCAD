@@ -3212,6 +3212,9 @@ function exitSketch() {
   if (!S.editing) return; const f = editF();
   // Model points brought in only to be clicked at, and left unused, would hang in the sketch for good.
   for (const [id, p] of Object.entries(f.sk.pts)) if (p.fixed && p.free && !p.hole && !usedPt(f.sk, id)) delete f.sk.pts[id]; S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
+  // A sketch left with nothing drawn in it is not kept (SolidWorks does not make one either); Ctrl+Z brings it back.
+  const empty = !Object.values(f.sk.ents).some((e) => !e.ext) && !Object.values(f.sk.pts).some((p) => !p.fixed);
+  if (empty && !S.doc.features.some((g) => g !== f && JSON.stringify(g).includes(`"${f.id}"`))) { const i = S.doc.features.indexOf(f); if (i >= 0) { S.doc.features.splice(i, 1); if (S.doc.rollback != null && S.doc.rollback > i) S.doc.rollback--; } S.afterSketch = null; S.selectedTree = null; setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo(); toast('Пустой эскиз не сохранён', 'info', [{ label: 'Отменить', act: undo }]); return; }
   setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo();
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
   if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана. Проверьте, что концы линий соединены`, 'warn'); }
