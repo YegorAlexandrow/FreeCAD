@@ -866,6 +866,16 @@ const lineLens = (sk) => Object.values(sk.ents).filter((e) => e.t === 'line').ma
 // Adds a constraint the way SolidWorks does: a duplicate relation is dropped, a dimension that
 // would over-define the sketch becomes a reference (driven) dimension, a conflict is refused and
 // reported together with the constraints it conflicts with.
+function turnLineFor(sk, con, check) {
+  const L = (id) => { const e = sk.ents[id]; return e?.t === 'line' && !e.ext ? e : null; };
+  let e, ux, uy;
+  if (con.t === 'horizontal' || con.t === 'vertical') { e = L(con.refs[0]); if (!e) return false; const a = gp(sk, e.p1), b = gp(sk, e.p2); const h = con.t === 'horizontal'; const sg = Math.sign(h ? b.x - a.x : b.y - a.y) || 1; ux = h ? sg : 0; uy = h ? 0 : sg; }
+  else if (con.t === 'parallel' || con.t === 'perpendicular') { const e0 = L(con.refs[0]); e = L(con.refs[1]); if (!e0 || !e) return false; const a = gp(sk, e0.p1), b = gp(sk, e0.p2); const l = Math.hypot(b.x - a.x, b.y - a.y) || 1; let dx = (b.x - a.x) / l, dy = (b.y - a.y) / l; if (con.t === 'perpendicular') [dx, dy] = [-dy, dx];
+    const c = gp(sk, e.p1), d = gp(sk, e.p2); const sg = Math.sign((d.x - c.x) * dx + (d.y - c.y) * dy) || 1; ux = dx * sg; uy = dy * sg; }
+  else return false;
+  const p1 = sk.pts[e.p1], p2 = sk.pts[e.p2]; if (!p1 || !p2 || p1.fixed || p2.fixed) return false; if (check) return true;
+  const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2, h2 = Math.hypot(p2.x - p1.x, p2.y - p1.y) / 2; p1.x = mx - ux * h2; p1.y = my - uy * h2; p2.x = mx + ux * h2; p2.y = my + uy * h2; return true;
+}
 function tryAddConstraint(sk, con, opt = {}) {
   const before = snapshotGeo(sk); const lensBefore = new Map(lineLens(sk));
   const isDim = DIM_TYPES.has(con.t);
@@ -906,6 +916,11 @@ function tryAddConstraint(sk, con, opt = {}) {
   const ok = solveSystem(sys, X, W);
   let degenerate = false;
   if (ok) { writeBack(sk, sys, X); for (const [id, l] of lineLens(sk)) if (l < 1e-6 && (lensBefore.get(id) ?? 1) > 1e-6) degenerate = true; }
+  // A line turned a right angle in one Newton step shrinks to a point (a vertical line made horizontal): it is
+  // turned about its middle first and solved again from there.
+  if (ok && degenerate && !opt.turned && turnLineFor(sk, con, true)) {
+    delete sk.cons[con.id]; restoreGeo(sk, before); turnLineFor(sk, con); const r = tryAddConstraint(sk, con, { ...opt, turned: true }); if (r.status !== 'ok') restoreGeo(sk, before); return r;
+  }
   const cleanGroup = [...group].filter((g) => !g.startsWith('arc:'));
   if (!ok || degenerate) {
     delete sk.cons[con.id]; restoreGeo(sk, before);
@@ -2147,7 +2162,9 @@ function reportAdd(r, c) {
   if (r.replaced?.length) toast(`Взаимосвязь «${CON_NAMES[c.t]}» добавлена. ${r.replaced.map((x) => '«' + x.name + '»' + (x.driven ? ': размер стал справочным' : ' удалена, она следует из новой')).join('; ')}`, 'info');
   if (r.status === 'redundant') toast(`Взаимосвязь «${CON_NAMES[c.t]}» уже следует из других${r.group.length ? ': ' + r.group.map((g) => conLabel(sk, g)).join(', ') : ''}, поэтому не добавлена`, 'info');
   if (r.status === 'driven') toast(`Размер переопределил бы эскиз и стал справочным${r.group.length ? ' (уже задано: ' + r.group.map((g) => conLabel(sk, g)).join(', ') + ')' : ''}.`, 'warn');
-  if (r.status === 'conflict') { S.conflict = new Set(r.group); toast(`${CON_NAMES[c.t]} противоречит: ${r.group.map((g) => conLabel(sk, g)).join(', ') || 'другим взаимосвязям'}. Конфликтующие выделены красным.`, 'err', r.group.length ? [{ label: 'Выделить', act: () => { S.sel = new Set(r.group.map((g) => 'c:' + g)); refreshSketch(); } }] : []); }
+  if (r.status === 'conflict') { S.conflict = new Set(r.group); toast(`${CON_NAMES[c.t]} противоречит: ${r.group.map((g) => conLabel(sk, g)).join(', ') || 'другим взаимосвязям'}. Конфликтующие выделены красным.`, 'err', r.group.length ? [{ label: 'Выделить', act: () => { S.sel = new Set(r.group.map((g) => 'c:' + g)); refreshSketch(); } },
+    // One relation in the way: it can be swapped for the new one in a click.
+    ...(r.group.length === 1 ? [{ label: 'Заменить', act: () => { const k = editSk(); if (!k?.cons[r.group[0]]) return; delete k.cons[r.group[0]]; S.conflict = new Set(); const c2 = { ...c, id: nid(k) }; reportAdd(tryAddConstraint(k, c2), c2); commitSketch(); } }] : [])] : []); }
 }
 
 // ---------------- sketch analysis and colors ----------------
