@@ -4071,6 +4071,14 @@ function meshAdjacency(geo) {
   adjCache.set(geo, out); return out;
 }
 // Projects all sources into a view: visible and hidden 2D segments, circles seen face-on, vertices.
+// Projections are kept per set of bodies and view: a change of the sheet, the scale or the author's name used to
+// project every view again (28 s on a big assembly).
+const projCache = new Map();
+function projectViewCached(sources, key) {
+  const k = key + '|' + sources.map((s) => s.geo.uuid + ':' + s.M.elements.map((v) => v.toFixed(6)).join(',')).join('|');
+  if (projCache.has(k)) { const v = projCache.get(k); projCache.delete(k); projCache.set(k, v); return v; }
+  const v = projectView(sources, key); projCache.set(k, v); while (projCache.size > 16) projCache.delete(projCache.keys().next().value); return v;
+}
 function projectView(sources, key) {
   const V = DRW_VIEWS[key]; const R = V3(V.R), U = V3(V.U), D = V3(V.D);
   const tris = []; let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity, size = 1;
@@ -4141,7 +4149,7 @@ function projectView(sources, key) {
 // top-right when it fits. The scale is the largest standard one that fits.
 function layoutDrawing(drw) {
   const src = drawingSources(drw.src); if (!src.length) return { error: 'В источнике нет тела' };
-  const views = {}; for (const k of ['front', 'top', 'left', ...(drw.iso ? ['iso'] : [])]) views[k] = projectView(src, k);
+  const views = {}; for (const k of ['front', 'top', 'left', ...(drw.iso ? ['iso'] : [])]) views[k] = projectViewCached(src, k);
   const [W, H] = SHEETS[drw.sheet] || SHEETS.A4; const fx0 = 20, fy0 = 5, fx1 = W - 5, fy1 = H - 5; const gap = 18;
   const w = (k) => views[k].box.umax - views[k].box.umin, hgt = (k) => views[k].box.vmax - views[k].box.vmin;
   const availW = fx1 - fx0 - 3 * gap, availH = fy1 - fy0 - 3 * gap - 10;
