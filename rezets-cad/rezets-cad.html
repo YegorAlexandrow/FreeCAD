@@ -2007,6 +2007,8 @@ function orbitView(dx, dy, pivot) {
   if (pivot) { for (const v of [camera.position, controls.target]) v.sub(pivot).applyQuaternion(q).add(pivot); } else { off.applyQuaternion(q); camera.position.copy(controls.target).add(off); }
   camera.lookAt(controls.target); requestRender();
 }
+// A touch screen without a mouse: hints speak of fingers, not buttons.
+const TOUCH = matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
 let renderQueued = false;
 // The axis triad in the lower left corner: X, Y, Z as the view shows them, the nearer ones drawn over the farther.
 function drawTriad() {
@@ -7640,7 +7642,7 @@ function setHint(text) {
     sfillet: 'Скругление: щёлкните угол, где сходятся две линии, или место, где сходятся две окружности',
     point: S.afterSketch === 'hole' ? 'Отверстие: щёлкайте центры отверстий и задайте их размерами, затем закройте эскиз. Esc без точек отменяет' : 'Точка: щёлкните место', dim: 'Размер: выберите объект, затем щёлкните место для размера',
   })[S.tool] : S.mode === 'asm' ? (S.pm?.kind === 'mate' ? (S.pm.picks.length < 2 ? 'Сопряжение: щёлкните грань или цилиндр на двух разных компонентах. Alt+щелчок выбирает сквозь деталь спереди' : 'Выберите тип сопряжения и нажмите Enter') : 'Тяните компонент мышью, Shift+тянуть: вращать. Пустое место: вращение вида')
-    : S.pm?.kind === 'pickPlane' ? 'Выберите плоскость или плоскую грань' : S.pm ? 'Настройте параметры, затем OK' : 'Левая кнопка: вращение, правая: сдвиг, колёсико: масштаб. Двойной щелчок по элементу дерева открывает его');
+    : S.pm?.kind === 'pickPlane' ? 'Выберите плоскость или плоскую грань' : S.pm ? 'Настройте параметры, затем OK' : (TOUCH ? 'Один палец: вращение, два: сдвиг и масштаб. Двойное касание вписывает модель' : 'Левая кнопка: вращение, правая: сдвиг, колёсико: масштаб. Двойной щелчок по элементу дерева открывает его'));
   $('hint').textContent = t;
   renderSkState();
 }
