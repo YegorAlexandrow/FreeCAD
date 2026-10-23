@@ -5936,7 +5936,7 @@ function previewMate() {
   const mr = ['path', 'slot', 'cam'].includes(pm.type) ? mechRefs(pm.type, a, b) : null;
   const m = { id: 'm' + asm.nid, type: pm.type, a: mr ? mr[0] : a, b: mr ? mr[1] : b, flip: pm.flip };
   // Distance keeps the side the parts are on now.
-  if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = Math.abs(raw); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
+  if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = +Math.abs(raw).toFixed(2); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
   // Tangency keeps the side the cylinder is on now (above or below the plane, outside or inside the other one).
   if (pm.type === 'tangent') { if (pm.side == null) { if (A.kind === B.kind) { const sep = B.p.clone().sub(A.p); const t = sep.addScaledVector(A.d, -sep.dot(A.d)).length(); pm.side = t < Math.max(A.r || 0, B.r || 0) ? -1 : 1; } else { const pl = A.kind === 'plane' ? A : B, ax = pl === A ? B : A; pm.side = Math.sign(ax.p.clone().sub(pl.p).dot(pl.d)) || 1; } } m.side = pm.side; }
   if (pm.type === 'angle') { if (pm.v == null) pm.v = Math.round(Math.acos(Math.min(1, Math.abs(A.d.dot(B.d)))) * 180 / Math.PI); m.v = pm.v; m.side = pm.flip ? -1 : 1; }
@@ -6271,9 +6271,12 @@ function drawInterference() {
 }
 function pickName(r) { if (r.std) return 'Плоскость «' + PLANES[r.std].label + '»'; if (r.kind === 'plane') return 'Грань'; if (r.kind === 'point') return 'Вершина'; if (r.edge?.t === 'line') return 'Ребро'; if (r.edge) return 'Круглое ребро ⌀' + fmt(2 * r.r); return 'Ось цилиндра ⌀' + fmt(2 * r.r); }
 function asmDeleteComp(c) {
-  const asm = S.doc; asm.comps = asm.comps.filter((x) => x !== c); asm.mates = asm.mates.filter((m) => m.a.comp !== c.id && m.b.comp !== c.id);
-  for (const pt of asm.patterns || []) { pt.seeds = pt.seeds.filter((x) => x !== c.id); if (pt.ref.comp === c.id) pt.ref = { axis: 'x' }; } asm.patterns = (asm.patterns || []).filter((pt) => pt.seeds.length);
+  const asm = S.doc; const nm = asm.mates.filter((m) => m.a.comp === c.id || m.b.comp === c.id).length; asm.comps = asm.comps.filter((x) => x !== c); asm.mates = asm.mates.filter((m) => m.a.comp !== c.id && m.b.comp !== c.id);
+  const pats0 = (asm.patterns || []).length; for (const pt of asm.patterns || []) { pt.seeds = pt.seeds.filter((x) => x !== c.id); if (pt.ref.comp === c.id) pt.ref = { axis: 'x' }; } asm.patterns = (asm.patterns || []).filter((pt) => pt.seeds.length); const np = pats0 - asm.patterns.length;
   if (S.asmSel === c.id) S.asmSel = null; asmRefresh(true); pushUndo();
+  // What went with it is said, with the way back (a pattern of it disappeared silently).
+  const extra = [nm ? `${nm} ${plural(nm, 'сопряжением', 'сопряжениями', 'сопряжениями')}` : '', np ? `${np} ${plural(np, 'массивом', 'массивами', 'массивами')}` : ''].filter(Boolean).join(' и ');
+  toast(`«${c.name}» удалён${extra ? ' вместе с ' + extra : ''}`, 'info', [{ label: 'Отменить', act: undo }]);
 }
 // Moving a component by numbers (SolidWorks' Move/Rotate Component with ΔXYZ): a shift and a turn about an axis
 // through its middle, each applied with «Применить» and then held to the mates like a drag.
@@ -6323,7 +6326,7 @@ function renderAsmPM() {
   const [a, b] = pm.picks; const opts = mateOptions(a, b); const asm = S.doc; const cname = (r) => compOf(asm, r.comp)?.name;
   const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mate), h('span', {}, pm.edit ? 'Изменить: ' + pm.edit.name : 'Сопряжение'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okMate }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные объекты'),
-    ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])} · ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр')),
+    ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])}, ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр', pm.picks[i] ? h('button', { class: 'x', title: 'Убрать этот выбор', 'aria-label': 'Убрать этот выбор', onclick: () => { pm.picks.splice(i, 1); pm.flip = null; pm.v = null; previewMate(); renderSide(); } }, '✕') : null)),
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
   box.append(h('details', { class: 'grp', open: pm.stdOpen || null, ontoggle: (e) => { pm.stdOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Плоскости сборки и компонентов'),
     ...[ASM_ORIGIN, ...asm.comps.filter((c) => !c.hidden)].map((c) => h('div', { class: 'field', style: 'gap:4px;flex-wrap:wrap' }, h('span', { style: 'flex:1 1 100%;font-size:12px' }, c.name), h('div', { class: 'chips' }, ...Object.keys(PLANES).map((k) => h('button', { class: 'chip', style: pm.picks.some((q) => q.comp === c.id && q.std === k) ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => addMatePick(stdPlaneRef(c, k)) }, PLANES[k].label)))))));
