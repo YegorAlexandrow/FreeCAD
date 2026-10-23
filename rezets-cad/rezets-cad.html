@@ -2358,6 +2358,8 @@ function dimGeometry(sk, c) {
 // ---------------- overlay: dimension labels, relation glyphs, region labels ----------------
 function layoutOverlay() {
   overlay.textContent = ''; const f = editF();
+  // The open dimension field stays on its dimension while the view zooms or turns.
+  if (f && S.dimEdit?.el) { const c = f.sk.cons[S.dimEdit.cid]; if (c) { const g = dimGeometry(f.sk, c); const s = sScreen(g.label.x, g.label.y); S.dimEdit.el.style.left = s.x + 'px'; S.dimEdit.el.style.top = s.y + 'px'; } }
   if (f) {
     const sk = f.sk;
     // A glyph over a point would take the click meant for the point (it could then be neither dragged nor
