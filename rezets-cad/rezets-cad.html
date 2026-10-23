@@ -2435,7 +2435,10 @@ function openDimEditor(c) {
     if (!Number.isFinite(v) || v <= 0 && c.t !== 'angle') { toast('Введите положительное число, например 25 или 50/2', 'warn'); refreshSketch(); return; }
     if (c.driven) { if (Math.abs(v - c.v) > 1e-9) toast('Размер справочный, он только показывает значение. Снимите отметку «Справочный», чтобы задавать его', 'info'); refreshSketch(); return; }
     const old = c.v, oldExpr = c.expr; const before = snapshotGeo(sk); c.v = v; if (hasIdent(inp.value)) c.expr = inp.value.trim(); else delete c.expr;
-    if (!solveSketch(sk) || flippedLine(sk, before)) { const fl = flippedLine(sk, before); c.v = old; if (oldExpr) c.expr = oldExpr; else delete c.expr; restoreGeo(sk, before); toast(fl ? `При ${fmt(v)} линия вывернулась бы наизнанку (скругление или размер больше, чем помещается). Размер оставлен ${fmt(old)}` : `Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
+    // A new angle turns the second line, the first one stays (SolidWorks moves the later pick).
+    const l0 = c.t === 'angle' ? sk.ents[c.refs[0]] : null; const keep = new Set(l0 ? ['p' + l0.p1, 'p' + l0.p2] : []);
+    const W = keep.size ? (sys) => sys.owner.map((o, i) => [i, keep.has(o) ? 1e-3 : 1]) : undefined;
+    if (!solveSketch(sk, W) || flippedLine(sk, before)) { const fl = flippedLine(sk, before); c.v = old; if (oldExpr) c.expr = oldExpr; else delete c.expr; restoreGeo(sk, before); toast(fl ? `При ${fmt(v)} линия вывернулась бы наизнанку (скругление или размер больше, чем помещается). Размер оставлен ${fmt(old)}` : `Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
     commitSketch(false, fresh);
   };
   inp.addEventListener('blur', () => setTimeout(() => { if (S.dimEdit?.el === el && !el.contains(document.activeElement)) apply(); }, 0));
