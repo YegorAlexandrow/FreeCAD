@@ -2790,7 +2790,10 @@ function drawClick(m) {
     if (D.hv && !sn.kind) pending.push({ t: D.hv, refs: [id] });
     addRelations(sk, pending);
     const closed = end === D.first; D.start = end; D.newPts = [end]; D.sn = null;
-    if (closed || sn.kind === 'pt') { S.draw = null; } commitSketch(true); return;
+    // The chain ends where it closes on itself or joins other geometry; a lone point it passes through (a centre, a
+    // construction point) is just a corner of it, and the chain goes on from there.
+    const deg = Object.values(sk.ents).filter((x) => !x.constr && (x.p1 === end || x.p2 === end)).length;
+    if (closed || (sn.kind === 'pt' && deg >= 2)) { S.draw = null; } commitSketch(true); return;
   }
   if (t === 'rect') {
     if (D.stage === 0) { D.a = { u: sn.u, v: sn.v, sn }; D.stage = 1; setHint(); return; }
