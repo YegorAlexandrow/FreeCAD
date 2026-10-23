@@ -7116,6 +7116,18 @@ function renderSketchPanel() {
     h('button', { class: 'ghost-btn', onclick: discardSketch }, 'Отменить изменения')));
   side.append(pmEl);
 }
+// A digit typed while a line or circle is being drawn opens a field for its exact length or radius; Enter puts the
+// point that far along the current direction (SolidWorks' numeric input while sketching).
+function typedSize(first) {
+  const D = S.draw; if (!D?.cursor) return; document.querySelector('.drawnum')?.remove();
+  const inp = h('input', { type: 'text', class: 'drawnum', value: first, inputmode: 'decimal', style: `position:absolute;left:${D.cursor.x + 16}px;top:${D.cursor.y + 34}px;width:80px;z-index:5`, 'aria-label': S.tool === 'line' ? 'Длина' : 'Радиус' });
+  const done = (ok) => { const v = evalExpr(inp.value); inp.remove(); if (!ok || !(v > 0) || S.draw !== D) return; const sk = editSk(); const a = gp(sk, S.tool === 'line' ? D.start : D.c); const sn = D.sn || { u: a.x + 1, v: a.y };
+    let dx = sn.u - a.x, dy = sn.v - a.y; const l = Math.hypot(dx, dy); if (l < 1e-9) { dx = 1; dy = 0; } else { dx /= l; dy /= l; }
+    D.sn = { u: a.x + dx * v, v: a.y + dy * v, kind: null, ref: null, guides: [] }; drawClick({ u: D.sn.u, v: D.sn.v, sx: D.cursor.x, sy: D.cursor.y }); };
+  inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') { e.preventDefault(); done(false); } });
+  inp.addEventListener('blur', () => setTimeout(() => inp.isConnected && inp.remove(), 0));
+  $('editLayer').append(inp); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length);
+}
 // Right click in a sketch: what can be done with the item under the cursor (picked if it was not), or with the sketch.
 function sketchContext(ev) {
   const sk = editSk(); if (!sk) return; if (S.draw) { endDrawing(); setTool('select'); return; }
@@ -7696,6 +7708,7 @@ window.addEventListener('keydown', (e) => {
     if (k === 'r') { const btn = side.querySelector('button[data-flip]'); if (btn) { e.preventDefault(); btn.click(); return; } }
     if (/^[1-9]$/.test(e.key)) { const btn = side.querySelectorAll('[data-mtype]')[+e.key - 1]; if (btn) { e.preventDefault(); btn.click(); return; } }
   }
+  if (S.editing && /^[0-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey && S.draw?.stage === 1 && (S.tool === 'line' || S.tool === 'circle')) { e.preventDefault(); typedSize(e.key); return; }
   // Z zooms out and Shift+Z in, as in SolidWorks.
   if (k === 'z' && !e.ctrlKey && !e.metaKey && !e.altKey) { camera.zoom = Math.min(1e4, Math.max(1e-4, camera.zoom * (e.shiftKey ? 1.25 : 0.8))); camera.updateProjectionMatrix(); controls.dispatchEvent({ type: 'change' }); requestRender(); return; }
   if (e.key === 'Enter' && S.editing && S.skOp?.kind === 'offset') { okOffset(); return; }
