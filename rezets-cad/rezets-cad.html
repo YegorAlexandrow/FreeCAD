@@ -1702,12 +1702,13 @@ function computeBody(features) {
       }
       if (f.type === 'fillet' || f.type === 'chamfer') { cyls = [...cyls]; body = applyEdgeFeature(f, body, cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
-      if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (f.type === 'shell') { const r = applyShell(f, body, cyls); checkSolid(r.body, 'shell'); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.warns[f.id] = r.warn || null; S.cache.set(k, { body, err: null, cyls, warn: r.warn }); continue; }
       const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); const v0 = geoVolume(body); body = boolean(body, tool, SUBTRACTION); warn = Math.abs(geoVolume(body) - v0) < 1e-6 * Math.max(1, v0) ? 'Вырез не задевает деталь: проверьте направление и глубину' : null; }
       else body = body ? boolean(body, tool, ADDITION) : tool;
       if (!body.getAttribute('position').count) err = 'Результат пустой';
+      else if (f.type === 'loft' || f.type === 'sweep') { if (badEdges(body)) body = watertight(body).geo; checkSolid(body, f.type); }
     } catch (e) { err = e.message || String(e); if (e.partial) body = e.partial; }
     if (err) errors[f.id] = err; S.warns[f.id] = warn;
     S.cache.set(k, { body, err, cyls, warn });
@@ -1749,8 +1750,7 @@ function buildTool(f, body, cyls = []) {
   const corner = loops.length > loops0.length || loops.some((a, i) => loops.some((b, j) => j > i && touch(a.pts, b.pts)));
   if (corner) throw new Error('Выбранные области сходятся только углом: в этом месте получится нулевая толщина. Выберите области, которые не касаются углами, или разведите их');
   const M = planeMatrix(sf.plane); let g;
-  if (f.type === 'loft') { g = loftGeometry(f); g.computeVertexNormals(); return g; }
-  if (f.type === 'sweep') { g = sweepGeometry(f, sf, loops); g.computeVertexNormals(); return g; }
+  if (f.type === 'loft' || f.type === 'sweep') { g = f.type === 'loft' ? loftGeometry(f) : sweepGeometry(f, sf, loops); g.computeVertexNormals(); checkSolid(g, f.type, true); return g; }
   if (f.type === 'extrude') {
     // Start: the sketch plane, an offset from it along the extrusion, or a face parallel to the sketch.
     let s0 = 0; const nS = new THREE.Vector3(...sf.plane.n);
@@ -4256,6 +4256,13 @@ function sweepGeometry(f, sf, loops) {
     return base.map((v) => { const p = v.clone().applyQuaternion(q).add(W[k]); const t = nm.dot(W[k].clone().sub(p)) / nm.dot(tin); return p.addScaledVector(tin, t); });
   };
   if (closed) { const back = rotBetween(T[segs - 1], T[0]).multiply(Q[segs - 1].clone()); if (Math.abs(Math.abs(back.w) - 1) > 1e-6) throw new Error('Замкнутая траектория должна возвращать профиль без поворота (плоская траектория)'); }
+  // Along a curved stretch of the path (small turns between its segments, not a sharp corner the mitre takes),
+  // a profile reaching past the centre of the bend folds over itself.
+  for (let k = 1; k < (closed ? n : n - 1); k++) {
+    const iin = (k - 1 + segs) % segs, iout = k % segs; const turn = T[iin].angleTo(T[iout]); if (turn < 1e-6 || turn > 0.35) continue;
+    const a = W[(k - 1 + n) % n], c = W[(k + 1) % n]; const R = a.distanceTo(c) / (2 * Math.sin(turn)); const toC = T[iout].clone().sub(T[iin]).normalize();
+    for (const l of loops) for (const v of ring3(l.pts)) if (v.clone().applyQuaternion(Q[iin]).dot(toC) > R * (1 + 1e-6)) throw new Error(`Профиль шире радиуса изгиба траектории (${fmt(R, 3)} мм): тело получится вывернутым`);
+  }
   const tris = [];
   for (const l of loops) {
     const rings = [l.pts, ...l.holes].map(ring3); const stations = rings.map((rg) => Array.from({ length: n }, (_, k) => section(rg, k)));
@@ -7369,6 +7376,12 @@ function sharedEdges(g) {
   const pos = g.getAttribute('position'); const ids = new Map(); const q = 1e5; const vid = (i) => { const k = Math.round(pos.getX(i) * q) + ',' + Math.round(pos.getY(i) * q) + ',' + Math.round(pos.getZ(i) * q); let id = ids.get(k); if (id === undefined) { id = ids.size; ids.set(k, id); } return id; };
   const cnt = new Map(); for (let t = 0; t < pos.count; t += 3) { const v = [vid(t), vid(t + 1), vid(t + 2)]; if (v[0] === v[1] || v[1] === v[2] || v[0] === v[2]) continue; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const k = a < b ? a + ',' + b : b + ',' + a; cnt.set(k, (cnt.get(k) || 0) + 1); } }
   let n = 0; for (const c of cnt.values()) if (c > 2) n++; return n;
+}
+// A loft or sweep that comes out flat, inside out or open is an error on the feature, not a sheet left in the model.
+function checkSolid(g, type, flatOnly) {
+  const what = { loft: 'По сечениям', sweep: 'По траектории', shell: 'Оболочка' }[type] || 'Элемент';
+  if (!(Math.abs(geoVolume(g)) > 1e-6)) throw new Error(`${what}: тело получается плоским. ${type === 'loft' ? 'Сечения должны лежать в разных плоскостях' : type === 'sweep' ? 'Плоскость профиля не должна содержать направление траектории' : ''}`.trim());
+  if (!flatOnly && badEdges(g)) throw new Error(`${what}: тело получается незамкнутым. ${type === 'loft' ? 'Возможно, сечения пересекают сами себя или слишком разные' : type === 'sweep' ? 'Возможно, профиль больше радиуса изгиба траектории' : 'Попробуйте другую толщину или другие удаляемые грани'}`);
 }
 function badEdges(g) {
   const pos = g.getAttribute('position'); const ids = new Map(); const q = 1e5; const vid = (i) => { const k = Math.round(pos.getX(i) * q) + ',' + Math.round(pos.getY(i) * q) + ',' + Math.round(pos.getZ(i) * q); let id = ids.get(k); if (id === undefined) { id = ids.size; ids.set(k, id); } return id; };
