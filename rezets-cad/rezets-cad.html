@@ -3977,7 +3977,7 @@ function openPM(pm) {
 }
 function closePM(silent) {
   { const mb = $('mateBar'); if (mb) mb.hidden = true; }
-  if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
+  if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.exploded && S.doc.explode) { S.doc.explode.on = true; asmRefresh(true); } if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
   const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') { S.afterSketch = null; S.sketchTool = null; } groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); renderTools(); setHint(); requestRender(); }
 function okPM() {
   const pm = S.pm; if (!pm) return;
@@ -6888,8 +6888,10 @@ function solidPart(g, ga, gb, bvhA, bvhB) {
 function cmdInterference() {
   if (S.doc.comps.length < 2) { toast('Нужно хотя бы два компонента', 'warn'); return; }
   // Pair by pair, with the window kept alive in between: a big STEP part takes seconds per pair.
+  // The overlaps are where the parts are assembled: an exploded view is put together for the check and comes back after.
+  const exploded = !!S.doc.explode?.on; if (exploded) { S.doc.explode.on = false; asmRefresh(true); }
   const t0 = performance.now(); const pairs = interferencePairs(S.doc); const res = []; S.asmSel = null; const doc = S.doc;
-  openPM({ kind: 'interf', res, sel: null, ms: 0, busy: { done: 0, of: pairs.length } }); drawInterference();
+  openPM({ kind: 'interf', res, sel: null, ms: 0, busy: { done: 0, of: pairs.length }, exploded }); drawInterference();
   const step = async (k) => {
     if (S.doc !== doc || S.pm?.kind !== 'interf' || S.pm.res !== res) return;
     if (k >= pairs.length) { S.pm.busy = null; S.pm.ms = performance.now() - t0; renderSide(); drawInterference(); return; }
