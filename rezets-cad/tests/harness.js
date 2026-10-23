@@ -12,7 +12,7 @@ module.exports = async function open(opts = {}) {
   if (opts.init) await ctx.addInitScript(opts.init);
   const p = await ctx.newPage(); const logs = [];
   // Documents are a dropdown list: open it and pick the first document whose name has this text.
-  p.pickDoc = async (text) => { await p.click('.doccur'); await p.locator('#menu .dl-row', { hasText: text }).first().click(); };
+  p.pickDoc = async (text) => { await p.click('.doccur'); await p.locator('#menu .dl-tile', { hasText: text }).first().click(); };
   p.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') logs.push(m.type() + ': ' + m.text()); });
   p.on('pageerror', e => logs.push('PAGEERROR: ' + e.message + '\n' + e.stack));
   await p.goto('https://rezets.test/test.html');
