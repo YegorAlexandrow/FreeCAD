@@ -6939,7 +6939,7 @@ function splitBodies(geo) {
 }
 function stlText(geo, name) {
   const pos = geo.getAttribute('position'); const lines = ['solid ' + name.replace(/\s+/g, '_')]; const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
-  for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize(); lines.push(`facet normal ${n.x} ${n.y} ${n.z}`, ' outer loop', `  vertex ${a.x} ${a.y} ${a.z}`, `  vertex ${b.x} ${b.y} ${b.z}`, `  vertex ${c.x} ${c.y} ${c.z}`, ' endloop', 'endfacet'); }
+  for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize(); const z = (v) => `${v.x} ${-v.z} ${v.y}`; lines.push(`facet normal ${z(n)}`, ' outer loop', `  vertex ${z(a)}`, `  vertex ${z(b)}`, `  vertex ${z(c)}`, ' endloop', 'endfacet'); }
   lines.push('endsolid'); return lines.join('\n');
 }
 // The body under the pointer in the STL menu is shown in the accent colour.
@@ -6950,11 +6950,13 @@ function showBodyHighlight(geo) {
 }
 // Binary STL, and a zip (stored, no compression) to carry it: the page's file saving does not allow
 // the .stl extension, and a zip also takes every body in one download.
+// STL goes out Z-up, as slicers and most CAD expect (the model here is Y-up): a part drawn on «Сверху» stands on the
+// print bed instead of lying on its side, and importing the file back (read as Z-up) gives the same part.
 function stlBinary(geo) {
   const pos = geo.getAttribute('position'); const n = pos.count / 3; const buf = new ArrayBuffer(84 + 50 * n); const dv = new DataView(buf); dv.setUint32(80, n, true);
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), nn = new THREE.Vector3();
   for (let t = 0; t < n; t++) { a.fromBufferAttribute(pos, 3 * t); b.fromBufferAttribute(pos, 3 * t + 1); c.fromBufferAttribute(pos, 3 * t + 2); nn.crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize();
-    let o = 84 + 50 * t; for (const v of [nn, a, b, c]) { dv.setFloat32(o, v.x, true); dv.setFloat32(o + 4, v.y, true); dv.setFloat32(o + 8, v.z, true); o += 12; } }
+    let o = 84 + 50 * t; for (const v of [nn, a, b, c]) { dv.setFloat32(o, v.x, true); dv.setFloat32(o + 4, -v.z, true); dv.setFloat32(o + 8, v.y, true); o += 12; } }
   return new Uint8Array(buf);
 }
 const CRC_T = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
