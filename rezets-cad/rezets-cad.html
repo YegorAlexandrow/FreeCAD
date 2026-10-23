@@ -2528,7 +2528,9 @@ function sketchAt(ev) {
 // The hover highlight goes when the pointer leaves the view (it stayed lit while the pointer was on the tree).
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
-  if (S.pickSketch) { const sf = sketchAt(ev); if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); } return; }
+  if (S.pickSketch) { const sf = sketchAt(ev); if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; }
+    // A flat face instead of a sketch: a new sketch opens on it and the operation comes back when it closes.
+    const p = partPickAt(ev); if (p?.face && !p.face.cyl) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); updateSketchVisuals(); cmdFeature(q.type, q.mode); } return; }
   if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.shell) { shellClick(ev); return; }
   if (S.pm?.pickFrom) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.fromTarget = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.fromTarget = planeByKey(p.plane); else return; S.pm.pickFrom = false; showFaceHover(null); renderSide(); schedulePreview(); return; }
@@ -3582,7 +3584,7 @@ function cmdFeature(type, mode) {
     // Every sketch can feed more than one feature: with no unused one, the user picks one, in the tree or in the window.
     // No sketch yet: go straight into one, as SolidWorks does, and come back to this feature when the sketch closes.
     if (!S.doc.features.slice(0, rollbackIndex()).some((g) => g.type === 'sketch' && sketchRegions(g).faces.length)) { S.afterSketch = { type, mode }; cmdSketch(); return; }
-    S.pickSketch = { type, mode }; S.selectedTree = null; updateSketchVisuals(); renderSide(); setHint('Щёлкните эскиз в дереве или его линии в окне. Esc: отмена'); requestRender(); return;
+    S.pickSketch = { type, mode }; S.selectedTree = null; updateSketchVisuals(); renderSide(); setHint('Щёлкните эскиз в дереве или его линии в окне, либо плоскую грань для нового эскиза. Esc: отмена'); requestRender(); return;
   }
   S.pickSketch = null;
   const reg = sketchRegions(sf); if (!reg.faces.length) { toast(`В «${sf.name}» нет замкнутых контуров. Проверьте, что концы линий соединены.`, 'warn'); return; }
