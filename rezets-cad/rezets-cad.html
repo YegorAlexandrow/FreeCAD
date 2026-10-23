@@ -7083,8 +7083,8 @@ function toolBtn(label, icon, onclick, opts = {}) {
   const NO_REPEAT = ['Эскиз', 'Масса', 'Рулетка', 'Выйти', 'Выбор', 'Удалить'];
   const run = (e) => { if (S.mode === 'part' && !S.editing && !NO_REPEAT.includes(label)) S.lastCmd = { label, fn: onclick }; onclick(e); };
   // An unavailable tool is dimmed but still answers a click with what it needs (a disabled button said nothing).
-  const why = () => opts.why || (S.mode === 'asm' ? 'Сначала выберите компонент в окне или в дереве' : S.editing ? 'Для этого нужно тело детали' : S.tab === 'sketch' || ['Выбор', 'Обрезать', 'Скругл.', 'Контур грани', 'Смещение', 'Вспомогат.', 'Размер', 'Удалить'].includes(label) ? 'Работает в открытом эскизе: выберите эскиз в дереве или нажмите «Эскиз»' : 'Сначала нужно тело: нарисуйте эскиз и нажмите «Вытянуть»');
-  const b = h('button', { class: 'tool', 'aria-pressed': opts.pressed ? 'true' : 'false', 'aria-disabled': opts.disabled ? 'true' : 'false', title: opts.disabled ? `${opts.title || label}. ${why()}` : opts.title || label, onclick: (e) => (opts.disabled ? toast(`«${label}»: ${why().replace(/^./, (c) => c.toLowerCase())}`, 'info') : run(e)) }, svg(icon), h('span', {}, label));
+  const why = () => opts.why || (S.mode === 'asm' ? 'сначала выберите компонент в окне или в дереве' : S.editing ? 'для этого нужно тело детали' : S.tab === 'sketch' || ['Выбор', 'Обрезать', 'Скругл.', 'Контур грани', 'Смещение', 'Вспомогат.', 'Размер', 'Удалить'].includes(label) ? 'работает в открытом эскизе, выберите эскиз в дереве или нажмите «Эскиз»' : 'сначала нарисуйте эскиз и нажмите «Вытянуть», чтобы появилось тело');
+  const b = h('button', { class: 'tool', 'aria-pressed': opts.pressed ? 'true' : 'false', 'aria-disabled': opts.disabled ? 'true' : 'false', title: opts.disabled ? `${opts.title || label}. ${why().replace(/^./, (c) => c.toUpperCase())}` : opts.title || label, onclick: (e) => (opts.disabled ? toast(`«${label}»: ${why()}`, 'info') : run(e)) }, svg(icon), h('span', {}, label));
   if (opts.kbd) b.append(h('kbd', {}, opts.kbd)); return b;
 }
 function renderTools() {
