@@ -3547,7 +3547,7 @@ function startSketch(plane, existing) {
     const at = rollbackIndex(); S.doc.features.splice(at, 0, f); if (S.doc.rollback != null) S.doc.rollback++;
   }
   S.editing = f.id; S.editBackup = JSON.stringify(f.sk); S.refs = modelRefs(f); S.sel.clear(); S.conflict = new Set(); S.selectedTree = null; showFaceHover(null);
-  setTab('sketch'); setTool('select');
+  setTab('sketch'); setTool('select'); if (S.sketchTool) { const t = S.sketchTool; S.sketchTool = null; setTool(t); }
   if (cleanZeroLines(f.sk)) pushUndo(); solveSketch(f.sk); analyze(); rebuild(); renderSide(); renderCorner(); pushUndo();
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
@@ -3634,7 +3634,7 @@ function openPM(pm) {
 }
 function closePM(silent) {
   if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
-  const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') S.afterSketch = null; groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); renderTools(); setHint(); requestRender(); }
+  const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') { S.afterSketch = null; S.sketchTool = null; } groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); renderTools(); setHint(); requestRender(); }
 function okPM() {
   const pm = S.pm; if (!pm) return;
   if (pm.kind === 'mate') { if (pm.picks.length) okMate(); else closePM(); return; }
@@ -6712,19 +6712,21 @@ function renderTools() {
     );
   } else {
     const ed = !!S.editing;
+    // A drawing tool taken outside a sketch first opens one (on the picked face or plane, or after picking it), as SolidWorks does.
+    const drawTool = (t) => () => { if (S.editing) setTool(t); else { S.sketchTool = t; cmdSketch(); } };
     toolsEl.append(
       toolBtn(ed ? 'Выйти' : 'Эскиз', ed ? ICON.exit : ICON.sketch, () => (ed ? exitSketch() : cmdSketch()), { title: ed ? 'Закрыть эскиз и перестроить модель' : 'Новый эскиз' }),
       h('div', { class: 'sep' }),
       toolBtn('Выбор', ICON.select, () => setTool('select'), { pressed: S.tool === 'select', disabled: !ed }),
-      toolBtn('Линия', ICON.line, () => setTool('line'), { pressed: S.tool === 'line', disabled: !ed, kbd: 'L' }),
-      toolBtn('Прямоуг.', ICON.rect, () => setTool('rect'), { pressed: S.tool === 'rect', disabled: !ed, kbd: 'R' }),
-      toolBtn('Окружность', ICON.circle, () => setTool('circle'), { pressed: S.tool === 'circle', disabled: !ed, kbd: 'C' }),
-      toolBtn('Дуга', ICON.arc, () => setTool('arc'), { pressed: S.tool === 'arc', disabled: !ed, kbd: 'A' }),
-      toolBtn('Точка', ICON.point, () => setTool('point'), { pressed: S.tool === 'point', disabled: !ed, kbd: 'P' }),
-      toolBtn('Сплайн', ICON.spline, () => setTool('spline'), { pressed: S.tool === 'spline', disabled: !ed, title: 'Сплайн через точки: щелчки, Enter или двойной щелчок завершает, щелчок по первой точке замыкает' }),
-      toolBtn('Эллипс', ICON.ellipse, () => setTool('ellipse'), { pressed: S.tool === 'ellipse', disabled: !ed, title: 'Эллипс: центр, конец большой оси, затем малая полуось' }),
-      toolBtn('Паз', ICON.slot, () => setTool('slot'), { pressed: S.tool === 'slot', disabled: !ed, title: 'Прямой паз: два центра, затем ширина' }),
-      toolBtn('Многоуг.', ICON.polygon, () => setTool('polygon'), { pressed: S.tool === 'polygon', disabled: !ed, title: 'Правильный многоугольник: центр, затем вершина' }),
+      toolBtn('Линия', ICON.line, drawTool('line'), { pressed: S.tool === 'line', kbd: 'L' }),
+      toolBtn('Прямоуг.', ICON.rect, drawTool('rect'), { pressed: S.tool === 'rect', kbd: 'R' }),
+      toolBtn('Окружность', ICON.circle, drawTool('circle'), { pressed: S.tool === 'circle', kbd: 'C' }),
+      toolBtn('Дуга', ICON.arc, drawTool('arc'), { pressed: S.tool === 'arc', kbd: 'A' }),
+      toolBtn('Точка', ICON.point, drawTool('point'), { pressed: S.tool === 'point', kbd: 'P' }),
+      toolBtn('Сплайн', ICON.spline, drawTool('spline'), { pressed: S.tool === 'spline', title: 'Сплайн через точки: щелчки, Enter или двойной щелчок завершает, щелчок по первой точке замыкает' }),
+      toolBtn('Эллипс', ICON.ellipse, drawTool('ellipse'), { pressed: S.tool === 'ellipse', title: 'Эллипс: центр, конец большой оси, затем малая полуось' }),
+      toolBtn('Паз', ICON.slot, drawTool('slot'), { pressed: S.tool === 'slot', title: 'Прямой паз: два центра, затем ширина' }),
+      toolBtn('Многоуг.', ICON.polygon, drawTool('polygon'), { pressed: S.tool === 'polygon', title: 'Правильный многоугольник: центр, затем вершина' }),
       h('div', { class: 'sep' }),
       toolBtn('Обрезать', ICON.trim, () => setTool('trim'), { pressed: S.tool === 'trim', disabled: !ed, kbd: 'T', title: 'Обрезка: щёлкните кусок, который нужно убрать (T)' }),
       toolBtn('Скругл.', ICON.sfillet, () => setTool('sfillet'), { pressed: S.tool === 'sfillet', disabled: !ed, title: 'Скругление угла эскиза' }),
