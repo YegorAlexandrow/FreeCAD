@@ -10,7 +10,7 @@ const open = require('./harness.js');
   const box = await (await p.$('#cv')).boundingBox();
   const xy = (u, v) => p.evaluate(([u, v]) => { const R = window.__rezets; return R.toScreen(R.toWorld(R.featById('f1').plane, u, v)); }, [u, v]);
   const go = async (u, v, click) => { const s = await xy(u, v); await p.mouse.move(box.x + s.x, box.y + s.y, { steps: 4 }); await p.waitForTimeout(100); if (click) { await p.mouse.click(box.x + s.x, box.y + s.y); await p.waitForTimeout(200); } };
-  await go(20, 0, true); const ids = await p.evaluate(() => window.__rezets.S.skOp?.ids);
+  await go(20, 0, true); const ids = await p.evaluate(() => window.__rezets.S.skOp?.ids); const hint = await p.evaluate(() => document.getElementById('hint').textContent.slice(0, 30));
   await go(20, 10, false); const inside = await p.evaluate(() => window.__rezets.S.toolOpt.offsetFlip);
   await go(20, -25, false); const outside = await p.evaluate(() => window.__rezets.S.toolOpt.offsetFlip);
   await go(20, -25, true);
