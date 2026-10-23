@@ -2574,6 +2574,11 @@ function dragTo(m) {
 // ---------------- drawing tools ----------------
 function setTool(t) {
   if (!S.editing && t !== 'select') return;
+  // Fillet with corners (or pairs of lines meeting at a corner) picked first rounds them at once, as SolidWorks does.
+  if (t === 'sfillet' && S.editing && S.sel.size) { const sk = editSk(); const corners = new Set([...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2)));
+    const lines = [...S.sel].filter((k) => k.startsWith('e:')).map((k) => sk.ents[k.slice(2)]).filter((e) => e?.t === 'line' && !e.ext);
+    for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) for (const q of [lines[i].p1, lines[i].p2]) if (q === lines[j].p1 || q === lines[j].p2) corners.add(q);
+    if (corners.size) { let n = 0; const errs = []; for (const id of corners) { const r = filletCorner(sk, id, S.toolOpt.filletR); if (r?.arc) n++; else if (typeof r === 'string') errs.push(r); } S.sel.clear(); commitSketch(); toast(n ? `Скруглено углов: ${n}${errs.length ? `, не получилось: ${errs.length} (${errs[0]})` : ''}` : errs[0] || 'Нечего скруглять', n ? 'info' : 'warn'); } }
   if (t !== 'select' && t !== 'dim' && t !== 'sfillet' && S.sel.size) { S.sel.clear(); }
   S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
