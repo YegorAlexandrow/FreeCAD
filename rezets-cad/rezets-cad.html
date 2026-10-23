@@ -7241,7 +7241,11 @@ $('fileIn').onchange = async (e) => {
     const o = JSON.parse(await file.text());
     // Documents that are not what they say (no feature list, an unknown kind) are left out: one used to break the app.
     if (Array.isArray(o.docs)) { const n0 = o.docs.length; o.docs = o.docs.filter(validDoc); if (!o.docs.length) { toast(n0 ? 'В файле нет ни одного документа, который можно открыть' : 'В файле проекта нет документов', 'err'); e.target.value = ''; return; } if (o.docs.length < n0) toast(`Пропущено документов, которые не читаются: ${n0 - o.docs.length}`, 'warn'); }
-    if (Array.isArray(o.features)) { addDoc('part', o.name || file.name.replace(/\.\w+$/, ''), o); toast(`Деталь «${o.name}» добавлена в проект`, 'info'); }
+    if (Array.isArray(o.features)) {
+      // A STEP body points at a document of the project the part came from: here that id means nothing (or, worse,
+      // some other model), so the link is cut and the body asks for its model instead of building on a stranger.
+      let cut = 0; for (const f of o.features) if (f.type === 'stepbody' && f.doc && !String(f.doc).startsWith('missing:')) { f.doc = 'missing:' + f.doc; cut++; }
+      addDoc('part', o.name || file.name.replace(/\.\w+$/, ''), o); toast(`Деталь «${o.name}» добавлена в проект` + (cut ? `. ${cut} STEP-${cut > 1 ? 'тела ссылаются' : 'тело ссылается'} на модель из другого проекта: двойной щелчок по элементу выберет модель здесь` : ''), cut ? 'warn' : 'info'); }
     else if (Array.isArray(o.docs) && SRV.on) { await serverSave(); const p = await api('POST', 'projects/import', o); await serverOpen(p.id); toast(`Проект «${o.name}» добавлен на сервер и открыт`, 'info'); }
     else if (Array.isArray(o.docs)) askOpenProject(projectFromJSON(o), o.name || file.name.replace(/\.\w+$/, ''));
     else throw new Error();
