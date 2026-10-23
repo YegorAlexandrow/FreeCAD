@@ -5222,7 +5222,11 @@ async function exportProjectFile() {
   if (SRV.on) { await serverSave(); const a = h('a', { href: `/api/projects/${SRV.pid}/export`, download: '' }); document.body.append(a); a.click(); a.remove(); return; }
   const json = JSON.stringify(projectToJSON()); const now = new Date(); const pad = (v) => String(v).padStart(2, '0'); const name = (S.project.name || 'Проект').replace(/[\\/:*?"<>|]+/g, '_') + ` ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}.rezets.json`;
   if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: name, data: json }); return; } catch (e) { if (e?.code === 'declined' || e?.code === 'cancelled') return; console.warn('download', e); } }
-  showModal('Сохранить проект', 'Скопируйте текст в файл .json. Открыть его можно кнопкой «Открыть…».', json, [['Копировать', copyText], ['Закрыть', closeModal]]);
+  // Opened on its own (not inside claude.ai's frame) the page saves the file the ordinary way; the text to copy is
+  // only the last resort where downloads are blocked.
+  let framed = true; try { framed = window.top !== window; } catch { framed = true; }
+  if (!framed) { const url = URL.createObjectURL(new Blob([json], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.setAttribute('download', name); a.hidden = true; document.body.append(a); a.click(); setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 5000); return; }
+  showModal('Сохранить проект', 'Скопируйте текст в файл .json. Открыть его можно в меню «Файл» → «Открыть проект…».', json, [['Копировать', copyText], ['Закрыть', closeModal]]);
 }
 
 // ============================================================================================
