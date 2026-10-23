@@ -421,9 +421,18 @@ const IDENT_RE = /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*/g;
 const hasIdent = (s) => /[A-Za-zА-Яа-яЁё_]/.test(String(s));
 function evalWith(str, vals) {
   let bad = false; let s = String(str).trim(); if (!s) return NaN;
-  s = s.replace(/(\d),(\d)/g, '$1.$2').replace(/(^|[^\d)]),(\d)/g, '$10.$2').replace(/(\d)[.,](?=\s*$)/, '$1').replace(IDENT_RE, (w) => { if (w in vals) return '(' + vals[w] + ')'; if (w in EXPR_FN) return EXPR_FN[w]; bad = true; return w; });
+  // A comma is the decimal mark (2,5) except inside a function call, where it separates the arguments (max(10,20)).
+  { const st = []; let o = ''; for (let i = 0; i < s.length; i++) { const ch = s[i]; if (ch === '(') st.push(/[A-Za-zА-Яа-яЁё_0-9]/.test(s[i - 1] || '') ? 'fn' : 'grp'); else if (ch === ')') st.pop();
+    if (ch === ',' && st[st.length - 1] !== 'fn') { o += /\d/.test(s[i - 1] || '') ? '.' : /\d/.test(s[i + 1] || '') ? '0.' : ','; continue; } o += ch; } s = o; }
+  s = s.replace(/(\d)[.,](?=\s*$)/, '$1').replace(IDENT_RE, (w) => { if (w in vals) return '(' + vals[w] + ')'; if (w in EXPR_FN) return EXPR_FN[w]; bad = true; return w; });
   if (bad) return NaN; const chk = s.replace(/Math\.[a-zA-Z]+|__sin|__cos|__tan/g, ''); if (!/^[0-9+\-*/().,\seE]*$/.test(chk)) return NaN;
   try { const d = Math.PI / 180; const v = Function('__sin', '__cos', '__tan', '"use strict";return (' + s + ')')((x) => Math.sin(x * d), (x) => Math.cos(x * d), (x) => Math.tan(x * d)); return Number.isFinite(v) ? v : NaN; } catch { return NaN; }
+}
+// Why an expression gives no number: a variable that is missing, or one caught in a loop of references.
+function badVarReason(ex, doc) {
+  const vals = varValues(doc); const names = new Set((doc?.vars || []).map((v) => v.name)); const ids = String(ex).match(IDENT_RE) || [];
+  const loop = ids.find((w) => names.has(w) && !(w in vals)); if (loop) return `переменная ${loop} ссылается сама на себя или по кругу`;
+  const miss = ids.find((w) => !names.has(w) && !(w in EXPR_FN)); return miss ? `нет переменной ${miss}` : 'ошибка в выражении';
 }
 function varValues(doc) {
   const out = {}; const list = doc?.vars || [];
@@ -1682,6 +1691,7 @@ function computeBody(features) {
     if (S.cache.has(k)) { const c = S.cache.get(k); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
     let err = null; let warn = null;
     try {
+      if (f.varErr) throw new Error(f.varErr);
       // A STEP model from the project as a body to build on: sketch on its faces, cut, drill, add to it.
       if (f.type === 'stepbody') {
         const ent = docEntry(f.doc); if (!ent || ent.kind !== 'import') throw new Error('Импортированной модели (STEP или STL) больше нет в проекте');
@@ -4139,7 +4149,13 @@ const VAR_NAME = /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*$/;
 function applyVars(doc = S.doc) {
   const vals = varValues(doc); const errs = [];
   for (const f of doc.features) {
-    if (f.exprs) for (const [k, ex] of Object.entries(f.exprs)) { const v = evalWith(ex, vals); if (Number.isFinite(v)) f[k] = k === 'n' || k === 'n2' ? Math.max(k === 'n2' ? 1 : 2, Math.round(v)) : v; else errs.push(`${f.name}: ${ex}`); }
+    // A value the field itself would refuse (a depth of h-20 with h 10) is the feature's error, not a body turned inside out.
+    delete f.varErr;
+    if (f.exprs) for (const [k, ex] of Object.entries(f.exprs)) { const v = evalWith(ex, vals);
+      if (!Number.isFinite(v)) { errs.push(`${f.name}: ${ex}`); f.varErr = `Не вычисляется ${ex}: ${badVarReason(ex, doc)}`; continue; }
+      const why = k === 'fromOffset' ? null : k === 'offset' ? (v < 0 ? 'нужно не меньше 0' : null) : !(v > 0) ? 'нужно больше 0' : k === 'angle' && v > 360 ? 'нужно не больше 360°' : k === 'draft' && v >= 90 ? 'уклон должен быть меньше 90°' : null;
+      if (why) { f.varErr = `${ex} = ${fmt(v, 4)}, ${why}`; continue; }
+      f[k] = k === 'n' || k === 'n2' ? Math.max(k === 'n2' ? 1 : 2, Math.round(v)) : v; }
     if (f.type === 'sketch') {
       let changed = false; const before = snapshotGeo(f.sk); const old = [];
       for (const c of Object.values(f.sk.cons)) if (c.expr) { const v = evalWith(c.expr, vals); if (Number.isFinite(v) && v > 0) { if (v !== c.v) { old.push([c, c.v]); c.v = v; changed = true; } } else errs.push(`${f.name}: ${c.expr}`); }
