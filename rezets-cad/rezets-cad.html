@@ -6995,7 +6995,9 @@ function renderPM() {
         f.draft > 0 ? numField('Угол уклона', 'pmDraft', f.draft, (v) => { f.draft = Math.min(45, v); schedulePreview(); }, '°') : null,
         f.draft > 0 ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.draftOut, onchange: (e) => { f.draftOut = e.target.checked; schedulePreview(); } }), 'Уклон наружу') : null));
   } else {
-    const axes = [['V', 'Вертикальная ось эскиза'], ['H', 'Горизонтальная ось эскиза'], ...Object.values(sf.sk.ents).filter((e) => e.t === 'line').map((e) => [e.id, (e.constr ? 'Осевая линия ' : 'Линия ') + e.id])];
+    const axes = [['V', 'Вертикальная ось эскиза'], ['H', 'Горизонтальная ось эскиза'], ...Object.values(sf.sk.ents).filter((e) => e.t === 'line').sort((a, b) => !!b.constr - !!a.constr).map((e) => { const a = gp(sf.sk, e.p1), b = gp(sf.sk, e.p2);
+      // Named by where it is, not by an internal number: length and its two ends.
+      return [e.id, `${e.constr ? 'Осевая' : 'Линия'} ${fmt(Math.hypot(b.x - a.x, b.y - a.y), 1)} мм: (${fmt(a.x, 1)}; ${fmt(a.y, 1)}) → (${fmt(b.x, 1)}; ${fmt(b.y, 1)})`]; })];
     const selAx = h('select', { id: 'pmAxis' }, axes.map(([v, l]) => h('option', { value: v, selected: v === f.axis }, l)));
     selAx.onchange = () => { f.axis = selAx.value; schedulePreview(); };
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Ось вращения'), h('label', { class: 'field' }, h('span', {}, 'Ось'), selAx)),
