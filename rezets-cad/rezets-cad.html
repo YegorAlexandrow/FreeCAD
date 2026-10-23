@@ -7001,7 +7001,7 @@ const numField = (label, id, val, onset, unit = 'мм') => {
     if ((id === 'pmCount' || id === 'pmCount2') && v > MAX_COPIES) { inp.value = back(); toast(`Не больше ${MAX_COPIES} копий в одном массиве`, 'warn'); return; }
     if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal' || id === 'pmFromOff')) {
     if (obj) { if (hasIdent(str)) obj.exprs = { ...obj.exprs, [key]: str.trim() }; else if (obj.exprs) { delete obj.exprs[key]; if (!Object.keys(obj.exprs).length) delete obj.exprs; } }
-    const shown = onset(v); last = shown ?? v; inp.value = obj?.exprs?.[key] ?? fmt(last, 4); } else {
+    const shown = onset(v); last = shown ?? (obj && typeof obj[key] === 'number' ? obj[key] : v); inp.value = obj?.exprs?.[key] ?? fmt(last, 4); } else {
       // A name that is not a variable yet can become one, with the value the field had, and the field then uses it.
       const known = new Set([...(S.doc?.vars || []).map((x) => x.name), ...Object.keys(EXPR_FN)]); const miss = (str.replace(UNIT_RE, '$1').match(IDENT_RE) || []).filter((w) => !known.has(w));
       inp.value = back();
