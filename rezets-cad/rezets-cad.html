@@ -1719,7 +1719,14 @@ function sketchRegions(f) {
   if (f._regKey !== k) { Object.defineProperty(f, '_reg', { value: buildRegions(f.sk), enumerable: false, writable: true, configurable: true }); Object.defineProperty(f, '_regKey', { value: k, enumerable: false, writable: true, configurable: true }); }
   return f._reg;
 }
+const inRegion = (r, p) => pointInPoly(p, r.poly) && !r.holes.some((hh) => pointInPoly(p, hh));
 function selectedRegionIds(f, reg) {
+  // Each picked region is also kept by a point inside it: a line added elsewhere in the sketch renumbers the
+  // regions, and the point still finds the one that was picked.
+  if (Array.isArray(f.regions) && f.regions.length && Array.isArray(f.regionPts) && f.regionPts.length === f.regions.length) {
+    const ids = new Set(); f.regions.forEach((i, k) => { const p = f.regionPts[k], at = reg.faces[i]; if (at && inRegion(at, p)) { ids.add(i); return; } const hit = reg.faces.find((x) => inRegion(x, p)); if (hit) ids.add(hit.id); else if (at) ids.add(i); });
+    if (ids.size) return ids;
+  }
   if (Array.isArray(f.regions) && f.regions.length) { const set = new Set(f.regions.filter((i) => i < reg.faces.length)); if (set.size) return set; }
   return new Set(reg.faces.filter((x) => x.defaultOn).map((x) => x.id));
 }
@@ -1731,7 +1738,8 @@ function isInside(body, p) {
 function buildTool(f, body, cyls = []) {
   const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
   const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров');
-  const loops0 = profileLoops(reg, selectedRegionIds(f, reg)); if (!loops0.length) throw new Error('Не выбрано ни одной области');
+  const selIds = selectedRegionIds(f, reg); const loops0 = profileLoops(reg, selIds); if (!loops0.length) throw new Error('Не выбрано ни одной области');
+  if (Array.isArray(f.regions) && f.regions.length) { const ids = [...selIds]; const pts = ids.map((i) => reg.faces[i].sample.map((v) => +v.toFixed(6))); if (JSON.stringify([ids, pts]) !== JSON.stringify([f.regions, f.regionPts])) { f.regions = ids; f.regionPts = pts; } }
   // Areas that meet only at a corner leave the part there zero thick (in the cut, pieces joined by a point; in a
   // boss, solids touching at an edge): SolidWorks refuses such a profile, and so does this.
   let loops = splitPinches(loops0);
