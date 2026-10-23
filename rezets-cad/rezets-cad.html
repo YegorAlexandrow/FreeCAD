@@ -3097,6 +3097,8 @@ function deleteSelection() {
   const sk = editSk(); if (!sk || !S.sel.size) return;
   const delEnts = new Set(), delPts = new Set(), delCons = new Set();
   for (const k of S.sel) { const id = k.slice(2); if (k[0] === 'e' && sk.ents[id]) delEnts.add(id); if (k[0] === 'p' && sk.pts[id]) delPts.add(id); if (k[0] === 'c') delCons.add(id); }
+  // A spline loses just the through-point deleted from its middle (SolidWorks drops the point, not the curve).
+  for (const e of Object.values(sk.ents)) if (e.t === 'spline' && !delEnts.has(e.id)) { const inner = (q, i) => delPts.has(q) && (e.closed || (i > 0 && i < e.pts.length - 1)); const keep = e.pts.filter((q, i) => !inner(q, i)); if (keep.length < e.pts.length && keep.length >= (e.closed ? 3 : 2)) { e.pts = keep; e.p1 = keep[0]; e.p2 = e.closed ? keep[0] : keep[keep.length - 1]; } }
   for (const e of Object.values(sk.ents)) if (entPts(e).some((p) => delPts.has(p))) delEnts.add(e.id);
   for (const id of delEnts) delete sk.ents[id];
   const usedPts = new Set(); for (const e of Object.values(sk.ents)) entPts(e).forEach((p) => usedPts.add(p));
