@@ -68,6 +68,11 @@ button { font: inherit; color: inherit; }
 .doctab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); font-weight: 500; }
 .inline-val { font: inherit; width: 70px; border: 1px solid var(--accent); border-radius: 4px; padding: 0 4px; background: var(--bg); color: var(--fg); }
 .doccur { max-width: 260px; }
+.doctab.recent { font-size: 12px; max-width: 140px; }
+@media (max-width: 760px) { .doctab.recent { display: none; } }
+#docPeek { position: fixed; z-index: 31; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / .18); padding: 4px; }
+#docPeek img { display: block; width: 160px; height: 120px; object-fit: contain; }
+#triad { position: absolute; left: 8px; bottom: 8px; width: 72px; height: 72px; pointer-events: none; }
 .doccur .caret { font-weight: 400; color: var(--fg-2); margin-left: 2px; }
 #menu.doclist { min-width: 240px; max-height: min(70vh, 560px); overflow: auto; }
 #menu .dl-h { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-2); padding: 8px 10px 3px; }
@@ -326,6 +331,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div id="repairBar" hidden></div>
     <div id="drawing" hidden></div>
     <div id="corner"></div>
+    <canvas id="triad" width="144" height="144"></canvas>
     <canvas id="viewCube" title="Щелчок по грани, ребру или углу поворачивает вид, перетаскивание вращает его"></canvas>
     <div id="toasts"></div>
     <div id="loading">Загрузка геометрического ядра…</div>
@@ -1977,6 +1983,16 @@ function orbitView(dx, dy, pivot) {
   camera.lookAt(controls.target); requestRender();
 }
 let renderQueued = false;
+// The axis triad in the lower left corner: X, Y, Z as the view shows them, the nearer ones drawn over the farther.
+function drawTriad() {
+  const c = $('triad'); if (!c) return; c.hidden = S.mode === 'drw'; if (c.hidden) return; const g = c.getContext('2d'); const W = c.width; g.clearRect(0, 0, W, W);
+  camera.updateMatrixWorld(); const inv = camera.matrixWorldInverse; const R0 = W / 2 - 22; const cx = W / 2 - 4, cy = W / 2 + 4;
+  const axes = [['X', [1, 0, 0], '#e5484d'], ['Y', [0, 1, 0], '#30a46c'], ['Z', [0, 0, 1], '#3e7bfa']].map(([n, v, col]) => { const d = new THREE.Vector3(...v).transformDirection(inv); return { n, col, x: d.x, y: d.y, z: d.z }; }).sort((a, b) => a.z - b.z);
+  g.lineCap = 'round'; g.font = '600 22px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const a of axes) { const ex = cx + a.x * R0, ey = cy - a.y * R0; g.globalAlpha = a.z < -0.2 ? 0.55 : 1; g.strokeStyle = a.col; g.lineWidth = 5; g.beginPath(); g.moveTo(cx, cy); g.lineTo(ex, ey); g.stroke();
+    g.fillStyle = a.col; const L = Math.hypot(a.x, a.y) || 1; g.fillText(a.n, cx + a.x / L * (Math.hypot(ex - cx, ey - cy) + 13), cy - a.y / L * (Math.hypot(ex - cx, ey - cy) + 13)); }
+  g.globalAlpha = 1;
+}
 // The view cube in the corner: it turns with the model, and its faces, edges and corners turn the view to the
 // 26 standard directions (the View Selector of SolidWorks, the ViewCube of other CADs); a drag on it turns the view.
 const viewCube = (() => {
@@ -2027,7 +2043,7 @@ function fitDepth() {
   depthBox.getBoundingSphere(depthSph); const dz = depthSph.center.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3()));
   const m = depthSph.radius * 1.05 + 1; camera.near = dz - m; camera.far = dz + m; camera.updateProjectionMatrix();
 }
-function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); viewCube.draw(); layoutOverlay(); }); }
+function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); viewCube.draw(); drawTriad(); layoutOverlay(); }); }
 // Outlines of curved faces as seen from here (a cylinder's sides, a fillet's edge on the skyline), redrawn as the
 // view turns, as SolidWorks draws them: without them a shaft seen from the side was a flat grey band.
 const silGroup = new THREE.Group(); let silState = { geo: null, dir: null, obj: null };
@@ -7501,6 +7517,8 @@ function projectFromJSON(o) {
 }
 function leaveCurrentDoc() {
   thumbs.capture();
+  // Notes about the document being left go with it; ones with a button (Undo of a deletion and the like) stay.
+  for (const t of [...($('toasts')?.children || [])]) if (!t.querySelector('.acts')) t.remove();
   // Each document keeps its view and the sketch that was open, for when it is opened again.
   { const ent0 = activeEntry(); if (ent0 && S.mode) Object.defineProperty(ent0, '_view', { value: { cam: camState(), editing: S.editing || null, section: S.section ? { ...S.section } : null }, configurable: true, writable: true, enumerable: false }); }
   if (S.editing) exitSketch(); if (S.measure) closeMeasure(); if (S.pm) closePM(true);
@@ -7514,7 +7532,7 @@ function switchDoc(id) {
 }
 function enterDoc() {
   ctxGroup.clear(); $('ctxBar').hidden = true;
-  const ent = activeEntry(); S.sel.clear(); S.selEdges = []; selEdgeGroup.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
+  const ent = activeEntry(); noteRecent(ent.id); S.sel.clear(); S.selEdges = []; selEdgeGroup.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
   S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
   // The section belongs to the document it was made in: another part opens whole, and coming back finds the cut as it was.
@@ -7524,7 +7542,7 @@ function enterDoc() {
   if (ent.kind === 'part') { for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk); asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); if (!lastSaved) pushUndo(); }
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
-  renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar(); noteRecent(ent.id);
+  renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar();
   const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
 }
 function openProject(p) { S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
@@ -7545,7 +7563,16 @@ function renderDocTabs() {
   b.ondblclick = () => { closeMenu(); renameDoc(d, b); };
   b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, b)); };
   box.append(b);
+  // The documents opened just before sit next to it: one click goes back, and pointing at one shows its picture.
+  for (const id of recentDocs().filter((x) => x !== d.id && docEntry(x)).slice(0, 3)) {
+    const r = docEntry(id); const t = h('button', { class: 'doctab recent', title: `Открыть «${r.name}»` }, svg(ICON[KIND_ICON[r.kind]]), h('span', {}, r.name));
+    t.onclick = () => { hidePeek(); switchDoc(r.id); };
+    t.onpointerenter = () => { const url = thumbs.get(r); if (!url) return; const pk = $('docPeek') || document.body.appendChild(h('div', { id: 'docPeek' })); pk.replaceChildren(h('img', { src: url, alt: '' })); const q = t.getBoundingClientRect(); pk.style.left = Math.min(q.left, innerWidth - 180) + 'px'; pk.style.top = q.bottom + 6 + 'px'; pk.hidden = false; };
+    t.onpointerleave = hidePeek; t.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, docMenuItems(r, e.clientX, e.clientY, t)); };
+    box.append(t);
+  }
 }
+const hidePeek = () => { const pk = $('docPeek'); if (pk) pk.hidden = true; };
 const GROUP_NAME = { part: 'Детали', asm: 'Сборки', import: 'Импорт (STEP, STL)', drw: 'Чертежи' };
 // Recently opened documents of the project, most recent first: the switcher starts on the one before this, so
 // Ctrl+O and Enter go back and forth between two documents.
