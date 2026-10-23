@@ -6126,7 +6126,10 @@ function dragFollow(asm, c, D, T) {
     const p = poseOf(c); const r = Lp.clone().applyQuaternion(p.q); const res = miss(); const base = res.length(); if (base < 1e-4 * compSize(c)) break;
     const col = (j) => { const e = new THREE.Vector3(); e.setComponent(j % 3, 1); return j < 3 ? e.cross(r) : e; };
     const M = N.map((v) => { const s = new THREE.Vector3(); for (let j = 0; j < 6; j++) s.addScaledVector(col(j), v[6 * i + j]); return s; });
-    const A = M.map((a) => M.map((b) => a.dot(b))); A.forEach((row, k) => (row[k] += 1e-9)); const a = solveLinear(A, M.map((m) => m.dot(res))); if (!a) return it > 0;
+    // Turning is charged extra: a part that can simply slide after the cursor slides (the plain least-squares step
+    // turned it, since a turn about a far point moves the grabbed point most per unit); one held on a hinge still turns.
+    const rv = N.map((v) => new THREE.Vector3(v[6 * i], v[6 * i + 1], v[6 * i + 2])); const wr = 0.1 * compSize(c) ** 2;
+    const A = M.map((a, k) => M.map((b, l) => a.dot(b) + wr * rv[k].dot(rv[l]))); A.forEach((row, k) => (row[k] += 1e-9)); const a = solveLinear(A, M.map((m) => m.dot(res))); if (!a) return it > 0;
     const dx = new Float64Array(n); N.forEach((v, k) => { for (let j = 0; j < n; j++) dx[j] += a[k] * v[j]; });
     // Big turns are taken in steps, each put back onto the mates.
     const rot = Math.hypot(dx[6 * i], dx[6 * i + 1], dx[6 * i + 2]); if (rot > 0.3) for (let j = 0; j < n; j++) dx[j] *= 0.3 / rot;
