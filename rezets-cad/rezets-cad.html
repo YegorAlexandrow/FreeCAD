@@ -900,6 +900,9 @@ function tryAddConstraint(sk, con, opt = {}) {
   // reach it, the line under it stays (SolidWorks moves the newest geometry first).
   const fresh = opt.fresh ?? (S.draw?.nid0 != null && editSk() === sk ? S.draw.nid0 : null); let W = null;
   if (fresh != null) { const isNew = (o) => +o.slice(1) >= fresh; if (sys.owner.some(isNew)) W = sys.owner.map((o, i) => [i, isNew(o) ? 1 : 1e-4]); }
+  // A relation added to picked geometry moves what was picked after the first, not both halfway (SolidWorks fits the
+  // later selection to the first).
+  else if (opt.movable?.size && sys.owner.some((o) => opt.movable.has(o))) W = sys.owner.map((o, i) => [i, opt.movable.has(o) ? 1 : 1e-3]);
   const ok = solveSystem(sys, X, W);
   let degenerate = false;
   if (ok) { writeBack(sk, sys, X); for (const [id, l] of lineLens(sk)) if (l < 1e-6 && (lensBefore.get(id) ?? 1) > 1e-6) degenerate = true; }
@@ -2785,10 +2788,11 @@ function relationOptions(sk) {
 }
 function applyRelation(fn) {
   const sk = editSk(); const list = fn(); S.conflict = new Set();
-  if (list.length < 2) { for (const c of list) { c.id = nid(sk); reportAdd(tryAddConstraint(sk, c), c); } commitSketch(); return; }
+  const order = [...S.sel]; const movable = new Set(); for (const k of order.slice(1)) { const id = k.slice(2); if (k.startsWith('p:')) movable.add('p' + id); else if (k.startsWith('e:')) { const e = sk.ents[id]; if (!e) continue; for (const q of [e.p1, e.p2, e.c, ...(e.pts || [])]) if (q) movable.add('p' + q); movable.add('r' + id); } }
+  if (list.length < 2) { for (const c of list) { c.id = nid(sk); reportAdd(tryAddConstraint(sk, c, { movable }), c); } commitSketch(); return; }
   // Several entities at once (SW: three lines made equal): one that already holds or conflicts is skipped, the rest still go in.
   let ok = 0, red = 0; const bad = new Set();
-  for (const c of list) { c.id = nid(sk); const r = tryAddConstraint(sk, c); if (r.status === 'ok' || r.status === 'driven') ok++; else if (r.status === 'redundant') red++; else for (const g of r.group || []) bad.add(g); if (r.status === 'conflict') bad.add('x' + c.id); }
+  for (const c of list) { c.id = nid(sk); const r = tryAddConstraint(sk, c, { movable }); if (r.status === 'ok' || r.status === 'driven') ok++; else if (r.status === 'redundant') red++; else for (const g of r.group || []) bad.add(g); if (r.status === 'conflict') bad.add('x' + c.id); }
   const nb = [...bad].filter((g) => g.startsWith('x')).length; S.conflict = new Set([...bad].filter((g) => !g.startsWith('x')));
   if (red || nb) toast(`${CON_NAMES[list[0].t]}: добавлено ${ok} из ${list.length}` + (red ? `, ${red} уже следуют из других взаимосвязей` : '') + (nb ? `, ${nb} противоречат эскизу (выделены красным)` : ''), nb ? 'err' : 'info');
   commitSketch();
