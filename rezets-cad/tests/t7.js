@@ -9,7 +9,7 @@ const open = require('./harness.js');
   console.log('start', JSON.stringify(await info()));
   await p.keyboard.press('r'); await clickUV(-20, -10); await clickUV(20, 10);
   console.log('rect', JSON.stringify(await info()));
-  await p.keyboard.press('d'); await clickUV(0, -10); await clickUV(0, -20); await p.keyboard.type('50'); await p.keyboard.press('Enter'); await p.waitForTimeout(200);
+  await p.keyboard.press('d'); await clickUV(0, -10); await clickUV(0, -20); await p.waitForFunction(() => document.activeElement?.closest?.('.dimedit'), null, { timeout: 5000 }).catch(() => {}); await p.keyboard.type('50'); await p.keyboard.press('Enter'); await p.waitForTimeout(300);
   console.log('dim', JSON.stringify(await info()));
   await p.keyboard.press('Control+z'); await p.waitForTimeout(400);
   console.log('undo1', JSON.stringify(await info()));

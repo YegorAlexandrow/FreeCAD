@@ -1736,6 +1736,9 @@ function buildTool(f, body, cyls = []) {
     let ap, ad;
     if (f.axis === 'H' || f.axis === 'V') { ap = [0, 0]; ad = f.axis === 'H' ? [1, 0] : [0, 1]; }
     else { const e = sf.sk.ents[f.axis]; if (!e || e.t !== 'line') throw new Error('Выберите ось вращения'); const a = gp(sf.sk, e.p1), b = gp(sf.sk, e.p2); ap = [a.x, a.y]; ad = [b.x - a.x, b.y - a.y]; }
+    // A profile on both sides of the axis would sweep through itself: refused, as SolidWorks does.
+    { const dl0 = Math.hypot(...ad) || 1; let neg = 0, pos = 0; for (const l of loops) for (const ring of [l.pts, ...l.holes]) for (const [x, y] of ring) { const sd = ((x - ap[0]) * ad[1] - (y - ap[1]) * ad[0]) / dl0; if (sd < -1e-6) neg = Math.max(neg, -sd); if (sd > 1e-6) pos = Math.max(pos, sd); }
+      if (neg > 1e-4 && pos > 1e-4) throw new Error(`Ось пересекает профиль: он лежит по обе стороны от неё (${fmt(Math.min(neg, pos), 2)} мм заходит за ось). Выберите другую ось или оставьте в выбранных контурах только одну сторону`); }
     g = revolveGeometry(loops, ap, ad, f.angle * (f.dir === -1 ? -1 : 1));
     const P0 = toWorld(sf.plane, ap[0], ap[1]); const D = toWorld(sf.plane, ap[0] + ad[0], ap[1] + ad[1]).sub(P0).normalize(); const dl = Math.hypot(...ad) || 1;
     const used = new Set(); for (const e of Object.values(sf.sk.ents)) if (!e.constr && !e.ext) [e.p1, e.p2].forEach((id) => id && used.add(id));
@@ -1883,6 +1886,14 @@ function updateBodyMesh0() {
     for (let t = 0; t < triCyl.length; t++) { const ci = triCyl[t]; if (ci < 0) continue; const cy = cyls[ci]; const sg = sign[ci] < 0 ? -1 : 1;
       for (let k = 0; k < 3; k++) { v.fromBufferAttribute(pos, 3 * t + k).sub(cy.p).projectOnPlane(cy.dir).normalize().multiplyScalar(sg); nrm.setXYZ(3 * t + k, v.x, v.y, v.z); } }
     nrm.needsUpdate = true; for (const f of map.values()) if (f.cyl) f.cyl.sign = sign[f.ci] < 0 ? -1 : 1; }
+  // Coplanar faces that don't touch (the tops of two bosses, a seed and its pattern copies) are separate faces:
+  // merged, a click on one picked both and credited both to whichever operation made the one sampled.
+  for (const [k, v] of [...map.entries()]) {
+    if (v.cyl || v.tris.length < 2) continue; const par = v.tris.map((_, i) => i); const find = (i) => { while (par[i] !== i) i = par[i] = par[par[i]]; return i; }; const first = new Map();
+    v.tris.forEach((t, i) => { for (let q = 0; q < 3; q++) { const kk = `${Math.round(pos.getX(3 * t + q) * 1e4)},${Math.round(pos.getY(3 * t + q) * 1e4)},${Math.round(pos.getZ(3 * t + q) * 1e4)}`; const j = first.get(kk); if (j === undefined) first.set(kk, i); else { const a = find(i), b = find(j); if (a !== b) par[a] = b; } } });
+    const comps = new Map(); v.tris.forEach((t, i) => { const r = find(i); if (!comps.has(r)) comps.set(r, []); comps.get(r).push(t); });
+    if (comps.size < 2) continue; map.delete(k); let n = 0; for (const tris of comps.values()) map.set(k + '#' + n++, { ...v, tris });
+  }
   for (const v of map.values()) { let area = 0; for (const t of v.tris) { const a = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), b = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2); area += new THREE.Vector3().crossVectors(b.sub(a), c.sub(a)).length() / 2; } v.area = area; if (area > 1e-3) faceIndex.push(v); }
   buildPlanes();
 }
