@@ -31,7 +31,8 @@ const vol = () => { const S = window.__rezets.S; if (!S.body) return 0; const po
   const bb = await p.evaluate(() => { const S = window.__rezets.S; S.body.computeBoundingBox(); return [S.body.boundingBox.min.x, S.body.boundingBox.max.x, Object.keys(S.errors)]; });
   console.log('width after edit', bb);
   await p.keyboard.press('Control+z'); await p.waitForTimeout(800);
-  const bb2 = await p.evaluate(() => { const S = window.__rezets.S; S.body.computeBoundingBox(); return [S.body.boundingBox.min.x, S.body.boundingBox.max.x, !!S.editing]; });
+  // Undo comes back into the sketch, where the model is rolled back to it: the width is read off the whole tree.
+  const bb2 = await p.evaluate(() => { const R = window.__rezets; const S = R.S; const g = R.computeBody(S.doc.features).body; g.computeBoundingBox(); return [g.boundingBox.min.x, g.boundingBox.max.x, !!S.editing]; });
   console.log('after undo', bb2);
   console.log(logs.join('\n')); await b.close();
   // dark theme + phone
