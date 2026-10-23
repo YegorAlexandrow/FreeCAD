@@ -2245,7 +2245,7 @@ function drawSketchObjects(f, active) {
   const buckets = new Map(); const push = (key, mat, arr) => { if (!buckets.has(key)) buckets.set(key, { mat, arr: [] }); buckets.get(key).arr.push(...arr); };
   const colorFor = (k, e, state) => {
     if (!active) return state === 'constr' ? colors['geo-constr'] : colors['geo-full'];
-    if (S.sel.has(k)) return colors['geo-sel']; if (S.hover === k) return colors['geo-hover'];
+    if (S.sel.has(k)) return colors['geo-sel']; if (S.hover === k || S.relHover?.includes(k)) return colors['geo-hover'];
     if ([...S.conflict].some((cid) => sk.cons[cid]?.refs.includes(e?.id))) return colors['geo-bad'];
     if (state === 'ext' && S.dangling.get(f.id)?.some((id) => e && (e.p1 === id || e.p2 === id || e.c === id))) return colors['geo-bad'];
     return state === 'ext' ? colors['geo-ext'] : state === 'constr' ? colors['geo-constr'] : state === 'full' ? colors['geo-full'] : colors['geo-under'];
@@ -2274,7 +2274,7 @@ function drawSketchObjects(f, active) {
     const p = gp(sk, id); const k = 'p:' + id; const used = Object.values(sk.ents).some((e) => entPts(e).includes(id)) || id === 'O' || Object.values(sk.cons).some((c) => c.refs.includes(id));
     if (!used && !sk.pts[id]?.free) continue;
     pts.push(...W(p.x, p.y).toArray());
-    const c = S.sel.has(k) ? colors['geo-sel'] : S.hover === k ? colors['geo-hover'] : id === 'O' ? colors.accent : sk.pts[id]?.fixed ? colors['geo-ext'] : ptState(id) === 'full' ? colors['geo-full'] : colors['geo-under'];
+    const c = S.sel.has(k) ? colors['geo-sel'] : S.hover === k || S.relHover?.includes(k) ? colors['geo-hover'] : id === 'O' ? colors.accent : sk.pts[id]?.fixed ? colors['geo-ext'] : ptState(id) === 'full' ? colors['geo-full'] : colors['geo-under'];
     cols.push(c.r, c.g, c.b);
   }
   const pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)); pg.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
@@ -2395,6 +2395,8 @@ function layoutOverlay() {
         const [gx, gy] = spots.find(([x, y]) => clear(x, y)) || spots[0];
         const el = h('div', { class: 'glyph' + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${gx}px;top:${gy}px`, title: CON_NAMES[c.t] }, CON_GLYPH[c.t]);
         el.addEventListener('pointerdown', (ev) => { ev.stopPropagation(); if (!ev.shiftKey && !ev.ctrlKey) S.sel.clear(); S.sel.add('c:' + c.id); refreshSketch(); });
+        // Pointing at a relation's glyph lights what it ties together.
+        el.addEventListener('pointerenter', () => { const keys = c.refs.map((r) => (sk.ents[r] || REF_ENTS[r] ? 'e:' : 'p:') + r); if (S.relHover?.join() !== keys.join()) { S.relHover = keys; updateSketchVisuals(); } });
         overlay.append(el);
       }
     }
@@ -2607,6 +2609,7 @@ function sketchDown(ev) {
 }
 function sketchMove(ev) {
   const m = mouseToSketch(ev); const sk = editSk(); $('stXY').textContent = `X ${fmt(m.u, 2)}  Y ${fmt(m.v, 2)}`;
+  if (S.relHover) { S.relHover = null; updateSketchVisuals(); }
   if (S.skOp?.kind === 'offset' && !down) offsetSide(m);
   if (S.tool === 'select') {
     if (S.drag?.lostPt && down?.moved) { const q = sk.pts[S.drag.lostPt]; let hit = null; for (const v of S.refs?.verts || []) { const sc = sScreen(v[0], v[1]); const d = Math.hypot(sc.x - m.sx, sc.y - m.sy); if (d < 12 && (!hit || d < hit.d)) hit = { d, v }; }
