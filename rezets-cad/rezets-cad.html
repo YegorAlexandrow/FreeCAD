@@ -3868,13 +3868,14 @@ function renderMeasure() {
 function edgeFaceNormals(body, a, b) {
   const pos = body.getAttribute('position'); const u = b.clone().sub(a); const L = u.length(); u.normalize();
   const found = []; const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
-  const onLine = (p) => { const w = p.clone().sub(a); const t = w.dot(u); return w.addScaledVector(u, -t).lengthSq() < 1e-6 ? t : null; };
+  // Tolerances shrink with edges shorter than 1 mm: on a 0.1 mm part a fillet's own facets lie within 1 µm of the next edge.
+  const sc = Math.min(1, L); const onLine = (p) => { const w = p.clone().sub(a); const t = w.dot(u); return w.addScaledVector(u, -t).lengthSq() < 1e-6 * sc * sc ? t : null; };
   for (let i = 0; i < pos.count; i += 3) {
     A.fromBufferAttribute(pos, i); B.fromBufferAttribute(pos, i + 1); C.fromBufferAttribute(pos, i + 2);
     const vs = [A, B, C];
     for (let e = 0; e < 3; e++) {
       const t1 = onLine(vs[e]), t2 = onLine(vs[(e + 1) % 3]); if (t1 == null || t2 == null) continue;
-      if (Math.min(t1, t2) > L - 1e-4 || Math.max(t1, t2) < 1e-4 || Math.abs(t1 - t2) < 1e-6) continue;
+      if (Math.min(t1, t2) > L - 1e-4 * sc || Math.max(t1, t2) < 1e-4 * sc || Math.abs(t1 - t2) < 1e-6 * sc) continue;
       const n = new THREE.Vector3().crossVectors(B.clone().sub(A), C.clone().sub(A)); if (n.lengthSq() < 1e-16) continue; n.normalize();
       if (!found.some((f) => f.dot(n) > 0.9999)) found.push(n);
     }
