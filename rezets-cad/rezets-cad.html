@@ -204,6 +204,8 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #corner { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; }
 #corner button { width: 40px; height: 40px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; display: grid; place-items: center; box-shadow: 0 2px 8px rgb(0 0 0 / .12); }
 #corner button svg { width: 22px; height: 22px; }
+#viewCube { position: absolute; top: 6px; right: 6px; width: 110px; height: 110px; cursor: pointer; touch-action: none; }
+#corner:not(:empty) ~ #viewCube { top: 58px; }
 #corner .ok { color: var(--good); } #corner .cancel { color: var(--bad); }
 #viewbar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); display: flex; gap: 2px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); max-width: calc(100% - 120px); overflow-x: auto; }
 #viewbar button { border: none; background: none; padding: 4px 8px; border-radius: 5px; cursor: pointer; color: var(--fg-2); font-size: 12px; white-space: nowrap; }
@@ -311,6 +313,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div id="repairBar" hidden></div>
     <div id="drawing" hidden></div>
     <div id="corner"></div>
+    <canvas id="viewCube" title="Щелчок по грани, ребру или углу поворачивает вид, перетаскивание вращает его"></canvas>
     <div id="toasts"></div>
     <div id="loading">Загрузка геометрического ядра…</div>
   </main>
@@ -1948,15 +1951,60 @@ controls.enableRotate = false;
   canvas.addEventListener('pointermove', (e) => {
     if (!last || !controls.enabled) return; const dx = e.clientX - last.x, dy = e.clientY - last.y; last = { x: e.clientX, y: e.clientY };
     if (!rotates(e) || (!dx && !dy)) return;
-    const k = 2 * Math.PI * controls.rotateSpeed / canvas.clientHeight; const off = camera.position.clone().sub(controls.target);
-    const up = camera.up.clone().normalize(); const right = new THREE.Vector3().crossVectors(off.clone().negate(), up).normalize();
-    const q = new THREE.Quaternion().setFromAxisAngle(up, -dx * k).multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * k));
-    camera.up.copy(up.applyQuaternion(q));
-    if (pivot) { for (const v of [camera.position, controls.target]) v.sub(pivot).applyQuaternion(q).add(pivot); } else { off.applyQuaternion(q); camera.position.copy(controls.target).add(off); }
-    camera.lookAt(controls.target); requestRender();
+    orbitView(dx, dy, pivot);
   });
 }
+// Turns the view by a drag of dx, dy pixels about the screen axes, around pivot (or the orbit target).
+function orbitView(dx, dy, pivot) {
+  const k = 2 * Math.PI * controls.rotateSpeed / canvas.clientHeight; const off = camera.position.clone().sub(controls.target);
+  const up = camera.up.clone().normalize(); const right = new THREE.Vector3().crossVectors(off.clone().negate(), up).normalize();
+  const q = new THREE.Quaternion().setFromAxisAngle(up, -dx * k).multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * k));
+  camera.up.copy(up.applyQuaternion(q));
+  if (pivot) { for (const v of [camera.position, controls.target]) v.sub(pivot).applyQuaternion(q).add(pivot); } else { off.applyQuaternion(q); camera.position.copy(controls.target).add(off); }
+  camera.lookAt(controls.target); requestRender();
+}
 let renderQueued = false;
+// The view cube in the corner: it turns with the model, and its faces, edges and corners turn the view to the
+// 26 standard directions (the View Selector of SolidWorks, the ViewCube of other CADs); a drag on it turns the view.
+const viewCube = (() => {
+  const el = $('viewCube'); const SZ = 110; const r = new THREE.WebGLRenderer({ canvas: el, antialias: true, alpha: true });
+  r.setPixelRatio(Math.min(devicePixelRatio || 1, 2)); r.setSize(SZ, SZ, false);
+  const sc = new THREE.Scene(); const cam = new THREE.OrthographicCamera(-1.62, 1.62, 1.62, -1.62, 0.1, 20);
+  // BoxGeometry faces in order +x, -x, +y, -y, +z, -z; the bottom label is turned so it reads upright in the bottom view.
+  const LABELS = ['Справа', 'Слева', 'Сверху', 'Снизу', 'Спереди', 'Сзади'];
+  const mats = LABELS.map(() => new THREE.MeshBasicMaterial({ transparent: true })); const box = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), mats); sc.add(box);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(box.geometry), new THREE.LineBasicMaterial()); sc.add(edges);
+  const hl = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.6, depthWrite: false })); hl.visible = false; sc.add(hl);
+  const retheme = () => {
+    const bg = css('--panel') || '#fff', fg = css('--fg') || '#222', line = css('--line') || '#ccc';
+    LABELS.forEach((t, i) => { const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d');
+      g.fillStyle = bg; g.fillRect(0, 0, 128, 128); g.strokeStyle = line; g.lineWidth = 4; g.strokeRect(2, 2, 124, 124);
+      g.fillStyle = fg; g.font = '600 25px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(t, 64, 66);
+      const tx = new THREE.CanvasTexture(c); tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = 4; if (i === 3) { tx.center.set(0.5, 0.5); tx.rotation = Math.PI; }
+      mats[i].map?.dispose(); mats[i].map = tx; mats[i].needsUpdate = true; });
+    edges.material.color.set(css('--fg-2') || '#666'); hl.material.color.set(css('--accent') || '#1d5bd6'); draw();
+  };
+  function draw() {
+    el.hidden = S.mode === 'drw'; if (el.hidden) return;
+    const d = camera.position.clone().sub(controls.target).normalize(); cam.position.copy(d).multiplyScalar(6); cam.up.copy(camera.up); cam.lookAt(0, 0, 0); r.render(sc, cam);
+  }
+  // A point on the cube names a zone: each coordinate near a face (beyond 0.6 of the half size) counts.
+  const zoneAt = (e) => { const b = el.getBoundingClientRect(); const rc = new THREE.Raycaster(); rc.setFromCamera(new THREE.Vector2((e.clientX - b.left) / b.width * 2 - 1, -((e.clientY - b.top) / b.height) * 2 + 1), cam);
+    const hit = rc.intersectObject(box)[0]; if (!hit) return null; const p = hit.point; return [p.x, p.y, p.z].map((v) => (Math.abs(v) > 0.6 ? Math.sign(v) : 0)); };
+  const showZone = (z) => { hl.visible = !!z; if (z) { hl.scale.set(...z.map((c) => (c ? 0.44 : 1.2))); hl.position.set(...z.map((c) => c * 0.8)); } draw(); };
+  const go = (z) => { const dir = new THREE.Vector3(...z).normalize(); const up = z[0] === 0 && z[2] === 0 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0); setView(dir, up); };
+  let drag = null;
+  el.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; e.preventDefault(); el.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, moved: false, z: zoneAt(e) }; });
+  el.addEventListener('pointermove', (e) => {
+    if (!drag) { showZone(zoneAt(e)); return; }
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y; if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true; showZone(null); orbitView(dx * 2.5, dy * 2.5); drag.x = e.clientX; drag.y = e.clientY;
+  });
+  el.addEventListener('pointerup', (e) => { const d0 = drag; drag = null; if (d0 && !d0.moved && d0.z && d0.z.some((c) => c)) go(d0.z); showZone(zoneAt(e)); });
+  el.addEventListener('pointerleave', () => { if (!drag) showZone(null); });
+  retheme();
+  return { draw, retheme, zoneAt, go };
+})();
 // The depth range hugs the scene before each frame and each pick ray (a ray starts on the near plane). With a fixed ±100000 mm the 24-bit depth buffer resolved
 // about 0.01 mm, so edges and faces of a small part fought over the same pixels and the edges flickered dashed.
 const depthBox = new THREE.Box3(), depthSph = new THREE.Sphere();
@@ -1966,7 +2014,7 @@ function fitDepth() {
   depthBox.getBoundingSphere(depthSph); const dz = depthSph.center.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3()));
   const m = depthSph.radius * 1.05 + 1; camera.near = dz - m; camera.far = dz + m; camera.updateProjectionMatrix();
 }
-function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); layoutOverlay(); }); }
+function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); viewCube.draw(); layoutOverlay(); }); }
 // Outlines of curved faces as seen from here (a cylinder's sides, a fillet's edge on the skyline), redrawn as the
 // view turns, as SolidWorks draws them: without them a shaft seen from the side was a flat grey band.
 const silGroup = new THREE.Group(); let silState = { geo: null, dir: null, obj: null };
@@ -1985,8 +2033,8 @@ function resize() {
   for (const m of lineMats) m.resolution.set(w, hgt); requestRender();
 }
 new ResizeObserver(resize).observe(view);
-const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); refreshAll(); });
-new MutationObserver(() => { readColors(); refreshAll(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); viewCube.retheme(); refreshAll(); });
+new MutationObserver(() => { readColors(); viewCube.retheme(); refreshAll(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 const planeHalf = () => { const g = S.mode === 'part' ? S.body : null; if (!g) return 60; g.computeBoundingBox(); const r = g.boundingBox.getBoundingSphere(new THREE.Sphere()).radius; return Math.min(5000, Math.max(1, r * 0.7)); };
 function buildPlanes() {
