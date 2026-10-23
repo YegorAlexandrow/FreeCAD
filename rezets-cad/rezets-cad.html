@@ -1688,7 +1688,7 @@ function computeBody(features) {
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
     const k = key.join('\n');
-    if (S.cache.has(k)) { const c = S.cache.get(k); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
+    if (S.cache.has(k)) { const c = S.cache.get(k); S.cache.delete(k); S.cache.set(k, c); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
     let err = null; let warn = null;
     try {
       if (f.varErr) throw new Error(f.varErr);
@@ -1710,7 +1710,8 @@ function computeBody(features) {
     if (err) errors[f.id] = err; S.warns[f.id] = warn;
     S.cache.set(k, { body, err, cyls, warn });
   }
-  if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
+  // Least recently used entries go first, down to what two builds of this part need (each one adds a body per feature).
+  const cap = Math.max(80, 2 * features.length); while (S.cache.size > cap) S.cache.delete(S.cache.keys().next().value);
   return { body, errors, cyls };
 }
 function sketchRegions(f) {
