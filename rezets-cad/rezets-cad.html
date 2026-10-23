@@ -1620,7 +1620,7 @@ function computeBody(features) {
         const ent = docEntry(f.doc); if (!ent || ent.kind !== 'import') throw new Error('Импортированной модели (STEP или STL) больше нет в проекте');
         const g = cleanGeo(importGeometry(ent)); cyls = cyls.concat(importCyls(ent)); body = body ? boolean(body, g, ADDITION) : g; S.cache.set(k, { body, err: null, cyls }); continue;
       }
-      if (f.type === 'fillet' || f.type === 'chamfer') { body = applyEdgeFeature(f, body); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (f.type === 'fillet' || f.type === 'chamfer') { cyls = [...cyls]; body = applyEdgeFeature(f, body, cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
@@ -2348,7 +2348,10 @@ canvas.addEventListener('pointermove', (ev) => {
 canvas.addEventListener('pointerup', (ev) => {
   const d = down; down = null;
   if (S.editing) { if (d && d.button === 0) sketchUp(ev, d); return; }
-  if (S.mode === 'asm' && !S.measure) { if (d && d.button === 2 && !d.moved && !S.pm) { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); if (c) { S.asmSel = c.id; asmRefresh(); openMenu(ev.clientX, ev.clientY, compMenu(S.doc, c, ev)); } else if (!p && S.doc.comps.some((x) => x.hidden)) openMenu(ev.clientX, ev.clientY, [['Показать скрытые компоненты', () => { for (const x of S.doc.comps) delete x.hidden; asmRefresh(); pushUndo(); }]]); return; } if (!d || d.button === 0) asmUp(ev, d); return; }
+  if (S.mode === 'asm' && !S.measure) {
+    // Inside the mate panel a right click hides the component in the way, to reach the face behind it.
+    if (d && d.button === 2 && !d.moved && S.pm?.kind === 'mate') { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); const items = []; if (c) items.push([`Скрыть «${c.name}»`, () => toggleCompHidden(c)]); if (S.doc.comps.some((x) => x.hidden)) items.push(['Показать скрытые', () => { for (const x of S.doc.comps) delete x.hidden; asmRefresh(); pushUndo(); }]); if (items.length) openMenu(ev.clientX, ev.clientY, items); return; }
+    if (d && d.button === 2 && !d.moved && !S.pm) { const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp); if (c) { S.asmSel = c.id; asmRefresh(); openMenu(ev.clientX, ev.clientY, compMenu(S.doc, c, ev)); } else if (!p && S.doc.comps.some((x) => x.hidden)) openMenu(ev.clientX, ev.clientY, [['Показать скрытые компоненты', () => { for (const x of S.doc.comps) delete x.hidden; asmRefresh(); pushUndo(); }]]); return; } if (!d || d.button === 0) asmUp(ev, d); return; }
   if (d && d.button === 0 && !d.moved) partClick(ev);
   if (d && d.button === 2 && !d.moved && !S.measure && (S.mode === 'part' || S.mode === 'import')) partContext(ev);
 });
@@ -3691,7 +3694,10 @@ function edgeTool(body, edge, kind, size) {
     // Added material stays over the two faces: where a face ends (a round rim, a step) the fillet ends with it
     // instead of hanging in the air past it.
     if (!convex) for (const [n, d] of [[n1, d1], [n2, d2]]) { const prism = facePrism(body, n, mid.clone().addScaledVector(d, eps), size + eps); if (prism) g = boolean(g, prism, INTERSECTION); }
-    return { g, convex };
+    // The rounded face is a cylinder about an axis along the edge, a radius from both faces: told to the topology,
+    // its rims on the end faces are arcs (snapped to, dimensioned, kept as the face's outline) instead of facets.
+    let cyl = null; if (kind === 'fillet') { const th = d1.angleTo(d2); if (th > 1e-3 && th < Math.PI - 1e-3) cyl = { p: a.clone().addScaledVector(d1.clone().add(d2).normalize(), size / Math.sin(th / 2)), dir: u.clone(), r: size }; }
+    return { g, convex, cyl };
   }
   // Circular edge between a plane and a cylinder: work in the (radial, axial) half-plane.
   const c = V3(edge.c), n = V3(edge.n).normalize(); let rho = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize();
@@ -3770,12 +3776,12 @@ function followEdges(f, body, cyls) {
     return hit ? { ...e, a: hit[0].toArray(), b: hit[1].toArray() } : e;
   });
 }
-function applyEdgeFeature(f, body) {
+function applyEdgeFeature(f, body, cyls) {
   if (!body) throw new Error('Нет тела для обработки рёбер'); if (!f.edges?.length) throw new Error('Выберите рёбра');
   // An edge that cannot be found is skipped, not the whole feature: the others keep their chamfer,
   // and the feature says how many were lost.
   let out = body; let lost = 0;
-  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); }
+  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
   if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление' : 'фаска'} сделана. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
   return out;
 }
