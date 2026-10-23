@@ -2512,7 +2512,14 @@ function sketchDown(ev) {
   if (S.tool === 'dim') { dimClick(m); return; }
   if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
   if (S.tool === 'convert') { const r = convertFace(sk, m); if (typeof r === 'string') { toast(r, 'warn'); return; } setTool('select'); commitSketch(); toast(`Контур грани в эскизе: ${r} ${plural(r, 'линия', 'линии', 'линий')}. Выйдите из эскиза и вытяните его`, 'info'); return; }
-  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
+  if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true });
+    // Two lines clicked one after the other round the corner where they meet.
+    if (!p) { const q = pick(m); const L = q?.key.startsWith('e:') && sk.ents[q.key.slice(2)]; if (L?.t === 'line' && !L.ext) { const first = S.filletFirst && sk.ents[S.filletFirst];
+      if (!first || first === L) { S.filletFirst = L.id; S.sel = new Set(['e:' + L.id]); updateSketchVisuals(); setHint('Щёлкните второй отрезок угла'); return; }
+      S.filletFirst = null; S.sel.clear(); const shared = [first.p1, first.p2].find((x) => x === L.p1 || x === L.p2);
+      if (!shared) { toast('Эти отрезки не сходятся в одной точке', 'warn'); updateSketchVisuals(); setHint(); return; }
+      const r = filletCorner(sk, shared, S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); updateSketchVisuals(); setHint(); return; } if (r?.arc) (S.toolFillets ||= []).push(r.arc); S.hover = null; commitSketch(); setHint(); return; } }
+    if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
 function sketchMove(ev) {
@@ -2590,7 +2597,11 @@ function setTool(t) {
     if (corners.size) { let n = 0; const errs = []; for (const id of corners) { const r = filletCorner(sk, id, S.toolOpt.filletR); if (r?.arc) n++; else if (typeof r === 'string') errs.push(r); } S.sel.clear(); commitSketch(); toast(n ? `Скруглено углов: ${n}${errs.length ? `, не получилось: ${errs.length} (${errs[0]})` : ''}` : errs[0] || 'Нечего скруглять', n ? 'info' : 'warn'); } }
   if (t !== 'select' && t !== 'dim' && t !== 'sfillet' && S.sel.size) { S.sel.clear(); }
   const preDim = t === 'dim' && S.editing ? [...S.sel].filter((k) => k.startsWith('e:') || k.startsWith('p:')).slice(0, 2) : [];
-  S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
+  // A in the middle of a line chain goes on with an arc tangent to the last line, as SolidWorks does.
+  const chain = S.editing && S.tool === 'line' && t === 'arc' && S.draw?.stage === 1 && S.draw.start ? S.draw : null;
+  const tanLine = chain && Object.values(editSk().ents).find((e) => e.t === 'line' && e.p2 === chain.start);
+  S.tool = t; S.toolFillets = []; S.filletFirst = null; S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
+  if (tanLine) S.draw = { stage: 'tan', start: chain.start, first: chain.first, tan: tanLine.id, newPts: [chain.start], nid0: chain.nid0 };
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
 }
@@ -2628,6 +2639,13 @@ function drawMove(m) {
   if (t === 'rect' && D.stage === 1) { const a = D.a; D.preview = [[a.u, a.v, sn.u, a.v], [sn.u, a.v, sn.u, sn.v], [sn.u, sn.v, a.u, sn.v], [a.u, sn.v, a.u, a.v]]; }
   if (t === 'circle' && D.stage === 1) { const c = gp(sk, D.c); D.preview = circleSegs(c.x, c.y, Math.hypot(sn.u - c.x, sn.v - c.y), 0, 2 * Math.PI); }
   if (t === 'arc' && D.stage === 1) { const c = gp(sk, D.c); D.preview = [[c.x, c.y, sn.u, sn.v]]; }
+  if (t === 'arc' && D.stage === 'tan') {
+    const L = sk.ents[D.tan], a = gp(sk, L.p1), P = gp(sk, D.start); const tl = Math.hypot(P.x - a.x, P.y - a.y) || 1; const nx = -(P.y - a.y) / tl, ny = (P.x - a.x) / tl;
+    const ex = sn.u - P.x, ey = sn.v - P.y; const dn = ex * nx + ey * ny; D.tanArc = null; D.preview = [[P.x, P.y, sn.u, sn.v]];
+    // The centre lies on the normal at the start; on its left the arc runs counter-clockwise.
+    if (Math.abs(dn) > 1e-6 && Math.hypot(ex, ey) > 1e-6) { const r = (ex * ex + ey * ey) / (2 * dn); const cx = P.x + nx * r, cy = P.y + ny * r; const a0 = Math.atan2(P.y - cy, P.x - cx); let sw = Math.atan2(sn.v - cy, sn.u - cx) - a0;
+      if (r > 0) while (sw <= 0) sw += TAU; else while (sw >= 0) sw -= TAU; D.tanArc = { cx, cy, r: Math.abs(r), sw }; D.preview = circleSegs(cx, cy, Math.abs(r), sw >= 0 ? a0 : a0 + sw, Math.abs(sw)); }
+  }
   if (t === 'arc' && D.stage === 2) {
     const c = gp(sk, D.c); const s = gp(sk, D.s); const r = Math.hypot(s.x - c.x, s.y - c.y); const a0 = Math.atan2(s.y - c.y, s.x - c.x); const a1 = Math.atan2(sn.v - c.y, sn.u - c.x);
     let d = a1 - (D.lastA ?? a0); while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; D.sweep = (D.sweep || 0) + d; D.lastA = a1;
@@ -2686,6 +2704,13 @@ function drawClick(m) {
     const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: D.c, r };
     if (sn.kind === 'pt') pending.push({ t: 'oncircle', refs: [sn.ref, id] });
     addRelations(sk, pending); S.draw = null; commitSketch(); return;
+  }
+  if (t === 'arc' && D.stage === 'tan') {
+    const A = D.tanArc; if (!A || A.r > 1e5) return; const e2 = snapToPoint(sk, sn, pending); const c = nid(sk); sk.pts[c] = { id: c, x: A.cx, y: A.cy }; const id = nid(sk);
+    sk.ents[id] = A.sw > 0 ? { id, t: 'arc', c, p1: D.start, p2: e2, r: A.r } : { id, t: 'arc', c, p1: e2, p2: D.start, r: A.r };
+    pending.push({ t: 'tangent', refs: [D.tan, id] }); addRelations(sk, pending);
+    // Back to lines from the arc's end, the chain goes on until it closes or lands on a point.
+    S.tool = 'line'; S.draw = e2 === D.first || sn.kind === 'pt' ? null : { stage: 1, start: e2, first: D.first, newPts: [e2], nid0: D.nid0 }; renderTools(); commitSketch(true); setHint(); return;
   }
   if (t === 'arc') {
     if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
@@ -6853,7 +6878,7 @@ function setHint(text) {
     line: S.draw?.stage === 1 ? 'Щёлкайте следующие точки. Щелчок по существующей точке или Esc завершает цепочку' : 'Линия: щёлкните начальную точку',
     rect: S.draw?.stage === 1 ? 'Щёлкните противоположный угол' : 'Прямоугольник: щёлкните первый угол',
     circle: S.draw?.stage === 1 ? 'Щёлкните, чтобы задать радиус' : 'Окружность: щёлкните центр',
-    arc: S.draw?.stage === 2 ? 'Ведите по дуге и щёлкните конечную точку' : S.draw?.stage === 1 ? 'Щёлкните начальную точку дуги' : 'Дуга: щёлкните центр',
+    arc: S.draw?.stage === 'tan' ? 'Касательная дуга: щёлкните конечную точку, потом цепочка продолжится отрезками' : S.draw?.stage === 2 ? 'Ведите по дуге и щёлкните конечную точку' : S.draw?.stage === 1 ? 'Щёлкните начальную точку дуги' : 'Дуга: щёлкните центр',
     spline: S.draw?.pts?.length ? 'Щёлкайте следующие точки. Enter или двойной щелчок завершает, щелчок по первой точке замыкает' : 'Сплайн: щёлкните первую точку',
     ellipse: S.draw?.stage === 2 ? 'Щёлкните, чтобы задать малую полуось' : S.draw?.stage === 1 ? 'Щёлкните конец большой оси' : 'Эллипс: щёлкните центр',
     slot: S.draw?.stage === 2 ? 'Щёлкните, чтобы задать ширину паза' : S.draw?.stage === 1 ? 'Щёлкните второй центр паза' : 'Паз: щёлкните первый центр',
