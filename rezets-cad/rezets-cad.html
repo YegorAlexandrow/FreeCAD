@@ -2439,8 +2439,8 @@ function sketchState(sk, a) {
 function renderSkState() {
   const st = $('stState'); st.textContent = '';
   if (S.mode === 'asm' && S.asmAnalysis && !S.doc.comps?.length) st.append(h('span', { class: 'pill empty' }, 'Пустая сборка'));
-  else if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
-  if (S.editing && S.analysis) { const a = S.analysis; const { state, text } = sketchState(editSk(), a); st.append(h('span', { class: 'pill ' + state }, text + (state === 'under' && a.dofMain ? ' · ' + a.dofMain : ''))); }
+  else if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ', свободно: ' + a.dof : ''))); }
+  if (S.editing && S.analysis) { const a = S.analysis; const { state, text } = sketchState(editSk(), a); st.append(h('span', { class: 'pill ' + state }, text + (state === 'under' && a.dofMain ? ', свободно: ' + a.dofMain : ''))); }
 }
 function entState(sk, e) {
   if (e.ext) return 'ext';
@@ -5290,7 +5290,7 @@ async function openProjects() {
   const tbl = h('div', { class: 'proj-list' });
   for (const p of list) {
     const cur = p.id === SRV.pid; const nm = h('span', { class: 'nm' }, p.name);
-    const row = h('div', { class: 'proj-row' + (cur ? ' cur' : '') }, nm, h('span', { class: 'meta' }, `${p.docs} док. · ${kb(p.size)}`), h('span', { class: 'meta' }, fmtT(p.updated)),
+    const row = h('div', { class: 'proj-row' + (cur ? ' cur' : '') }, nm, h('span', { class: 'meta' }, `${p.docs} док., ${kb(p.size)}`), h('span', { class: 'meta' }, fmtT(p.updated)),
       h('div', { class: 'acts' },
         cur ? h('span', { class: 'meta' }, 'открыт') : h('button', { class: 'chip', onclick: async () => { await serverSave(); $('projModal').hidden = true; await serverOpen(p.id); } }, 'Открыть'),
         h('button', { class: 'chip', title: 'Переименовать', onclick: () => { const inp = h('input', { type: 'text', value: p.name }); nm.replaceWith(inp); inp.focus(); inp.select(); const done = async (ok) => { if (ok && inp.value.trim() && inp.value.trim() !== p.name) { await api('PATCH', 'projects/' + p.id, { name: inp.value.trim() }); if (cur) { S.project.name = inp.value.trim(); SRV.metaHash = hashStr(JSON.stringify(metaOf())); renderProjectButton(); } } openProjects(); }; inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') { e.preventDefault(); done(false); } }; inp.onblur = () => done(true); } }, '✎'),
@@ -6722,7 +6722,7 @@ function cpatInstances(asm, pat) {
     if (pat.type === 'lin') { const t = A.d.clone().multiplyScalar((pat.flip ? -1 : 1) * pat.d * k); M = new THREE.Matrix4().makeTranslation(t.x, t.y, t.z); }
     else { const total = Math.min(360, pat.angle || 360); const step = (total >= 360 - 1e-9 ? 360 / n : total / Math.max(1, n - 1)) * Math.PI / 180 * (pat.flip ? -1 : 1);
       M = new THREE.Matrix4().makeTranslation(A.p.x, A.p.y, A.p.z).multiply(new THREE.Matrix4().makeRotationAxis(A.d, step * k)).multiply(new THREE.Matrix4().makeTranslation(-A.p.x, -A.p.y, -A.p.z)); }
-    for (const sid of pat.seeds) { const c = asm.comps.find((x) => x.id === sid); if (!c) continue; out.push({ id: `${pat.id}:${sid}:${k}`, doc: c.doc, name: `${c.name}·${k + 1}`, T: M.clone().multiply(new THREE.Matrix4().fromArray(c.T)).toArray(), virtual: true, seed: sid, pat: pat.id }); }
+    for (const sid of pat.seeds) { const c = asm.comps.find((x) => x.id === sid); if (!c) continue; out.push({ id: `${pat.id}:${sid}:${k}`, doc: c.doc, name: `${c.name} (копия ${k + 1})`, T: M.clone().multiply(new THREE.Matrix4().fromArray(c.T)).toArray(), virtual: true, seed: sid, pat: pat.id }); }
   }
   return out;
 }
@@ -6756,7 +6756,7 @@ function renderCompPatternPM() {
   const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(pat.type === 'lin' ? ICON.lpattern : ICON.cpattern), h('span', {}, pat.type === 'lin' ? 'Линейный массив компонентов' : 'Круговой массив компонентов'),
     h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okCompPattern }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'seeds' ? ' on' : ''), onclick: () => { pm.pickFor = 'seeds'; renderSide(); } }, h('b', {}, '▣'), pat.seeds.length ? pat.seeds.map(cname).join(', ') : 'щёлкните компоненты')));
-  const refName = pat.ref.axis ? AXIS_NAMES[pat.ref.axis] : `${pickName(pat.ref)} · ${cname(pat.ref.comp)}`;
+  const refName = pat.ref.axis ? AXIS_NAMES[pat.ref.axis] : `${pickName(pat.ref)}, ${cname(pat.ref.comp)}`;
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, pat.type === 'lin' ? 'Направление' : 'Ось'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'ref' ? ' on' : ''), onclick: () => { pm.pickFor = 'ref'; renderSide(); } }, h('b', {}, '↗'), refName),
     h('div', { class: 'chips' }, Object.keys(GLOBAL_AXES).map((k) => h('button', { class: 'chip', onclick: () => { pat.ref = { axis: k }; asmRefresh(); } }, k.toUpperCase()))),
     pm.pickFor === 'ref' ? h('div', { class: 'note' }, 'Щёлкните ребро или цилиндрическую грань компонента') : null));
