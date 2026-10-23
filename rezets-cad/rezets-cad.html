@@ -2146,6 +2146,8 @@ function snap(m, ctx = {}) {
     const a = gp(sk, e.p1), b = gp(sk, e.p2); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2; const s = sScreen(mx, my);
     if (Math.hypot(s.x - m.sx, s.y - m.sy) < 9) return { u: mx, v: my, kind: 'mid', ref: e.id, guides: [], glyph: '½' };
   }
+  // The middle of a model edge snaps as well, without converting the edge first.
+  if (S.refs) for (const [i, [x1, y1, x2, y2]] of S.refs.lines.entries()) { const mx = (x1 + x2) / 2, my = (y1 + y2) / 2; const s = sScreen(mx, my); if (Math.hypot(s.x - m.sx, s.y - m.sy) < 9) return { u: mx, v: my, kind: 'refmid', ref: 'r:l:' + i, guides: [], glyph: '½' }; }
   const pe = pick(m, { tol: 7, excludeEnts: ctx.excludeEnts, noAxes: false });
   if (pe && (pe.key.startsWith('r:l:') || pe.key.startsWith('r:c:'))) {
     const i = +pe.key.split(':')[2];
@@ -2175,6 +2177,7 @@ function snapToPoint(sk, sn, pending) {
   if (sn.kind === 'pt') return sk.pts[sn.ref]?.fixed || sn.ref === 'O' ? onModel(sn.ref) : sn.ref;
   if (sn.kind === 'ref') return onModel(materialize(sk, sn.ref).slice(2));
   if (sn.kind === 'refon') { const ek = materialize(sk, sn.ref).slice(2); sn = { ...sn, kind: 'on', ref: ek }; }
+  if (sn.kind === 'refmid') { const ek = materialize(sk, sn.ref).slice(2); sn = { ...sn, kind: 'mid', ref: ek }; }
   const id = nid(sk); sk.pts[id] = { id, x: sn.u, y: sn.v };
   if (sn.kind === 'mid') pending.push({ t: 'midpoint', refs: [id, sn.ref] });
   if (sn.kind === 'on') { const e = ge(sk, sn.ref); pending.push({ t: e.t === 'line' ? 'online' : 'oncircle', refs: [id, sn.ref] }); }
