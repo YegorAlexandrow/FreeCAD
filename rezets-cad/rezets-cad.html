@@ -1414,6 +1414,8 @@ function modelRefs(f) {
     }
   }
   Object.defineProperty(val, 'body', { value: cb.body, enumerable: false });
+  // Every circle of the model facing the sketch, seen along its normal: a projected outline comes back as circles.
+  Object.defineProperty(val, 'projCircles', { value: T.circles.filter((c) => Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6).map((c) => { const [x, y] = uv(c.c); return { x, y, r: c.r }; }), enumerable: false });
   val.mref = (kind, i) => {
     if (kind === 'p') { const sp = skPt.get(key6(i)); if (sp) return { ...sp, w: toWorld(f.plane, i[0], i[1]).toArray().map((x) => +x.toFixed(6)) }; return cb.body ? vertRef(cb.body, o.clone().addScaledVector(X, i[0]).addScaledVector(Y, i[1])) : null; }
     if (i >= nModelC) { const sc = skCirc[i - nModelC]; return sc ? { ...sc, circle: true, r: val.circles[i].r } : null; }
@@ -2772,7 +2774,10 @@ function convertFace(sk, m) {
   const f = editF(); const body = S.refs?.body; if (!body) return 'Под эскизом нет тела';
   const N = V3(f.plane.n).normalize(), X = V3(f.plane.x), Y = V3(f.plane.y); const w = toWorld(f.plane, m.u, m.v);
   let L = null; for (const n of [N, N.clone().negate()]) { L = faceLoops(body, n, w); if (L) break; }
-  if (!L) return 'Щёлкните внутри плоской грани модели, лежащей в плоскости эскиза';
+  // A face parallel to the sketch but off its plane (a sketch on an offset plane) is projected onto it, as
+  // SolidWorks' «Convert Entities» does: the face is found straight below or above the click.
+  if (!L) { const m = bodyMesh(body); const rc = new THREE.Raycaster(); for (const d of [N.clone().negate(), N]) { rc.set(w.clone().addScaledVector(d, -1e-4), d); const hit = rc.intersectObject(m)[0]; if (!hit) continue; const hn = hit.face.normal.clone(); if (Math.abs(Math.abs(hn.dot(N)) - 1) > 1e-6) continue; for (const n of [N, N.clone().negate()]) { L = faceLoops(body, n, hit.point); if (L) break; } if (L) break; } }
+  if (!L) return 'Щёлкните внутри плоской грани модели, параллельной плоскости эскиза';
   const o = V3(f.plane.o); const toSk = ([x, y]) => { const q = L.o.clone().addScaledVector(L.X, x).addScaledVector(L.Y, y).sub(o); return [q.dot(X), q.dot(Y)]; };
   // Runs of nearly collinear segments (a tessellated curve's straight stretches) become one line.
   const simplify = (pts) => { const out = []; for (const p of pts) { out.push(p); while (out.length >= 3) { const [a, b, c] = out.slice(-3); const cr = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / (Math.hypot(c[0] - a[0], c[1] - a[1]) || 1); if (cr < 1e-4) out.splice(-2, 1); else break; } } return out; };
@@ -2781,7 +2786,7 @@ function convertFace(sk, m) {
     const pts = simplify(loop.map(toSk)); if (pts.length < 3) continue;
     // Facets lying on a known circle of the model (a hole, a boss, a fillet) come back as that circle or an arc of
     // it, not as dozens of short lines that can't be dimensioned.
-    const circs = S.refs?.circles || []; const onC = pts.map(([x, y]) => circs.findIndex((c) => Math.abs(Math.hypot(x - c.x, y - c.y) - c.r) < Math.max(1e-3, c.r * 2e-3)));
+    const circs = [...(S.refs?.circles || []), ...(S.refs?.projCircles || [])]; const onC = pts.map(([x, y]) => circs.findIndex((c) => Math.abs(Math.hypot(x - c.x, y - c.y) - c.r) < Math.max(1e-3, c.r * 2e-3)));
     const P = (q) => { const id = nid(sk); sk.pts[id] = { id, x: q[0], y: q[1], fixed: true }; return id; };
     if (onC[0] >= 0 && onC.every((k) => k === onC[0])) { const c = circs[onC[0]]; const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: P([c.x, c.y]), r: c.r }; nLines++; continue; }
     // Start at a point where a run changes, so that no arc is cut in two at the loop's seam.
@@ -3600,7 +3605,7 @@ function asmMeasurePick(ev) {
   const n = V3(ent.d).applyMatrix3(R).normalize(); return { kind: 'face', n, d: n.dot(h.point), area: E.area, p: h.point, ref };
 }
 function asmRefMesh(ref, col) {
-  const c = S.doc.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); const ent = inf?.ents[ref.e]; if (!ent) return;
+  const c = compOf(S.doc, ref.comp); const inf = c && docInfo(c.doc); const ent = inf?.ents[ref.e]; if (!ent) return;
   const M = displayT(S.doc, c); const pos = inf.geo.getAttribute('position'); const arr = []; const v = new THREE.Vector3();
   for (const t of ent.tris) for (let k = 0; k < 3; k++) { v.fromBufferAttribute(pos, 3 * t + k).applyMatrix4(M); arr.push(v.x, v.y, v.z); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
@@ -5460,7 +5465,7 @@ function mechResiduals(m, A, B) {
 }
 // The extra data a mechanical mate keeps on its references (the slot's other end, the cam's outline).
 function mechRefs(type, a, b) {
-  const asm = S.doc; const infOf = (r) => docInfo(asm.comps.find((c) => c.id === r.comp)?.doc);
+  const asm = S.doc; const infOf = (r) => docInfo(compOf(asm, r.comp)?.doc);
   if (type === 'slot') {
     for (const [x, y] of [[a, b], [b, a]]) { if (x.kind !== 'axis' || !x.r || x.edge) continue; const inf = infOf(x); const ent = inf?.ents[x.e]; if (!ent || ent.kind !== 'axis') continue; const p2 = slotPartner(inf, ent);
       if (p2 && (!y.r || y.r <= x.r + 1e-6)) return [{ ...y, p2: undefined }, { ...x, p2: p2.toArray() }]; }
@@ -5556,7 +5561,7 @@ function checkMateRefs(asm) {
   for (const m of asm.mates) {
     let broken = null;
     for (const ref of [m.a, m.b]) {
-      if (ref.std) continue; const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
+      if (ref.std) continue; const c = compOf(asm, ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
       const k = refExists(ref, inf);
       if (k >= 0) { ref.e = k; ref.n = inf.ents.length; if (ref.by === undefined) ref.by = entCreator(c, inf, k);
         // A slot's other end and a cam's outline are taken again from the part as it is now.
@@ -5587,6 +5592,10 @@ function checkMateRefs(asm) {
   }
   return moved;
 }
+// The assembly's own origin and planes, as a component that never moves: mates to «Сверху сборки» hold a part to the
+// assembly itself rather than to another part.
+const ASM_ORIGIN = { id: '@asm', name: 'Сборка', fixed: true, T: new THREE.Matrix4().toArray(), origin: true };
+const compOf = (asm, id) => (id === '@asm' ? ASM_ORIGIN : asm.comps.find((c) => c.id === id));
 function asmSystem(asm, extra = []) {
   const vars = []; const comps = asm.comps; const idx = new Map();
   comps.forEach((c) => { if (!c.fixed) { idx.set(c.id, vars.length); vars.push(c.id); } });
@@ -5594,7 +5603,7 @@ function asmSystem(asm, extra = []) {
   const pose = (c, X) => { const b = base.get(c.id); const i = idx.get(c.id); if (i === undefined) return b; const k = 6 * i;
     const w = new THREE.Vector3(X[k], X[k + 1], X[k + 2]); const ang = w.length(); const dq = ang < 1e-14 ? new THREE.Quaternion() : new THREE.Quaternion().setFromAxisAngle(w.clone().divideScalar(ang), ang);
     return { q: dq.multiply(b.q.clone()), t: b.t.clone().add(new THREE.Vector3(X[k + 3], X[k + 4], X[k + 5])) }; };
-  const cmap = new Map(comps.map((c) => [c.id, c]));
+  const cmap = new Map(comps.map((c) => [c.id, c])); cmap.set('@asm', ASM_ORIGIN); base.set('@asm', poseOf(ASM_ORIGIN));
   const eqs = [];
   for (const m of [...asm.mates.filter((x) => !x.suppressed && !x.broken), ...extra]) {
     const ca = cmap.get(m.a.comp), cb = cmap.get(m.b.comp); if (!ca || !cb) continue;
@@ -5667,7 +5676,7 @@ function axialMid(ref, c) {
 }
 function alongAxis(asm, m) {
   if (m.type !== 'concentric' || m.a.kind !== 'axis' || m.b.kind !== 'axis') return;
-  const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
+  const ca = compOf(asm, m.a.comp), cb = compOf(asm, m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
   const wa = axialMid(m.a, ca).applyMatrix4(new THREE.Matrix4().fromArray(ca.T)), wb = axialMid(m.b, cb).applyMatrix4(new THREE.Matrix4().fromArray(cb.T));
   const fixedRef = mov === cb ? m.a : m.b; const fixedComp = mov === cb ? ca : cb; const axis = worldEnt(fixedRef, poseOf(fixedComp)).d.normalize();
   const shift = axis.multiplyScalar((mov === cb ? wa.clone().sub(wb) : wb.clone().sub(wa)).dot(axis)); const pose = poseOf(mov); setPose(mov, pose.t.clone().add(shift), pose.q);
@@ -5678,7 +5687,7 @@ function preAlign(asm, m) {
   // where the solver's gradient is zero: the part is first laid down by a quarter turn. A circular edge that must
   // lie on the plane is stood up the same way.
   if (m.a.kind !== m.b.kind && m.a.kind !== 'point' && m.b.kind !== 'point' && ['tangent', 'coincident', 'distance', 'parallel'].includes(m.type)) {
-    const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
+    const ca = compOf(asm, m.a.comp), cb = compOf(asm, m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
     const A = worldEnt(m.a, poseOf(ca)), B = worldEnt(m.b, poseOf(cb)); const ax = A.kind === 'axis' ? A : B, pl = ax === A ? B : A; const movAx = (mov === ca) === (ax === A);
     const along = !(m.type === 'coincident' && ax.edge); const c = Math.abs(ax.d.dot(pl.d)); if (along ? c < 0.7 : c > 0.7) return;
     let k = new THREE.Vector3().crossVectors(ax.d, pl.d); if (k.lengthSq() < 1e-12) k = perpBasis(pl.d)[0]; k.normalize();
@@ -5687,7 +5696,7 @@ function preAlign(asm, m) {
     setPose(mov, pose.t.clone().sub(pivot).applyQuaternion(rq).add(pivot), rq.multiply(pose.q)); return;
   }
   if (!['coincident', 'parallel', 'distance', 'concentric'].includes(m.type) || m.a.kind !== m.b.kind || m.a.kind === 'point') return;
-  const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
+  const ca = compOf(asm, m.a.comp), cb = compOf(asm, m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
   const A = worldEnt(m.a, poseOf(ca)), B = worldEnt(m.b, poseOf(cb)); const want = m.flip ? 1 : -1;
   if (Math.sign(A.d.dot(B.d) || 1) === want) return;
   const pivot = mov === cb ? B.p : A.p; const [ax] = perpBasis(mov === cb ? B.d : A.d); const pose = poseOf(mov);
@@ -5732,7 +5741,8 @@ function asmEdgePick(ev) {
   const pxPerMm = view.clientHeight * camera.zoom / (camera.top - camera.bottom);
   for (const c of S.doc.comps) {
     if (c.hidden) continue; const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
-    for (const v of T.verts) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
+    // A circle's centre is not a corner of the part: a click there means the circle (its axis), not a vertex.
+    for (const v of T.verts) { if (T.circles.some((ci) => ci.c.distanceTo(v) < 1e-6)) continue; const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
     for (const ci of T.circles) {
       const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
       // Circles far from the cursor are skipped before sampling; each circle gives one candidate.
@@ -5767,14 +5777,14 @@ function drawMatePicks() {
   if (S.pm?.kind === 'interf') { drawInterference(); return; }
   groups.measure.clear(); const asm = S.doc; if (S.mode !== 'asm') return;
   const show = (ref, col) => {
-    const c = asm.comps.find((x) => x.id === ref.comp); if (!c) return; const inf = docInfo(c.doc);
+    const c = compOf(asm, ref.comp); if (!c) return; const inf = docInfo(c.doc);
     if (ref.edge || ref.kind === 'point') {
       const M = new THREE.Matrix4().fromArray(c.T); let segs;
       if (ref.kind === 'point') { const q = V3(ref.p).applyMatrix4(M); const d = 3 * (camera.top - camera.bottom) / camera.zoom / Math.max(view.clientHeight, 1); segs = [[q.clone().add(new THREE.Vector3(-d, 0, 0)), q.clone().add(new THREE.Vector3(d, 0, 0))], [q.clone().add(new THREE.Vector3(0, -d, 0)), q.clone().add(new THREE.Vector3(0, d, 0))], [q.clone().add(new THREE.Vector3(0, 0, -d)), q.clone().add(new THREE.Vector3(0, 0, d))]]; }
       else segs = edgeSegs(ref.edge).map(([a, b]) => [a.clone().applyMatrix4(M), b.clone().applyMatrix4(M)]);
       const l = segLines(segs.flatMap(([a, b]) => [...a.toArray(), ...b.toArray()]), lineMat(col, 3.5, { depthTest: false })); l.renderOrder = 17; groups.measure.add(l); return;
     }
-    if (ref.std) { const M = new THREE.Matrix4().fromArray(c.T); inf.geo.computeBoundingBox(); const sz = inf.geo.boundingBox.getSize(new THREE.Vector3()).length() * 0.6 || 20; const pl = PLANES[ref.std]; const X = V3(pl.x), Y = V3(pl.y);
+    if (ref.std) { const M = new THREE.Matrix4().fromArray(c.T); let sz = 60; if (inf?.geo) { inf.geo.computeBoundingBox(); sz = inf.geo.boundingBox.getSize(new THREE.Vector3()).length() * 0.6 || 20; } const pl = PLANES[ref.std]; const X = V3(pl.x), Y = V3(pl.y);
       const q = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b2]) => X.clone().multiplyScalar(a * sz).addScaledVector(Y, b2 * sz).applyMatrix4(M)); const arr = []; for (let i = 0; i < 4; i++) arr.push(...q[i].toArray(), ...q[(i + 1) % 4].toArray());
       const l = segLines(arr, lineMat(col, 2.5, { depthTest: false })); l.renderOrder = 17; groups.measure.add(l);
       const g = new THREE.BufferGeometry().setFromPoints([q[0], q[1], q[2], q[0], q[2], q[3]]); const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthTest: false, depthWrite: false })); m.renderOrder = 16; groups.measure.add(m); return; }
@@ -5857,7 +5867,7 @@ function previewMate() {
   const pm = S.pm; restorePoses(S.doc, pm.before); pm.result = null;
   if (pm.picks.length < 2) { asmRefresh(); return; }
   const [a, b] = pm.picks; const opts = mateOptions(a, b); if (!opts.includes(pm.type)) pm.type = opts[0];
-  const asm = S.doc; const A = worldEnt(a, poseOf(asm.comps.find((c) => c.id === a.comp))), B = worldEnt(b, poseOf(asm.comps.find((c) => c.id === b.comp)));
+  const asm = S.doc; const A = worldEnt(a, poseOf(compOf(asm, a.comp))), B = worldEnt(b, poseOf(compOf(asm, b.comp)));
   // The alignment closest to how the parts stand now, as in SolidWorks (always «face to face» turned parts over).
   if (pm.flip == null) pm.flip = A.d.dot(B.d) > 0;
   const mr = ['path', 'slot', 'cam'].includes(pm.type) ? mechRefs(pm.type, a, b) : null;
@@ -5910,14 +5920,14 @@ const canReverse = (a, b, type) => sideFlip(a, b, type) || (a && b && a.kind ===
 // Why a direction mate cannot hold: an earlier mate between the same parts already leaves only a
 // turn about one axis, and a turn keeps the angle each picked face makes with that axis.
 function explainConflict(asm, m, group) {
-  const gs = group.map((id) => asm.mates.find((x) => x.id === id)).filter(Boolean); const cname = (id) => asm.comps.find((c) => c.id === id)?.name;
+  const gs = group.map((id) => asm.mates.find((x) => x.id === id)).filter(Boolean); const cname = (id) => compOf(asm, id)?.name;
   const wantsParallel = (m.a.kind === 'plane' && m.b.kind === 'plane' && ['parallel', 'coincident', 'distance'].includes(m.type)) || (m.a.kind === 'axis' && m.b.kind === 'axis' && ['parallel', 'coincident', 'concentric'].includes(m.type));
   const lock = (g, comp) => { if (!['concentric', 'coincident', 'parallel'].includes(g.type) || g.a.kind !== g.b.kind || g.a.kind === 'point') return null; const r = g.a.comp === comp ? g.a : g.b.comp === comp ? g.b : null; return r && V3(r.d).normalize(); };
   const ang = (d, u) => Math.acos(Math.min(1, Math.abs(V3(d).normalize().dot(u)))) * 180 / Math.PI;
   if (wantsParallel) for (const g of gs) {
     const ua = lock(g, m.a.comp), ub = lock(g, m.b.comp); if (!ua || !ub) continue;
     const ta = ang(m.a.d, ua), tb = ang(m.b.d, ub); if (Math.abs(ta - tb) < 0.5) continue;
-    const ax = g.a.kind === 'axis' ? 'оси' : 'нормали'; const mov = asm.comps.find((c) => c.id === m.a.comp)?.fixed ? m.b.comp : m.a.comp;
+    const ax = g.a.kind === 'axis' ? 'оси' : 'нормали'; const mov = compOf(asm, m.a.comp)?.fixed ? m.b.comp : m.a.comp;
     return `Сопряжение «${g.name}» уже ${g.a.kind === 'axis' ? 'совместило оси' : 'выровняло грани'}, и ${cname(mov)} может только вращаться вокруг ${g.a.kind === 'axis' ? 'этой оси' : 'нормали к ним'}. ${pickName(m.a)} на ${cname(m.a.comp)} стоит к ${ax} под ${fmt(ta)}°, ${pickName(m.b).toLowerCase()} на ${cname(m.b.comp)} под ${fmt(tb)}°: вращением их не выровнять. Выберите элементы с одинаковым углом к ${ax} или погасите «${g.name}»`;
   }
   // Two axes of one part held on two axes (or centre points) of the other: the spacings must match.
@@ -5931,7 +5941,7 @@ function explainConflict(asm, m, group) {
       // An axis of the same size at the right spacing is probably the one meant.
       let suggest = null, hint = '';
       for (const [ref, other, want] of [[m.a, ga, db], [m.b, gb, da]]) {
-        const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf) continue;
+        const c = compOf(asm, ref.comp); const inf = c && docInfo(c.doc); if (!inf) continue;
         const k = inf.ents.findIndex((e, i) => e.kind === 'axis' && i !== ref.e && Math.abs(e.r - ref.r) < 1e-3 && Math.abs(Math.abs(e.d.dot(V3(ref.d).normalize())) - 1) < 1e-6 && Math.abs((distTo({ p: e.p.toArray(), d: e.d.toArray() }, other) ?? -1) - want) < 1e-3);
         if (k >= 0) { const e = inf.ents[k]; suggest = { comp: c.id, kind: 'axis', p: e.p.toArray(), d: e.d.toArray(), r: e.r, e: k }; hint = ` На ${cname(c.id)} есть ось ⌀${fmt(2 * e.r)} на расстоянии ${fmt(want)} мм, она подсвечена зелёным: нажмите «Взять подсвеченную»`; break; }
       }
@@ -5973,7 +5983,7 @@ function renderAsmTree() {
   const nBroken = asm.mates.filter((m) => m.broken).length;
   if (nBroken) tree.append(h('div', { class: 'note', style: 'color:var(--bad);padding:2px 10px 6px' }, `${nBroken === 1 ? 'Одно сопряжение ссылается' : nBroken + ' ' + plural(nBroken, 'сопряжение ссылается', 'сопряжения ссылаются', 'сопряжений ссылаются')} на грани, которых больше нет. ${nBroken === 1 ? 'Оно отмечено' : 'Они отмечены'} «!» и не участвуют в расчёте: отредактируйте и выберите элементы заново`));
   for (const m of asm.mates) {
-    const na = asm.comps.find((c) => c.id === m.a.comp)?.name, nb = asm.comps.find((c) => c.id === m.b.comp)?.name;
+    const na = compOf(asm, m.a.comp)?.name, nb = compOf(asm, m.b.comp)?.name;
     const bad = an?.redundant.has(m.id) || m.broken;
     const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : '') + (S.mateSel === m.id ? ' sel' : '') + (S.asmSel && (m.a.comp === S.asmSel || m.b.comp === S.asmSel) ? ' of-sel' : ''), tabindex: '0', role: 'treeitem', title: m.broken ? `${m.name}: ${m.broken}. Отредактируйте сопряжение и выберите элементы заново` : `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, m.broken ? '!' : MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
     r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
@@ -6032,7 +6042,11 @@ function cmdCompPattern(type) {
 function cpatClick(ev) {
   const pm = S.pm; const pat = pm.pat;
   if (pm.pickFor === 'ref') { const e = asmEdgePick(ev); if (e && e.kind === 'axis') { pat.ref = e; asmRefresh(); return; } const p = asmPick(ev); if (p?.ent?.kind === 'axis') { pat.ref = { comp: p.comp, ...p.ent }; asmRefresh(); } return; }
-  const p = asmPick(ev); if (!p) return; const i = pat.seeds.indexOf(p.comp); if (i >= 0) pat.seeds.splice(i, 1); else pat.seeds.push(p.comp); asmRefresh();
+  // A click on an edge sets the direction (as in the part's patterns), not a seed: it used to add the fixed base
+  // part, whose edge it was, to the components copied.
+  { const e = asmEdgePick(ev); if (e && e.kind === 'axis' && (e.edge?.t === 'line' || e.edge?.t === 'circle')) { pat.ref = e; asmRefresh(); setHint('Направление массива взято с ребра'); return; } }
+  const p = asmPick(ev); if (!p) return; const i = pat.seeds.indexOf(p.comp);
+  if (i >= 0) pat.seeds.splice(i, 1); else pat.seeds.push(p.comp); asmRefresh();
 }
 function okCompPattern() {
   const pm = S.pm; const asm = S.doc; if (!pm.pat.seeds.length) { toast('Выберите компоненты для массива', 'warn'); return; }
@@ -6243,13 +6257,13 @@ function renderAsmPM() {
         h('button', { class: 'ghost-btn', onclick: () => $('stepIn').click() }, 'Импорт STEP / STL…'))));
     return;
   }
-  const [a, b] = pm.picks; const opts = mateOptions(a, b); const asm = S.doc; const cname = (r) => asm.comps.find((c) => c.id === r.comp)?.name;
+  const [a, b] = pm.picks; const opts = mateOptions(a, b); const asm = S.doc; const cname = (r) => compOf(asm, r.comp)?.name;
   const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mate), h('span', {}, pm.edit ? 'Изменить: ' + pm.edit.name : 'Сопряжение'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okMate }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные объекты'),
     ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])} · ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр')),
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
-  box.append(h('details', { class: 'grp', open: pm.stdOpen || null, ontoggle: (e) => { pm.stdOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Плоскости компонентов'),
-    ...asm.comps.filter((c) => !c.hidden).map((c) => h('div', { class: 'field', style: 'gap:4px;flex-wrap:wrap' }, h('span', { style: 'flex:1 1 100%;font-size:12px' }, c.name), h('div', { class: 'chips' }, ...Object.keys(PLANES).map((k) => h('button', { class: 'chip', style: pm.picks.some((q) => q.comp === c.id && q.std === k) ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => addMatePick(stdPlaneRef(c, k)) }, PLANES[k].label)))))));
+  box.append(h('details', { class: 'grp', open: pm.stdOpen || null, ontoggle: (e) => { pm.stdOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Плоскости сборки и компонентов'),
+    ...[ASM_ORIGIN, ...asm.comps.filter((c) => !c.hidden)].map((c) => h('div', { class: 'field', style: 'gap:4px;flex-wrap:wrap' }, h('span', { style: 'flex:1 1 100%;font-size:12px' }, c.name), h('div', { class: 'chips' }, ...Object.keys(PLANES).map((k) => h('button', { class: 'chip', style: pm.picks.some((q) => q.comp === c.id && q.std === k) ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => addMatePick(stdPlaneRef(c, k)) }, PLANES[k].label)))))));
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
@@ -7341,5 +7355,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, depthHandle, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
