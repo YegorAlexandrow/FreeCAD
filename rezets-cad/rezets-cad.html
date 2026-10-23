@@ -133,6 +133,7 @@ button { font: inherit; color: inherit; }
 .row.off { opacity: .45; } .row.supp .nm { font-style: italic; text-decoration: line-through; text-decoration-thickness: 1px; }
 .row.err .nm { color: var(--bad); }
 .row.child { padding-left: 26px; }
+.row .tw { border: none; background: none; color: var(--fg-2); cursor: pointer; padding: 0 2px; width: 16px; font-size: 10px; flex: none; } .row .tw:empty { visibility: hidden; }
 .row svg { width: 16px; height: 16px; flex: 0 0 16px; }
 .row .eye { border: none; background: none; color: var(--fg-2); cursor: pointer; padding: 0 2px; font-size: 13px; line-height: 1; opacity: 0; }
 .row:hover .eye, .row.off .eye, .row:focus-within .eye { opacity: 1; }
@@ -6574,7 +6575,14 @@ function renderAsmTree() {
     r.onclick = () => { S.asmSel = c.id; S.mateSel = null; asmRefresh(); };
     r.ondblclick = () => switchDoc(c.doc);
     r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, compMenu(asm, c, e)); };
+    // A component opens like a folder onto its own mates, as in SolidWorks; a click there selects the mate.
+    const own = asm.mates.filter((m) => m.a.comp === c.id || m.b.comp === c.id); S.compOpen ||= new Set(); const opened = S.compOpen.has(c.id) && own.length;
+    r.prepend(h('button', { class: 'tw', 'aria-label': opened ? 'Свернуть' : 'Показать сопряжения', 'aria-expanded': String(!!opened), onclick: (e) => { e.stopPropagation(); if (S.compOpen.has(c.id)) S.compOpen.delete(c.id); else S.compOpen.add(c.id); renderSide(); } }, own.length ? (opened ? '▾' : '▸') : ''));
     tree.append(r);
+    if (opened) for (const m of own) { const other = compOf(asm, m.a.comp === c.id ? m.b.comp : m.a.comp)?.name || 'Сборка';
+      const k = h('div', { class: 'row child' + (m.suppressed ? ' off' : '') + (m.broken ? ' err' : '') + (S.mateSel === m.id ? ' sel' : ''), tabindex: '0', role: 'treeitem', title: `${m.name} с «${other}»` }, h('span', { class: 'meta', style: 'width:14px;text-align:center' }, MATE_GLYPH[m.type] || '◆'), h('span', { class: 'nm' }, `${m.name} (${other})`));
+      k.onclick = () => { S.mateSel = m.id; S.asmSel = null; asmRefresh(); drawMatePicks(); }; k.ondblclick = () => editMate(m);
+      k.onmouseenter = () => { S.mateHover = m.id; drawMatePicks(); }; k.onmouseleave = () => { S.mateHover = null; drawMatePicks(); }; tree.append(k); }
   }
   if (!asm.comps.length) tree.append(h('div', { class: 'empty-tree' }, 'Сборка пустая. Нажмите «Вставить компонент».'));
   for (const pt of asm.patterns || []) {
