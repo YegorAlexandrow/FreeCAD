@@ -5750,6 +5750,8 @@ function patternPick(ev, click) {
   if (!e) return; const spec = { edge: e };
   if (pm.pickFor === 'dir') f.dir = spec; else if (pm.pickFor === 'dir2') f.dir2 = spec; else f.axis = spec; if (pm.pickFor !== 'axis') autoFlipDir(f, pm.pickFor);
   pm.hoverEdge = null; renderSide(); drawPatternRefs(); schedulePreview();
+  // With the direction given, typing goes on in its step (the count for a circular pattern), as SolidWorks moves on.
+  { const nx = $(pm.pickFor === 'dir2' ? 'pmStep2' : pm.pickFor === 'axis' ? 'pmCount' : 'pmStep'); if (nx) { nx.focus(); nx.select?.(); } }
 }
 // A direction picked by axis or edge points one way of two; like SolidWorks shows the preview going off the part,
 // here the way that keeps more copies over the part is taken (Деталь 9: «Ось Z» pointed off the plate).
