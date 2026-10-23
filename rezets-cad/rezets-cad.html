@@ -6155,7 +6155,7 @@ function entCreator(c, inf, k) {
 function checkMateRefs(asm) {
   let moved = false;
   for (const m of asm.mates) {
-    let broken = null;
+    let broken = null; const lost = [];
     for (const ref of [m.a, m.b]) {
       if (ref.std) continue; const c = compOf(asm, ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
       const k = refExists(ref, inf);
@@ -6182,9 +6182,11 @@ function checkMateRefs(asm) {
       if (ref.by) { const P = V3(ref.p); const cands = inf.ents.map((x, i) => [x, i]).filter(([x, i]) => same(x) && entCreator(c, inf, i) === ref.by); cands.sort((a, b) => a[0].p.distanceTo(P) - b[0].p.distanceTo(P)); if (cands.length) { e = cands[0][0]; ref.e = cands[0][1]; } }
       if (!e && ref.e != null && ref.n === inf.ents.length && inf.ents[ref.e] && same(inf.ents[ref.e])) e = inf.ents[ref.e];
       if (e) { ref.p = e.p.toArray(); moved = true; continue; }
-      broken = `${c.name || inf.ent?.name}: ${ref.kind === 'plane' ? 'грани' : ref.kind === 'axis' ? 'оси' : 'вершины'} сопряжения больше нет на детали`;
+      broken = `${c.name || inf.ent?.name}: ${ref.kind === 'plane' ? 'грани' : ref.kind === 'axis' ? 'оси' : 'вершины'} сопряжения больше нет на детали`; lost.push(ref);
     }
     if (broken) m.broken = broken; else delete m.broken;
+    // Which of the two references was lost, for the mate's panel to ask for that one again.
+    for (const ref of [m.a, m.b]) if (lost.includes(ref)) ref.lost = true; else delete ref.lost;
   }
   return moved;
 }
@@ -6507,7 +6509,10 @@ function okMate() {
 function editMate(m) {
   const asm = S.doc; if (S.pm) closePM(); const at = asm.mates.indexOf(m); if (at < 0) return;
   const before = snapPoses(asm); asm.mates.splice(at, 1);
-  openPM({ kind: 'mate', picks: [m.a, m.b], type: m.type, flip: m.flip, v: m.v ?? null, side: m.side, before, edit: m, editAt: at }); previewMate();
+  // A reference the part no longer has is dropped from the picks, and the panel says which one to pick again.
+  const lostAt = [m.a, m.b].map((r, i) => (r.lost ? i : -1)).filter((i) => i >= 0);
+  const lostNote = lostAt.length ? lostAt.map((i) => { const r = [m.a, m.b][i]; return `${r.kind === 'plane' ? 'Грань' : r.kind === 'axis' ? 'Ось' : 'Вершина'} на «${compOf(asm, r.comp)?.name || 'детали'}» потеряна`; }).join('; ') + ': щёлкните замену на модели' : null;
+  openPM({ kind: 'mate', picks: [m.a, m.b].filter((r) => !r.lost).map((r) => { const q = { ...r }; delete q.lost; return q; }), type: m.type, flip: m.flip, v: m.v ?? null, side: m.side, before, edit: m, editAt: at, lostNote }); previewMate();
 }
 // Turns a mate over: the moving part is flipped onto the other solution, then everything is re-solved.
 function reverseMate(m) {
@@ -6877,7 +6882,7 @@ function renderAsmPM() {
   }
   const [a, b] = pm.picks; const opts = mateOptions(a, b); const asm = S.doc; const cname = (r) => compOf(asm, r.comp)?.name;
   const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mate), h('span', {}, pm.edit ? 'Изменить: ' + pm.edit.name : 'Сопряжение'), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'OK (Enter)', onclick: okMate }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
-  box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные объекты'),
+  box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные объекты'), pm.lostNote && pm.picks.length < 2 ? h('div', { class: 'note', style: 'color:var(--bad)' }, pm.lostNote) : null,
     ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])}, ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр', pm.picks[i] ? h('button', { class: 'x', title: 'Убрать этот выбор', 'aria-label': 'Убрать этот выбор', onclick: () => { pm.picks.splice(i, 1); pm.flip = null; pm.v = null; previewMate(); renderSide(); } }, '✕') : null)),
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
   box.append(h('details', { class: 'grp', open: pm.stdOpen || null, ontoggle: (e) => { pm.stdOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Плоскости сборки и компонентов'),
