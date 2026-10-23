@@ -6870,6 +6870,8 @@ function renderTree() {
       if (S.pickSketch && key.startsWith('feat:')) { const g = featById(key.slice(5)); const sf = g?.type === 'sketch' ? g : g?.sketch ? featById(g.sketch) : null; if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; } }
       S.selectedTree = key; S.faceOrigin = null; buildPlanes(); renderTree(); updateSketchVisuals(); showFeatureFaces(key.startsWith('feat:') ? key.slice(5) : null); opts.onSelect?.(); });
     if (opts.onOpen) r.addEventListener('dblclick', opts.onOpen);
+    // Pointing at a feature in the tree lights the faces it made, as SolidWorks does; leaving it shows the selection again.
+    if (key.startsWith('feat:')) { r.addEventListener('mouseenter', () => { if (!S.pm && !S.editing) showFeatureFaces(key.slice(5)); }); r.addEventListener('mouseleave', () => { if (!S.pm && !S.editing) showFeatureFaces(S.selectedTree?.startsWith('feat:') ? S.selectedTree.slice(5) : null); }); }
     r.addEventListener('keydown', (e) => { if (e.key === 'Enter') opts.onOpen?.(); });
     if (opts.menu) r.addEventListener('contextmenu', (e) => { e.preventDefault(); S.selectedTree = key; renderTree(); openMenu(e.clientX, e.clientY, opts.menu); });
     return r;
