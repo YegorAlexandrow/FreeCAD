@@ -1072,6 +1072,20 @@ function offsetRing(pts, d) {
   return out;
 }
 // Extrusion with drafted walls: the profile is offset by off(z) at each ring height.
+// A profile that touches itself at a point (squares meeting corner to corner) is one ring passing that point twice;
+// offset as a whole it crosses itself there. It is cut at such points into separate rings, holes going with the
+// ring that holds them.
+function splitPinches(loops) {
+  const split = (r) => { for (let i = 0; i < r.length; i++) for (let j = i + 2; j < r.length; j++) if (Math.hypot(r[i][0] - r[j][0], r[i][1] - r[j][1]) < 1e-5 && !(i === 0 && j === r.length - 1)) return [...split(r.slice(i, j)), ...split([...r.slice(j), ...r.slice(0, i)])]; return [r]; };
+  const inside = (p, r) => { let c = false; for (let i = 0, j = r.length - 1; i < r.length; j = i++) { const [xi, yi] = r[i], [xj, yj] = r[j]; if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) c = !c; } return c; };
+  const area = (r) => { let a = 0; for (let i = 0; i < r.length; i++) { const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length]; a += x1 * y2 - x2 * y1; } return a / 2; };
+  const out = [];
+  for (const l of loops) {
+    const parts = split(l.pts).filter((r) => r.length >= 3 && Math.abs(area(r)) > 1e-9); if (parts.length <= 1) { out.push(l); continue; }
+    for (const r of parts) out.push({ ...l, pts: r, holes: l.holes.filter((hh) => inside(hh[0], r)) });
+  }
+  return out;
+}
 function taperedExtrude(loops, zs, off) {
   const tris = []; const V = (p, z) => new THREE.Vector3(p[0], p[1], z);
   // A profile shrunk past its own width turns inside out (its edges reverse): that is said instead of built.
@@ -1222,18 +1236,21 @@ function featureEdges(geo, angleDeg = 28) {
   const pos = geo.getAttribute('position'); const nT = pos.count / 3; const cos = Math.cos(angleDeg * Math.PI / 180);
   const V = (i) => new THREE.Vector3().fromBufferAttribute(pos, i);
   const q = 1e-4; const kv = (v) => `${Math.round(v.x / q)},${Math.round(v.y / q)},${Math.round(v.z / q)}`;
-  const normals = []; const map = new Map(); const out = []; const tris = [];
+  const normals = []; const map = new Map(); const out = []; const tris = []; const needleKeys = new Set();
+  const ekey = (k1, k2) => (k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1);
   for (let t = 0; t < nT; t++) {
     const a = V(3 * t), b = V(3 * t + 1), c = V(3 * t + 2); const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a));
-    // Needles left by booleans (height of microns) have meaningless normals: they take no part.
-    const L2 = Math.max(a.distanceToSquared(b), b.distanceToSquared(c), c.distanceToSquared(a)); if (n.length() < 1e-12 || n.length() / Math.sqrt(L2) < 5e-5) { normals.push(null); continue; } n.normalize(); normals.push(n);
     const vs = [a, b, c]; const ks = vs.map(kv);
-    for (let e = 0; e < 3; e++) { const k1 = ks[e], k2 = ks[(e + 1) % 3]; const key = k1 < k2 ? k1 + '|' + k2 : k2 + '|' + k1; const ent = map.get(key); if (ent) ent.t.push(t); else map.set(key, { a: vs[e], b: vs[(e + 1) % 3], t: [t] }); }
+    // Needles left by booleans (under a micron high: the 0.2 µm widening of cut tools leaves them where pockets meet)
+    // have meaningless normals: they take no part. An edge they cover
+    // on one side is not an open edge either (a face fanned out from a point where pockets meet is full of them).
+    const L2 = Math.max(a.distanceToSquared(b), b.distanceToSquared(c), c.distanceToSquared(a)); if (n.length() < 1e-12 || n.length() / Math.sqrt(L2) < 1e-3) { normals.push(null); for (let e = 0; e < 3; e++) needleKeys.add(ekey(ks[e], ks[(e + 1) % 3])); continue; } n.normalize(); normals.push(n);
+    for (let e = 0; e < 3; e++) { const key = ekey(ks[e], ks[(e + 1) % 3]); const ent = map.get(key); if (ent) ent.t.push(t); else map.set(key, { a: vs[e], b: vs[(e + 1) % 3], t: [t], key }); }
   }
   const lonely = [];
   for (const e of map.values()) {
     if (e.t.length >= 2) { const n1 = normals[e.t[0]], n2 = normals[e.t[1]]; if (n1.dot(n2) < cos) { out.push(e.a, e.b); tris.push([e.t[0], e.t[1]]); } }
-    else lonely.push(e);
+    else if (!needleKeys.has(e.key)) lonely.push(e);
   }
   if (lonely.length) {
     // Spatial grid over all triangle edges, so each lonely edge only looks at its neighbours.
@@ -1550,10 +1567,14 @@ function computeBody(features) {
       if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
-      const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
+      const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own); const prev = body;
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
       else body = body ? boolean(body, tool, ADDITION) : tool;
       if (!body.getAttribute('position').count) err = 'Результат пустой';
+      // A cut that leaves pieces touching only along an edge (a checkerboard cut through) makes zero-thickness
+      // geometry: a slicer cannot print it and the faces there come out as fans of slivers. Like SolidWorks, the cut
+      // is refused and the model stays as it was. (Bosses are left alone: real parts touch themselves on purpose.)
+      else if (f.mode === 'cut' && prev && sharedEdges(body) > sharedEdges(prev)) { body = prev; cyls = cyls.slice(0, cyls.length - own.length); err = 'Получается геометрия нулевой толщины: части детали касаются только ребром или углом. Измените контур или выберите другие области'; }
     } catch (e) { err = e.message || String(e); if (e.partial) body = e.partial; }
     if (err) errors[f.id] = err;
     S.cache.set(k, { body, err, cyls });
@@ -1578,7 +1599,13 @@ function isInside(body, p) {
 function buildTool(f, body, cyls = []) {
   const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
   const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров');
-  let loops = profileLoops(reg, selectedRegionIds(f, reg)); if (!loops.length) throw new Error('Не выбрано ни одной области');
+  const loops0 = profileLoops(reg, selectedRegionIds(f, reg)); if (!loops0.length) throw new Error('Не выбрано ни одной области');
+  // Areas that meet only at a corner leave the part there zero thick (in the cut, pieces joined by a point; in a
+  // boss, solids touching at an edge): SolidWorks refuses such a profile, and so does this.
+  let loops = splitPinches(loops0);
+  const touch = (A, B) => A.some((p) => B.some((q, i) => { const r = B[(i + 1) % B.length]; const dx = r[0] - q[0], dy = r[1] - q[1]; const t = Math.max(0, Math.min(1, ((p[0] - q[0]) * dx + (p[1] - q[1]) * dy) / (dx * dx + dy * dy || 1))); return Math.hypot(q[0] + t * dx - p[0], q[1] + t * dy - p[1]) < 1e-6; }));
+  const corner = loops.length > loops0.length || loops.some((a, i) => loops.some((b, j) => j > i && touch(a.pts, b.pts)));
+  if (corner) throw new Error('Выбранные области сходятся только углом: в этом месте получится нулевая толщина. Выберите области, которые не касаются углами, или разведите их');
   const M = planeMatrix(sf.plane); let g;
   if (f.type === 'loft') { g = loftGeometry(f); g.computeVertexNormals(); return g; }
   if (f.type === 'sweep') { g = sweepGeometry(f, sf, loops); g.computeVertexNormals(); return g; }
@@ -1703,7 +1730,8 @@ controls.addEventListener('change', () => requestRender());
 controls.enableRotate = false;
 {
   const ptrs = new Map(); let last = null;
-  const rotates = (e) => (e.pointerType === 'touch' ? ptrs.size === 1 && controls.touches.ONE === THREE.TOUCH.ROTATE : (e.buttons & 1 && controls.mouseButtons.LEFT === THREE.MOUSE.ROTATE) || (e.buttons & 4 && controls.mouseButtons.MIDDLE === THREE.MOUSE.ROTATE));
+  // With Ctrl or Shift held the drag pans (OrbitControls does that itself): it must not rotate as well.
+  const rotates = (e) => (e.ctrlKey || e.shiftKey || e.metaKey ? false : e.pointerType === 'touch' ? ptrs.size === 1 && controls.touches.ONE === THREE.TOUCH.ROTATE : (e.buttons & 1 && controls.mouseButtons.LEFT === THREE.MOUSE.ROTATE) || (e.buttons & 4 && controls.mouseButtons.MIDDLE === THREE.MOUSE.ROTATE));
   canvas.addEventListener('pointerdown', (e) => { ptrs.set(e.pointerId, true); last = { x: e.clientX, y: e.clientY }; });
   const end = (e) => { ptrs.delete(e.pointerId); last = null; };
   window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end);
@@ -1875,11 +1903,13 @@ function fitView() {
 function viewCmd(k) {
   if (k === 'section') return toggleSection();
   if (k === 'fit') return fitView();
-  if (k === 'iso') return setView(new THREE.Vector3(1, 0.85, 1.15), new THREE.Vector3(0, 1, 0));
+  if (k === 'iso') return setView(new THREE.Vector3(1, 1, 1), new THREE.Vector3(0, 1, 0));
   if (k === 'normal') {
-    const pl = S.editing ? featById(S.editing).plane : S.selectedTree?.startsWith('plane:') ? PLANES[S.selectedTree.slice(6)] : null;
-    if (!pl) return toast('Выберите эскиз или плоскость, чтобы повернуть вид перпендикулярно', 'warn');
-    return setView(new THREE.Vector3(...pl.n), new THREE.Vector3(...pl.y));
+    const pl = S.editing ? featById(S.editing).plane : S.selectedTree?.startsWith('plane:') ? (PLANES[S.selectedTree.slice(6)] || refPlane(featById(S.selectedTree.slice(6)))) : S.selectedTree?.startsWith('feat:') && featById(S.selectedTree.slice(5))?.type === 'sketch' ? featById(S.selectedTree.slice(5)).plane : S.pickedFace || null;
+    if (!pl) return toast('Выберите грань, плоскость или эскиз, чтобы повернуть вид перпендикулярно', 'warn');
+    // Pressed again while already looking straight at it, the view turns round to the back side.
+    const n = new THREE.Vector3(...pl.n); const look = camera.position.clone().sub(controls.target).normalize(); if (look.dot(n) > 0.9999) n.negate();
+    return setView(n, new THREE.Vector3(...pl.y));
   }
   const p = PLANES[k]; setView(new THREE.Vector3(...p.n), new THREE.Vector3(...p.y));
 }
@@ -6457,14 +6487,34 @@ function renameDoc(d, btn) {
   const done = (ok) => { if (ok && inp.value.trim()) { d.name = inp.value.trim(); if (d.kind === 'part') d.data.name = d.name; saveProjectSoon(); } renderDocTabs(); if (S.mode !== 'asm') renderTree(); };
   inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); }; inp.onblur = () => done(true);
 }
-function deleteDoc(d) {
-  const users = S.project.docs.filter((x) => x.kind === 'asm' && x.data.comps.some((c) => c.doc === d.id));
-  if (users.length) { toast(`«${d.name}» используется в сборке ${users.map((u) => '«' + u.name + '»').join(', ')}. Сначала удалите компоненты.`, 'warn'); return; }
+// Every document that would break without this one: assemblies showing it, drawings of it, parts built on it.
+function docUsers(d) {
+  return S.project.docs.filter((x) => x !== d && ((x.kind === 'asm' && x.data.comps.some((c) => c.doc === d.id)) || (x.kind === 'drw' && x.data.src === d.id) || (x.kind === 'part' && x.data.features.some((f) => f.type === 'stepbody' && f.doc === d.id))));
+}
+function deleteDoc(d, confirmed) {
+  const users = docUsers(d);
+  if (users.length) { toast(`«${d.name}» используется: ${users.map((u) => '«' + u.name + '»').join(', ')}. Сначала уберите его оттуда`, 'warn'); return; }
   if (S.project.docs.length === 1) { toast('В проекте должен остаться хотя бы один документ', 'warn'); return; }
-  const wasActive = d.id === S.project.active; if (wasActive) leaveCurrentDoc();
+  if (!confirmed) { showModal(`Удалить «${d.name}»?`, 'Документ уйдёт из проекта. Вернуть его можно кнопкой «Отменить» в сообщении после удаления.', null, [['Удалить', () => { closeModal(); deleteDoc(d, true); }], ['Закрыть', closeModal]]); return; }
+  const wasActive = d.id === S.project.active; if (wasActive) leaveCurrentDoc(); const at = S.project.docs.indexOf(d);
   S.project.docs = S.project.docs.filter((x) => x !== d);
   if (wasActive) { S.project.active = S.project.docs[0].id; S.mode = null; enterDoc(); } else renderDocTabs();
-  saveProjectSoon(); toast(`Документ «${d.name}» удалён`, 'info');
+  saveProjectSoon(); toast(`Документ «${d.name}» удалён`, 'info', [{ label: 'Отменить', act: () => { if (S.project.docs.includes(d)) return; S.project.docs.splice(Math.min(at, S.project.docs.length), 0, d); renderDocTabs(); saveProjectSoon(); toast(`«${d.name}» возвращён`, 'info'); } }]);
+}
+// A project file opened over the current one: its documents join this project by default; replacing the whole
+// project is a separate, explicit choice that can still be taken back.
+function askOpenProject(p, name) {
+  showModal(`Открыть «${name}»`, `В файле ${p.docs.length} ${plural(p.docs.length, 'документ', 'документа', 'документов')}. Их можно добавить к текущему проекту или заменить им весь текущий проект.`, null, [
+    ['Добавить к этому проекту', () => { closeModal(); mergeProject(p); }],
+    ['Заменить текущий проект', () => { closeModal(); const old = S.project; if (activeEntry()) leaveCurrentDoc(); openProject(p); saveProjectSoon(); toast(`Открыт проект «${name}». Прежний заменён`, 'info', [{ label: 'Вернуть прежний', act: () => { if (activeEntry()) leaveCurrentDoc(); openProject(old); saveProjectSoon(); } }]); }],
+    ['Закрыть', closeModal]]);
+}
+function mergeProject(p) {
+  if (activeEntry()) leaveCurrentDoc(); const ids = new Map(); for (const d of p.docs) ids.set(d.id, 'd' + S.project.nid++);
+  const fix = (o) => { if (Array.isArray(o)) o.forEach(fix); else if (o && typeof o === 'object') for (const k of Object.keys(o)) { if (k === 'doc' && ids.has(o[k])) o[k] = ids.get(o[k]); else if (typeof o[k] === 'object' && !ArrayBuffer.isView(o[k])) fix(o[k]); } };
+  for (const d of p.docs) { d.id = ids.get(d.id); d.name = uniqueDocName(d.name); if (d.kind === 'drw' && ids.has(d.data.src)) d.data.src = ids.get(d.data.src); else if (d.kind !== 'import') fix(d.data); if (d.kind === 'part') d.data.name = d.name; S.project.docs.push(d); }
+  S.project.active = ids.get(p.active) || p.docs[0]?.id || S.project.active; S.mode = null; enterDoc(); saveProjectSoon();
+  toast(`Добавлено документов: ${p.docs.length}`, 'info');
 }
 // The tab strip scrolls; the full list is one click away, and file commands live in one menu.
 $('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP / STL…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()]]); };
@@ -6566,7 +6616,7 @@ function sampleDoc() {
 
 // ---------------- files ----------------
 function showModal(title, note, text, acts) {
-  $('mTitle').textContent = title; $('mNote').textContent = note; $('mText').value = text; const ma = $('mActs'); ma.textContent = '';
+  $('mTitle').textContent = title; $('mNote').textContent = note; $('mText').hidden = text == null; $('mText').value = text ?? ''; const ma = $('mActs'); ma.textContent = '';
   for (const [l, fn] of acts) ma.append(h('button', { class: l === 'Закрыть' ? 'ghost-btn' : 'big-btn', onclick: fn }, l)); $('modal').hidden = false;
 }
 const closeModal = () => { $('modal').hidden = true; };
@@ -6625,6 +6675,12 @@ function zipFiles(files) {
   return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
 }
 // Edges a slicer calls non-manifold: after welding vertices, an edge not shared by exactly one pair of opposite triangles.
+// Edges where more than two faces meet: solids touching along an edge.
+function sharedEdges(g) {
+  const pos = g.getAttribute('position'); const ids = new Map(); const q = 1e5; const vid = (i) => { const k = Math.round(pos.getX(i) * q) + ',' + Math.round(pos.getY(i) * q) + ',' + Math.round(pos.getZ(i) * q); let id = ids.get(k); if (id === undefined) { id = ids.size; ids.set(k, id); } return id; };
+  const cnt = new Map(); for (let t = 0; t < pos.count; t += 3) { const v = [vid(t), vid(t + 1), vid(t + 2)]; if (v[0] === v[1] || v[1] === v[2] || v[0] === v[2]) continue; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const k = a < b ? a + ',' + b : b + ',' + a; cnt.set(k, (cnt.get(k) || 0) + 1); } }
+  let n = 0; for (const c of cnt.values()) if (c > 2) n++; return n;
+}
 function badEdges(g) {
   const pos = g.getAttribute('position'); const ids = new Map(); const q = 1e5; const vid = (i) => { const k = Math.round(pos.getX(i) * q) + ',' + Math.round(pos.getY(i) * q) + ',' + Math.round(pos.getZ(i) * q); let id = ids.get(k); if (id === undefined) { id = ids.size; ids.set(k, id); } return id; };
   const cnt = new Map(); for (let t = 0; t < pos.count; t += 3) { const v = [vid(t), vid(t + 1), vid(t + 2)]; if (v[0] === v[1] || v[1] === v[2] || v[0] === v[2]) continue; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const k = a < b ? a + ',' + b : b + ',' + a; const c = cnt.get(k) || [0, 0]; c[a < b ? 0 : 1]++; cnt.set(k, c); } }
@@ -6692,7 +6748,7 @@ $('fileIn').onchange = async (e) => {
     const o = JSON.parse(await file.text());
     if (Array.isArray(o.features)) { addDoc('part', o.name || file.name.replace(/\.\w+$/, ''), o); toast(`Деталь «${o.name}» добавлена в проект`, 'info'); }
     else if (Array.isArray(o.docs) && SRV.on) { await serverSave(); const p = await api('POST', 'projects/import', o); await serverOpen(p.id); toast(`Проект «${o.name}» добавлен на сервер и открыт`, 'info'); }
-    else if (Array.isArray(o.docs)) { openProject(projectFromJSON(o)); toast(`Открыт проект «${o.name}»`, 'info'); }
+    else if (Array.isArray(o.docs)) askOpenProject(projectFromJSON(o), o.name || file.name.replace(/\.\w+$/, ''));
     else throw new Error();
   } catch { toast('Не удалось прочитать файл: это не проект и не деталь Резец CAD', 'err'); }
   e.target.value = '';
@@ -6709,10 +6765,16 @@ window.addEventListener('keydown', (e) => {
   if (typing) { if (e.key === 'Escape' && !e.defaultPrevented) e.target.blur(); return; }
   if (tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
   const k = e.code && e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
+  // Undo would swap the document under an open operation panel (its OK then writes into the wrong model).
+  if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y') && S.pm) { e.preventDefault(); toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  // Ctrl+S saves now (the browser would offer to save the page).
+  if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); saveProjectSoon(); if (SRV.on) serverSave(); else if (CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudTimer); cloudSave(); } else toast('Проект сохранён в этом браузере', 'info'); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Escape' && S.pickSketch) { S.pickSketch = null; updateSketchVisuals(); setHint(); requestRender(); return; }
+  // Esc while dragging puts the geometry back where it was.
+  if (e.key === 'Escape' && S.editing && S.drag?.snap) { restoreGeo(editSk(), S.drag.snap); S.drag = null; down = null; refreshSketch(); return; }
   if (e.key === 'Escape') {
     // Esc never leaves the sketch: it ends the current tool action, then clears the selection.
     if (!$('modal').hidden) return closeModal();
@@ -6741,11 +6803,13 @@ window.addEventListener('keydown', (e) => {
   if (S.mode === 'import') { if (k === 'f') return fitView(); if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); return; }
   if (S.mode === 'drw') { if (k === 'd') { S.drwTool = S.drwTool ? null : { picks: [] }; renderTools(); setHint(S.drwTool ? drwToolHint() : ''); } return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.editing) { e.preventDefault(); deleteSelection(); return; }
-  if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:')) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
+  if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:') && !S.pm) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
   if (k === 'f') return fitView();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
   if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase()); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
   if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); }
+  // An open operation panel is not dropped by a command key: what was typed into it would be lost.
+  else if (S.pm && ['m', 's', 'e', 'x'].includes(k)) { toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); }
   else { if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); if (k === 's') return cmdSketch(); if (k === 'e') return cmdFeature('extrude', 'add'); if (k === 'x') return cmdFeature('extrude', 'cut'); }
 });
 
@@ -6786,5 +6850,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
-window.__rezets = { S, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
