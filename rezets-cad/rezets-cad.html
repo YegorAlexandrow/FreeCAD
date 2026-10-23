@@ -168,6 +168,7 @@ kbd.k { font-family: var(--font-num); font-size: 10px; color: var(--fg-2); borde
 label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 
 /* Viewport overlays */
+.drawtip { position: absolute; pointer-events: none; font-family: var(--font-num); font-size: 12px; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .dimlbl { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; font-family: var(--font-num); font-size: 12px; color: var(--dim); background: color-mix(in srgb, var(--vp-bot) 82%, transparent); padding: 0 4px; border-radius: 3px; cursor: pointer; white-space: nowrap; user-select: none; }
 .dimlbl.driven { color: var(--fg-2); }
 .dimlbl.sel { color: var(--geo-sel); outline: 1px solid var(--geo-sel); }
@@ -2372,6 +2373,7 @@ function dimGeometry(sk, c) {
 function layoutOverlay() {
   overlay.textContent = ''; const f = editF();
   // The open dimension field stays on its dimension while the view zooms or turns.
+  if (f && S.draw?.tip && S.draw.cursor) overlay.append(h('div', { class: 'drawtip', style: `left:${S.draw.cursor.x + 16}px;top:${S.draw.cursor.y + 16}px` }, S.draw.tip));
   if (f && S.dimEdit?.el) { const c = f.sk.cons[S.dimEdit.cid]; if (c) { const g = dimGeometry(f.sk, c); const s = sScreen(g.label.x, g.label.y); S.dimEdit.el.style.left = s.x + 'px'; S.dimEdit.el.style.top = s.y + 'px'; } }
   if (f) {
     const sk = f.sk;
@@ -2738,6 +2740,17 @@ function drawMove(m) {
     D.preview = circleSegs(c.x, c.y, r, D.sweep >= 0 ? a0 : a0 + D.sweep, Math.abs(D.sweep));
     sn.u = c.x + r * Math.cos(a1); sn.v = c.y + r * Math.sin(a1);
   }
+  // What the next click makes, in numbers next to the cursor (length and angle, radius, size).
+  const ang = (dx, dy) => { let a = Math.atan2(dy, dx) * 180 / Math.PI; if (a < 0) a += 360; return fmt(a, 1); };
+  D.tip = null;
+  if (t === 'line' && D.stage === 1) { const a = gp(sk, D.start); D.tip = `${fmt(Math.hypot(sn.u - a.x, sn.v - a.y), 2)} мм, ${ang(sn.u - a.x, sn.v - a.y)}°`; }
+  else if ((t === 'circle' || t === 'polygon') && D.stage === 1) { const c = gp(sk, D.c); D.tip = `R ${fmt(Math.hypot(sn.u - c.x, sn.v - c.y), 2)}`; }
+  else if (t === 'arc' && D.stage === 'tan' && D.tanArc) D.tip = `R ${fmt(D.tanArc.r, 2)}, ${fmt(Math.abs(D.tanArc.sw) * 180 / Math.PI, 1)}°`;
+  else if (t === 'arc' && D.stage === 1) { const c = gp(sk, D.c); D.tip = `R ${fmt(Math.hypot(sn.u - c.x, sn.v - c.y), 2)}`; }
+  else if (t === 'arc' && D.stage === 2) { const c = gp(sk, D.c), q = gp(sk, D.s); D.tip = `R ${fmt(Math.hypot(q.x - c.x, q.y - c.y), 2)}, ${fmt(Math.abs(D.sweep || 0) * 180 / Math.PI, 1)}°`; }
+  else if (t === 'rect' && D.stage === 1) D.tip = `${fmt(Math.abs(sn.u - D.a.u), 2)} × ${fmt(Math.abs(sn.v - D.a.v), 2)}`;
+  else if (t === 'slot' && D.stage === 1) { const a = gp(sk, D.c1); D.tip = `${fmt(Math.hypot(sn.u - a.x, sn.v - a.y), 2)} мм`; }
+  else if (t === 'slot' && D.stage === 2) D.tip = `ширина ${fmt(2 * (D.r || 0), 2)}`;
   updateSketchVisuals();
 }
 const circleSegs = (cx, cy, r, a0, sw) => { const N = 64, out = []; for (let i = 0; i < N; i++) { const t0 = a0 + sw * i / N, t1 = a0 + sw * (i + 1) / N; out.push([cx + r * Math.cos(t0), cy + r * Math.sin(t0), cx + r * Math.cos(t1), cy + r * Math.sin(t1)]); } return out; };
