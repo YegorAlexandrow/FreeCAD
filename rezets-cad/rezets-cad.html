@@ -3119,7 +3119,8 @@ function showUnderDefined() {
   const sk = editSk(); S.sel = new Set();
   for (const e of Object.values(sk.ents)) if (!e.constr && entState(sk, e) === 'under') S.sel.add('e:' + e.id);
   for (const id of Object.keys(sk.pts)) if (ptState(id) === 'under' && !Object.values(sk.ents).some((e) => !e.constr && entState(sk, e) === 'under' && entPts(e).includes(id))) S.sel.add('p:' + id);
-  setTool('select'); refreshSketch();
+  // With the Dimension tool on, it stays on: the point is to dimension what is shown next.
+  if (S.tool !== 'dim') setTool('select'); refreshSketch();
   // What is selected may lie off screen (the end of a long construction line): bring it into view.
   const f = editF(); const r = canvas.getBoundingClientRect(); const ids = [...S.sel].flatMap((k) => k.startsWith('p:') ? [k.slice(2)] : sk.ents[k.slice(2)] ? entPts(sk.ents[k.slice(2)]) : []);
   if (ids.some((id) => { const q = gp(sk, id); if (!q) return false; const s2 = toScreen(toWorld(f.plane, q.x, q.y)); return s2.x < 0 || s2.y < 0 || s2.x > r.width || s2.y > r.height; })) fitView();
