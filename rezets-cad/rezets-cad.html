@@ -288,7 +288,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #sideToggle { display: none; }
 @media (max-width: 760px) {
   #app { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "view" "status"; }
-  #side { position: absolute; z-index: 20; left: 0; top: 0; bottom: 0; width: min(300px, 86vw); box-shadow: 0 0 24px rgb(0 0 0 / .3); transform: translateX(-102%); transition: transform .2s; }
+  #side { position: absolute; z-index: 20; left: 0; top: var(--top-h, 0px); bottom: 0; width: min(300px, 86vw); box-shadow: 0 0 24px rgb(0 0 0 / .3); transform: translateX(-102%); transition: transform .2s; }
   #side.open { transform: none; }
   #sideToggle { display: inline-block; }
   .tool { min-width: 54px; }
@@ -2095,6 +2095,8 @@ function resize() {
   if (S.fitted && S.mode && S.mode !== 'drw') fitView(); requestRender();
 }
 new ResizeObserver(resize).observe(view);
+// On a phone the slide-out tree starts under the header (it covered the document name and the tabs).
+new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', $('top').offsetHeight + 'px')).observe($('top'));
 controls.addEventListener('start', () => { S.fitted = false; });
 const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); viewCube.retheme(); refreshAll(); });
 new MutationObserver(() => { readColors(); viewCube.retheme(); refreshAll(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
