@@ -178,6 +178,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #mNote .help-row { display: grid; grid-template-columns: minmax(120px, 40%) 1fr; gap: 8px; align-items: baseline; }
 #mNote .help-row kbd { justify-self: start; }
 #mNote:has(.help-grp) { max-height: 60vh; overflow: auto; }
+#bUndo.dim, #bRedo.dim { opacity: .35; }
 #relbar.far { opacity: .3; pointer-events: none; }
 .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
 .kv span { color: var(--fg-2); }
@@ -2036,8 +2037,8 @@ const conName = (sk, c) => (c.t === 'diam' && sk.ents[c.refs[0]]?.t === 'ellipse
 function conLabel(sk, cid) { const c = sk.cons[cid]; if (!c) return cid; return conName(sk, c) + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''); }
 function reportAdd(r, c) {
   const sk = editSk();
-  if (r.replaced?.length) toast(`${CON_NAMES[c.t]} добавлена. ${r.replaced.map((x) => x.name + (x.driven ? ' стал справочным' : ' удалена: следует из новой')).join('; ')}.`, 'info');
-  if (r.status === 'redundant') toast(`${CON_NAMES[c.t]} уже следует из других взаимосвязей${r.group.length ? ': ' + r.group.map((g) => conLabel(sk, g)).join(', ') : ''}. Не добавлена.`, 'info');
+  if (r.replaced?.length) toast(`Взаимосвязь «${CON_NAMES[c.t]}» добавлена. ${r.replaced.map((x) => '«' + x.name + '»' + (x.driven ? ': размер стал справочным' : ' удалена, она следует из новой')).join('; ')}`, 'info');
+  if (r.status === 'redundant') toast(`Взаимосвязь «${CON_NAMES[c.t]}» уже следует из других${r.group.length ? ': ' + r.group.map((g) => conLabel(sk, g)).join(', ') : ''}, поэтому не добавлена`, 'info');
   if (r.status === 'driven') toast(`Размер переопределил бы эскиз и стал справочным${r.group.length ? ' (уже задано: ' + r.group.map((g) => conLabel(sk, g)).join(', ') + ')' : ''}.`, 'warn');
   if (r.status === 'conflict') { S.conflict = new Set(r.group); toast(`${CON_NAMES[c.t]} противоречит: ${r.group.map((g) => conLabel(sk, g)).join(', ') || 'другим взаимосвязям'}. Конфликтующие выделены красным.`, 'err', r.group.length ? [{ label: 'Выделить', act: () => { S.sel = new Set(r.group.map((g) => 'c:' + g)); refreshSketch(); } }] : []); }
 }
@@ -6862,6 +6863,8 @@ function undo() {
 }
 function redo() { if (!S.redo.length) return; S.undo.push(lastSaved); restore(S.redo.pop()); }
 $('bUndo').onclick = undo; $('bRedo').onclick = redo;
+// The arrows show when there is something to take back or redo (they always looked the same, and a click on nothing did nothing).
+setInterval(() => { const u = $('bUndo'), r = $('bRedo'); const cu = S.undo.length > 0, cr = S.redo.length > 0; if (u.classList.contains('dim') === cu) u.classList.toggle('dim', !cu); if (r.classList.contains('dim') === cr) r.classList.toggle('dim', !cr); }, 400);
 
 function loadDoc(doc, msg) {
   if (!S.project) S.project = newProject([]);
