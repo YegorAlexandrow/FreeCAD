@@ -3561,7 +3561,9 @@ function filletCorner(sk, pid, r) {
   const ccw = (T[0].x - C.x) * (T[1].y - C.y) - (T[0].y - C.y) * (T[1].x - C.x) > 0;
   const aid = nid(sk); sk.ents[aid] = { id: aid, t: 'arc', c: cId, p1: ccw ? tIds[0] : tIds[1], p2: ccw ? tIds[1] : tIds[0], r };
   const pending = [{ t: 'tangent', refs: [lines[0].id, aid] }, { t: 'tangent', refs: [lines[1].id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (P.x - C.x) * 1.6, C.y + (P.y - C.y) * 1.6] }];
-  const keep = isRefPt(pid) || Object.values(sk.cons).some((c) => c.refs.includes(pid));
+  // The corner stays as a point on both lines (SolidWorks' virtual sharp) when something refers to it, or when
+  // «Сохранять угловую точку» asks for it, to dimension from the sharp corner.
+  const keep = isRefPt(pid) || S.toolOpt.keepCorner || Object.values(sk.cons).some((c) => c.refs.includes(pid));
   if (keep) pending.push({ t: 'online', refs: [pid, lines[0].id] }, { t: 'online', refs: [pid, lines[1].id] }); else delete sk.pts[pid];
   addRelations(sk, pending);
   return { arc: aid };
@@ -3787,7 +3789,7 @@ function toolOptionsPanel() {
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okOffset }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')));
   // The radius is for the next fillets and, as in SolidWorks, for the ones already put with the tool this time.
   if (S.tool === 'sfillet') { const sk = editSk(); const made = () => (S.toolFillets || []).map((id) => sk?.ents[id]).filter(Boolean);
-    return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности')); }
+    return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.keepCorner, onchange: (e) => { o.keepCorner = e.target.checked; } }), 'Сохранять угловую точку')); }
   if (S.tool === 'slot') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Паз'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.slotDims, onchange: (e) => { o.slotDims = e.target.checked; } }), 'Проставить размеры'));
   if (S.tool === 'rect') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Прямоугольник'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.rectDiag, onchange: (e) => { o.rectDiag = e.target.checked; } }), 'Вспомогательные диагонали'));
   if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true));
