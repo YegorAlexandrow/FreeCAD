@@ -1074,8 +1074,11 @@ function offsetRing(pts, d) {
 // Extrusion with drafted walls: the profile is offset by off(z) at each ring height.
 function taperedExtrude(loops, zs, off) {
   const tris = []; const V = (p, z) => new THREE.Vector3(p[0], p[1], z);
+  // A profile shrunk past its own width turns inside out (its edges reverse): that is said instead of built.
+  const flipped = (a, b) => a.some((p, i) => { const j = (i + 1) % a.length; return (a[j][0] - p[0]) * (b[j][0] - b[i][0]) + (a[j][1] - p[1]) * (b[j][1] - b[i][1]) < 0; });
   for (const l of loops) {
     const rings = zs.map((z) => ({ z, o: offsetRing(l.pts, off(z)), h: l.holes.map((hh) => offsetRing(hh, off(z))) }));
+    for (const R of rings) if (flipped(l.pts, R.o) || l.holes.some((hh, k) => flipped(hh, R.h[k]))) throw new Error('Уклон сводит контур в точку раньше, чем кончается вытягивание: уменьшите угол или глубину');
     for (let j = 0; j + 1 < rings.length; j++) { const A = rings[j], B = rings[j + 1];
       for (const [ra, rb] of [[A.o, B.o], ...A.h.map((hh, k) => [hh, B.h[k]])]) for (let i = 0; i < ra.length; i++) { const i2 = (i + 1) % ra.length; tris.push([V(ra[i], A.z), V(ra[i2], A.z), V(rb[i2], B.z)], [V(ra[i], A.z), V(rb[i2], B.z), V(rb[i], B.z)]); } }
     for (const R of [rings[0], rings[rings.length - 1]]) { const all = R.o.concat(...R.h); const t = THREE.ShapeUtils.triangulateShape(R.o.map((p) => new THREE.Vector2(...p)), R.h.map((hh) => hh.map((p) => new THREE.Vector2(...p)))); for (const [a, b, c] of t) tris.push([V(all[a], R.z), V(all[b], R.z), V(all[c], R.z)]); }
@@ -1626,11 +1629,18 @@ function buildTool(f, body, cyls = []) {
       d = best + (f.mode === 'cut' ? Math.max(room, 0.002) : 0);
     }
     // "Through all" only needs to clear the body; a huge tool loses precision in the boolean.
-    if (f.end === 'through') { if (body) { body.computeBoundingBox(); const sph = body.boundingBox.getBoundingSphere(new THREE.Sphere()); d = 2 * (sph.radius + sph.center.distanceTo(new THREE.Vector3(...sf.plane.o))) + 10; } else d = 1000; }
+    // It reaches exactly past the farthest point of the body on its side, plus a millimetre: a longer tool with a
+    // draft would shrink its profiles past nothing (a 15° draft over the old ~100 mm turned pockets inside out).
+    let reach = null;
+    if (f.end === 'through') {
+      if (body) { const pos = body.getAttribute('position'); const o = new THREE.Vector3(...sf.plane.o).addScaledVector(nS, s0); let lo = 0, hi = 0; const q = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) { const t = q.fromBufferAttribute(pos, i).sub(o).dot(nS); if (t < lo) lo = t; if (t > hi) hi = t; } reach = [-lo + 1, hi + 1]; d = f.dir === -1 ? reach[0] : reach[1]; }
+      else d = 1000;
+    }
     let z0, z1;
-    if (f.end === 'mid') { z0 = -d / 2; z1 = d / 2; }
+    if (f.end === 'mid') { z0 = -d / 2; z1 = d / 2; if (reach) { const m = Math.max(...reach); z0 = -m; z1 = m; } }
     else if (f.dir === -1) { z0 = -d; z1 = eps; } else { z0 = -eps; z1 = d; }
-    if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = -d; z1 = d; }
+    if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = reach ? -reach[0] : -d; z1 = reach ? reach[1] : d; }
     // A cut drawn on the walls of the body (the same sketch as the boss) leaves coplanar faces the
     // boolean cannot resolve; the tool is widened by 0.2 µm so it clears those walls instead.
     if (f.mode === 'cut' && body) loops = loops.map((l) => ({ ...l, pts: offsetRing(l.pts, 2e-4), holes: l.holes.map((hh) => offsetRing(hh, 2e-4)) }));
