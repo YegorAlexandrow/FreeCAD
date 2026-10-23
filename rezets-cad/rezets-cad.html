@@ -2755,8 +2755,21 @@ function convertFace(sk, m) {
   const simplify = (pts) => { const out = []; for (const p of pts) { out.push(p); while (out.length >= 3) { const [a, b, c] = out.slice(-3); const cr = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) / (Math.hypot(c[0] - a[0], c[1] - a[1]) || 1); if (cr < 1e-4) out.splice(-2, 1); else break; } } return out; };
   let nLines = 0;
   for (const loop of [L.outer, ...L.holes]) {
-    const pts = simplify(loop.map(toSk)); if (pts.length < 3) continue; const ids = pts.map(([x, y]) => { const id = nid(sk); sk.pts[id] = { id, x, y, fixed: true }; return id; });
-    ids.forEach((a, i) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: ids[(i + 1) % ids.length] }; nLines++; });
+    const pts = simplify(loop.map(toSk)); if (pts.length < 3) continue;
+    // Facets lying on a known circle of the model (a hole, a boss, a fillet) come back as that circle or an arc of
+    // it, not as dozens of short lines that can't be dimensioned.
+    const circs = S.refs?.circles || []; const onC = pts.map(([x, y]) => circs.findIndex((c) => Math.abs(Math.hypot(x - c.x, y - c.y) - c.r) < Math.max(1e-3, c.r * 2e-3)));
+    const P = (q) => { const id = nid(sk); sk.pts[id] = { id, x: q[0], y: q[1], fixed: true }; return id; };
+    if (onC[0] >= 0 && onC.every((k) => k === onC[0])) { const c = circs[onC[0]]; const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: P([c.x, c.y]), r: c.r }; nLines++; continue; }
+    // Start at a point where a run changes, so that no arc is cut in two at the loop's seam.
+    const n = pts.length; let s0 = 0; for (let i = 0; i < n; i++) if (onC[i] < 0 || onC[i] !== onC[(i - 1 + n) % n]) { s0 = i; break; }
+    const seq = Array.from({ length: n + 1 }, (_, k) => (s0 + k) % n); const ids = new Map(); const pid = (i) => { if (!ids.has(i)) ids.set(i, P(pts[i])); return ids.get(i); };
+    for (let k = 0; k < n;) {
+      const i = seq[k]; const ci = onC[i]; let j = k; if (ci >= 0) while (j + 1 <= n && onC[seq[j + 1]] === ci) j++;
+      if (ci >= 0 && j - k >= 2) { const c = circs[ci]; const a = pts[i], b = pts[seq[j]], m2 = pts[seq[k + 1]]; const ccw = (a[0] - c.x) * (m2[1] - c.y) - (a[1] - c.y) * (m2[0] - c.x) > 0;
+        const cp = P([c.x, c.y]); const id = nid(sk); const p1 = pid(i), p2 = pid(seq[j]); sk.ents[id] = { id, t: 'arc', c: cp, p1: ccw ? p1 : p2, p2: ccw ? p2 : p1, r: c.r }; nLines++; k = j; continue; }
+      const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: pid(i), p2: pid(seq[k + 1]) }; nLines++; k++;
+    }
   }
   return nLines;
 }

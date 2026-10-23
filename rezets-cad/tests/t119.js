@@ -11,5 +11,5 @@ const open = require('./harness.js');
     const regs = R.sketchRegionsOf(f).faces.map((x) => +x.area.toFixed(1));
     S.selectedTree = 'feat:' + f.id; R.cmdFeature('extrude', 'add'); S.pm.feature.depth = 3; R.okPM();
     return { lines: r, regs, dv: +(R.geoVolume(S.body) - v0).toFixed(1), err: JSON.stringify(S.errors) }; })));
-  console.log('expect lines > 4 (rectangle + polygon of the hole), regions [227.4] (240 - pi*4), dv 682 (227.4 * 3), no errors');
+  console.log('expect lines 5 (rectangle + the hole as one circle), regions [240, 12.5] (the plate with its hole, the hole), dv 682 (227.4 * 3), no errors');
   console.log(logs.join('\n')); await b.close(); })();
