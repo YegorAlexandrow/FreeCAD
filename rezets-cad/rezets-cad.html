@@ -1842,6 +1842,8 @@ function buildTool(f, body, cyls = []) {
     { const dl0 = Math.hypot(...ad) || 1; let neg = 0, pos = 0; for (const l of loops) for (const ring of [l.pts, ...l.holes]) for (const [x, y] of ring) { const sd = ((x - ap[0]) * ad[1] - (y - ap[1]) * ad[0]) / dl0; if (sd < -1e-6) neg = Math.max(neg, -sd); if (sd > 1e-6) pos = Math.max(pos, sd); }
       if (neg > 1e-4 && pos > 1e-4) throw new Error(`Ось пересекает профиль: он лежит по обе стороны от неё (${fmt(Math.min(neg, pos), 2)} мм заходит за ось). Выберите другую ось или оставьте в выбранных контурах только одну сторону`); }
     g = revolveGeometry(loops, ap, ad, f.angle * (f.dir === -1 ? -1 : 1));
+    // «Симметрично»: half the angle each side of the sketch plane, as SolidWorks' Mid-Plane.
+    if (f.mid && f.angle < 360) { const ax = new THREE.Vector3(ad[0], ad[1], 0).normalize(); g.applyMatrix4(new THREE.Matrix4().makeTranslation(ap[0], ap[1], 0).multiply(new THREE.Matrix4().makeRotationAxis(ax, -f.angle / 2 * Math.PI / 180 * (f.dir === -1 ? -1 : 1))).multiply(new THREE.Matrix4().makeTranslation(-ap[0], -ap[1], 0))); }
     const P0 = toWorld(sf.plane, ap[0], ap[1]); const D = toWorld(sf.plane, ap[0] + ad[0], ap[1] + ad[1]).sub(P0).normalize(); const dl = Math.hypot(...ad) || 1;
     const used = new Set(); for (const e of Object.values(sf.sk.ents)) if (!e.constr && !e.ext) [e.p1, e.p2].forEach((id) => id && used.add(id));
     for (const id of used) { const q = gp(sf.sk, id); const r = Math.abs((q.x - ap[0]) * ad[1] - (q.y - ap[1]) * ad[0]) / dl; if (r > 1e-6) cyls.push({ p: P0.clone(), dir: D.clone(), r }); }
@@ -7103,6 +7105,7 @@ function renderPM() {
     selAx.onchange = () => { f.axis = selAx.value; schedulePreview(); };
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Ось вращения'), h('label', { class: 'field' }, h('span', {}, 'Ось'), selAx)),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Угол'), numField('Угол', 'pmAngle', f.angle, (v) => { f.angle = Math.min(360, v); schedulePreview(); }, '°'),
+        f.angle < 360 ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.mid, onchange: (e) => { if (e.target.checked) f.mid = true; else delete f.mid; schedulePreview(); } }), 'Симметрично от плоскости эскиза') : null,
         h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление')));
   }
   const sks = ['extrude', 'revolve'].includes(f.type) ? sketchesFor(f) : [];
