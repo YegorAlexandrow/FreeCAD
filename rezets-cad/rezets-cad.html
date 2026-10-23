@@ -2222,7 +2222,8 @@ function sketchState(sk, a) {
 }
 function renderSkState() {
   const st = $('stState'); st.textContent = '';
-  if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
+  if (S.mode === 'asm' && S.asmAnalysis && !S.doc.comps?.length) st.append(h('span', { class: 'pill empty' }, 'Пустая сборка'));
+  else if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
   if (S.editing && S.analysis) { const a = S.analysis; const { state, text } = sketchState(editSk(), a); st.append(h('span', { class: 'pill ' + state }, text + (state === 'under' && a.dofMain ? ' · ' + a.dofMain : ''))); }
 }
 function entState(sk, e) {
@@ -2755,7 +2756,7 @@ function drawClick(m) {
     if (closed || sn.kind === 'pt') { S.draw = null; } commitSketch(true); return;
   }
   if (t === 'rect') {
-    if (D.stage === 0) { D.a = { u: sn.u, v: sn.v, sn }; D.stage = 1; return; }
+    if (D.stage === 0) { D.a = { u: sn.u, v: sn.v, sn }; D.stage = 1; setHint(); return; }
     if (Math.abs(sn.u - D.a.u) < 1e-6 || Math.abs(sn.v - D.a.v) < 1e-6) return;
     const p1 = snapToPoint(sk, D.a.sn, pending); const p3 = snapToPoint(sk, sn, pending);
     const p2 = nid(sk); sk.pts[p2] = { id: p2, x: gp(sk, p3).x, y: gp(sk, p1).y }; const p4 = nid(sk); sk.pts[p4] = { id: p4, x: gp(sk, p1).x, y: gp(sk, p3).y };
@@ -7115,7 +7116,7 @@ function setHint(text) {
     trim: 'Обрезка: наведите на кусок линии и щёлкните, чтобы убрать его до ближайших пересечений',
     convert: 'Контур грани: щёлкните внутри грани модели в плоскости эскиза',
     sfillet: 'Скругление: щёлкните угол, где сходятся две линии, или место, где сходятся две окружности',
-    point: 'Точка: щёлкните место', dim: 'Размер: выберите объект, затем щёлкните место для размера',
+    point: S.afterSketch === 'hole' ? 'Отверстие: щёлкайте центры отверстий и задайте их размерами, затем закройте эскиз. Esc без точек отменяет' : 'Точка: щёлкните место', dim: 'Размер: выберите объект, затем щёлкните место для размера',
   })[S.tool] : S.mode === 'asm' ? (S.pm?.kind === 'mate' ? (S.pm.picks.length < 2 ? 'Сопряжение: щёлкните грань или цилиндр на двух разных компонентах' : 'Выберите тип сопряжения и нажмите Enter') : 'Тяните компонент мышью, Shift+тянуть: вращать. Пустое место: вращение вида')
     : S.pm?.kind === 'pickPlane' ? 'Выберите плоскость или плоскую грань' : S.pm ? 'Настройте параметры, затем OK' : 'Левая кнопка: вращение, правая: сдвиг, колёсико: масштаб. Двойной щелчок по элементу дерева открывает его');
   $('hint').textContent = t;
