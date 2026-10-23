@@ -6662,7 +6662,10 @@ function saveProjectSoon() {
     if (!S.project) return; const ent = activeEntry(); if (ent && (S.mode === 'part' || S.mode === 'asm')) ent.data = S.doc;
     const plain = { name: S.project.name, active: S.project.active, nid: S.project.nid, savedAt: Date.now(), docs: S.project.docs.map((d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.data })) };
     const ok = await idbPut('project', plain); if (CLOUD.db && S.touched) SYNC.set({ ...(SYNC.get() || {}), dirty: true });
-    if (!ok) try { localStorage.setItem('rezets-cad-doc', JSON.stringify(S.doc)); } catch { /* storage unavailable */ }
+    // Without IndexedDB the whole project goes to localStorage (only the open document did, the rest was lost on
+    // reload); one too big for it (imported meshes) is said so once instead of the badge claiming it is kept.
+    if (!ok) { let stored = false; try { localStorage.setItem('rezets-cad-project', JSON.stringify({ ...plain, docs: S.project.docs.map((d) => docToStore(d)) })); stored = true; } catch { try { localStorage.setItem('rezets-cad-doc', JSON.stringify(S.doc)); } catch { /* storage unavailable */ } }
+      if (!stored && !saveProjectSoon.warned) { saveProjectSoon.warned = true; toast('Браузер не даёт сохранить проект целиком (хранилище недоступно или переполнено). Сохраните его файлом: «Файл» → «Сохранить проект…»', 'err'); } }
     if (SRV.on) serverSaveSoon(); else cloudSaveSoon();
   }, 400);
 }
@@ -7130,6 +7133,7 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
   // Served by the local server: projects live on its disk.
   if (await serverDetect()) { try { await serverStart(); return; } catch (e) { console.warn(e); SRV.on = false; toast('Сервер найден, но проект не открылся: ' + e.message, 'err'); } }
   let proj = await idbGet('project'); const hadLocal = !!proj;
+  if (!proj) { try { const lp = JSON.parse(localStorage.getItem('rezets-cad-project') || 'null'); if (lp?.docs?.length) proj = { ...lp, docs: lp.docs.map((d) => docFromStore(d)) }; } catch { /* unreadable */ } }
   if (!proj) { let old = null; try { old = JSON.parse(localStorage.getItem('rezets-cad-doc') || 'null'); } catch { old = null; }
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
   openProject(proj); S.touched = false;
