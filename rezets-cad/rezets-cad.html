@@ -4322,7 +4322,7 @@ function cloudSaveSoon() {
   // Saves are at least 5 s apart: each one is several calls, and the cloud limits how many a viewer makes.
   clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, Math.max(1500, (CLOUD.lastStart || 0) + 5000 - Date.now()));
 }
-document.getElementById('saveState')?.addEventListener('click', () => { if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
+document.getElementById('saveState')?.addEventListener('click', () => { if (CLOUD.choice) { CLOUD.choice(); return; } if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
 window.addEventListener('beforeunload', (e) => { if (CLOUD.db && (CLOUD.saving || cloudTimer && CLOUD.state === 'saving')) { e.preventDefault(); e.returnValue = ''; } });
 // Earlier revisions of a document, to roll back from the tab's menu.
 function docVersionsMenu(d, x, y) {
@@ -5415,7 +5415,7 @@ function asmEdgePick(ev) {
   const pxPerMm = view.clientHeight * camera.zoom / (camera.top - camera.bottom);
   for (const c of S.doc.comps) {
     const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
-    for (const v of T.verts) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my), 5, wq); }
+    for (const v of T.verts) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
     for (const ci of T.circles) {
       const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
       // Circles far from the cursor are skipped before sampling; each circle gives one candidate.
@@ -6413,7 +6413,11 @@ document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.cont
 function toast(text, kind = 'info', actions = []) {
   const box = $('toasts'); const el = h('div', { class: 'toast ' + kind, role: 'status' }, h('span', {}, text), actions.length ? h('div', { class: 'acts' }, actions.map((a) => h('button', { onclick: () => { el.remove(); a.act(); } }, a.label))) : null);
   for (const old of [...box.children]) if (old.firstChild?.textContent === text) old.remove();
-  box.append(el); while (box.children.length > 2) box.firstChild.remove(); setTimeout(() => el.remove(), kind === 'err' ? 9000 : 5000); return el;
+  // A toast stays while the pointer is on it; one with a button (Undo) lives longer and is the last to be pushed out.
+  box.append(el); while (box.children.length > 3) ([...box.children].find((x) => !x.querySelector('.acts')) || box.firstChild).remove();
+  let left = actions.length ? 12000 : kind === 'err' ? 9000 : Math.min(9000, 4000 + text.length * 30); let t0 = Date.now(); let timer = setTimeout(() => el.remove(), left);
+  el.addEventListener('pointerenter', () => { clearTimeout(timer); left -= Date.now() - t0; }); el.addEventListener('pointerleave', () => { t0 = Date.now(); timer = setTimeout(() => el.remove(), Math.max(1500, left)); });
+  if (kind === 'err') el.setAttribute('role', 'alert'); return el;
 }
 
 
@@ -6806,6 +6810,8 @@ window.addEventListener('keydown', (e) => {
   // swallow them. Esc in a text field leaves the field first.
   const tag = e.target.tagName; const typing = tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !['checkbox', 'radio', 'button', 'range'].includes(e.target.type));
   if (typing) { if (e.key === 'Escape' && !e.defaultPrevented) e.target.blur(); return; }
+  // Enter and Space belong to the focused button or checkbox (pressing it), not to the shortcuts behind it.
+  if ((tag === 'BUTTON' || (tag === 'INPUT' && ['checkbox', 'radio', 'button'].includes(e.target.type))) && (e.key === 'Enter' || e.key === ' ')) return;
   if (tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
   const k = e.code && e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
   // Undo would swap the document under an open operation panel (its OK then writes into the wrong model).
@@ -6885,7 +6891,12 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
     // Work started on the browser copy while the cloud was loading is not thrown away silently.
     if (S.touched) {
       CLOUD.meta = meta; setCloudState('error', 'В облаке более новая версия');
-      toast('Пока проект грузился из облака, вы уже начали менять копию из браузера. В облаке версия новее', 'warn', [{ label: 'Открыть облачную', act: async () => { openProject(cp); await idbPut('project', { ...cp }); CLOUD.blocked = false; setCloudState('saved'); } }, { label: 'Оставить эту', act: () => { CLOUD.meta = meta; CLOUD.blocked = false; cloudSave(); } }]); return;
+      // The choice waits in a dialog (a toast went away in seconds and left the cloud stopped for good); closed
+      // unanswered, it opens again from the save badge.
+      const ask = () => showModal('В облаке более новая версия', 'Пока проект грузился из облака, вы уже начали менять копию из браузера. Какую оставить? Пока не выбрано, в облако ничего не сохраняется.', null, [
+        ['Открыть облачную', async () => { closeModal(); CLOUD.choice = null; openProject(cp); await idbPut('project', { ...cp }); CLOUD.blocked = false; setCloudState('saved'); }],
+        ['Оставить эту и сохранить в облако', () => { closeModal(); CLOUD.choice = null; CLOUD.meta = meta; CLOUD.blocked = false; cloudSave(); }], ['Закрыть', closeModal]]);
+      CLOUD.choice = ask; ask(); return;
     }
     if (cp.docs.length) { openProject(cp); await idbPut('project', { ...cp }); toast('Проект загружен из облака', 'info'); }
     CLOUD.blocked = false; setCloudState('saved');
