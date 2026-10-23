@@ -1900,7 +1900,15 @@ controls.enableRotate = false;
   const ptrs = new Map(); let last = null;
   // With Ctrl or Shift held the drag pans (OrbitControls does that itself): it must not rotate as well.
   const rotates = (e) => (e.ctrlKey || e.shiftKey || e.metaKey ? false : e.pointerType === 'touch' ? ptrs.size === 1 && controls.touches.ONE === THREE.TOUCH.ROTATE : (e.buttons & 1 && controls.mouseButtons.LEFT === THREE.MOUSE.ROTATE) || (e.buttons & 4 && controls.mouseButtons.MIDDLE === THREE.MOUSE.ROTATE));
-  canvas.addEventListener('pointerdown', (e) => { ptrs.set(e.pointerId, true); last = { x: e.clientX, y: e.clientY }; });
+  // Zoom-to-cursor moves the orbit target off the part, so a drag turns about the point of the model it starts on,
+  // or about the model's centre when it starts in empty space, as in SolidWorks.
+  let pivot = null;
+  const pivotAt = (e) => {
+    const rc = rayFromEvent(e); const objs = S.mode === 'asm' ? [asmGroup] : bodyMeshObj ? [bodyMeshObj] : [];
+    const hit = objs.length && keptHit(rc.intersectObjects(objs, true)); if (hit) return hit.point.clone();
+    const box = new THREE.Box3(); for (const o of objs) box.expandByObject(o); return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
+  };
+  canvas.addEventListener('pointerdown', (e) => { ptrs.set(e.pointerId, true); last = { x: e.clientX, y: e.clientY }; pivot = rotates(e) && controls.enabled ? pivotAt(e) : null; });
   const end = (e) => { ptrs.delete(e.pointerId); last = null; };
   window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end);
   canvas.addEventListener('pointermove', (e) => {
@@ -1909,11 +1917,22 @@ controls.enableRotate = false;
     const k = 2 * Math.PI * controls.rotateSpeed / canvas.clientHeight; const off = camera.position.clone().sub(controls.target);
     const up = camera.up.clone().normalize(); const right = new THREE.Vector3().crossVectors(off.clone().negate(), up).normalize();
     const q = new THREE.Quaternion().setFromAxisAngle(up, -dx * k).multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * k));
-    off.applyQuaternion(q); camera.up.copy(up.applyQuaternion(q)); camera.position.copy(controls.target).add(off); camera.lookAt(controls.target); requestRender();
+    camera.up.copy(up.applyQuaternion(q));
+    if (pivot) { for (const v of [camera.position, controls.target]) v.sub(pivot).applyQuaternion(q).add(pivot); } else { off.applyQuaternion(q); camera.position.copy(controls.target).add(off); }
+    camera.lookAt(controls.target); requestRender();
   });
 }
 let renderQueued = false;
-function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); renderer.render(scene, camera); layoutOverlay(); }); }
+// The depth range hugs the scene before each frame and each pick ray (a ray starts on the near plane). With a fixed ±100000 mm the 24-bit depth buffer resolved
+// about 0.01 mm, so edges and faces of a small part fought over the same pixels and the edges flickered dashed.
+const depthBox = new THREE.Box3(), depthSph = new THREE.Sphere();
+function fitDepth() {
+  scene.updateMatrixWorld(); depthBox.makeEmpty(); scene.traverseVisible((o) => { if (o.geometry && !o.isSprite) { if (!o.geometry.boundingBox) o.geometry.computeBoundingBox(); if (o.geometry.boundingBox && !o.geometry.boundingBox.isEmpty()) depthBox.union(o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld)); } });
+  if (depthBox.isEmpty() || !Number.isFinite(depthBox.min.x)) { depthBox.setFromCenterAndSize(controls.target, new THREE.Vector3(1, 1, 1).multiplyScalar(200)); }
+  depthBox.getBoundingSphere(depthSph); const dz = depthSph.center.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3()));
+  const m = depthSph.radius * 1.05 + 1; camera.near = dz - m; camera.far = dz + m; camera.updateProjectionMatrix();
+}
+function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); layoutOverlay(); }); }
 // Outlines of curved faces as seen from here (a cylinder's sides, a fillet's edge on the skyline), redrawn as the
 // view turns, as SolidWorks draws them: without them a shaft seen from the side was a flat grey band.
 const silGroup = new THREE.Group(); let silState = { geo: null, dir: null, obj: null };
@@ -2061,11 +2080,11 @@ function showFaceSel(face) {
 function showFaceHover(face, into = groups.hover, color = colors['geo-hover'], opacity = 0.35) {
   into.clear(); if (!face || !S.body) { requestRender(); return; }
   const pos = S.body.getAttribute('position'); const arr = [];
-  const cp = face.cyl && V3(face.cyl.p), cd = face.cyl && V3(face.cyl.dir);
-  const off = (v) => (face.cyl ? v.clone().sub(cp).projectOnPlane(cd).normalize().multiplyScalar(face.cyl.sign || 1) : face.n);
-  for (const t of face.tris) for (let k = 0; k < 3; k++) { const v = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k); v.addScaledVector(off(v), 0.02); arr.push(v.x, v.y, v.z); }
+  for (const t of face.tris) for (let k = 0; k < 3; k++) { const v = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k); arr.push(v.x, v.y, v.z); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
-  into.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide }))); requestRender();
+  // The tint lies on the face itself and wins the depth test by polygon offset: lifting it 0.02 mm off the face stood
+  // out past the edges of a part a few tenths of a millimetre big.
+  into.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 }))); requestRender();
 }
 function planeFromFace(face, hitPoint) {
   const n = face.n.clone(); let x = new THREE.Vector3(1, 0, 0).projectOnPlane(n);
@@ -2080,40 +2099,55 @@ function planeFromFace(face, hitPoint) {
 // ---------------- view orientation ----------------
 let anim = null;
 function setView(dirVec, upVec, fit = true) {
-  const target = controls.target.clone(); const dist = 1000;
-  const toPos = target.clone().addScaledVector(dirVec.clone().normalize(), dist);
-  const fromPos = camera.position.clone(), fromUp = camera.up.clone(); const t0 = performance.now(); const dur = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 260;
+  // Orientation, target and zoom move together in one motion (turning first and fitting after read as two jumps),
+  // and the orientation is slerped, so a half turn to the opposite side goes round instead of through a degenerate lerp.
+  const dist = 1000; const fromQ = camera.quaternion.clone(), fromT = controls.target.clone(), fromZ = camera.zoom;
+  const toQ = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(dirVec.clone().normalize(), new THREE.Vector3(), upVec.clone().normalize()));
+  const to = fit ? fitFrame(toQ) : { target: fromT.clone(), zoom: fromZ };
+  const t0 = performance.now(); const dur = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 260;
   cancelAnimationFrame(anim);
   const step = () => {
     const k = dur ? Math.min(1, (performance.now() - t0) / dur) : 1; const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
-    const off = fromPos.clone().sub(target).normalize().lerp(toPos.clone().sub(target).normalize(), e).normalize();
-    camera.position.copy(target).addScaledVector(off, dist); camera.up.copy(fromUp.clone().lerp(upVec, e).normalize()); camera.lookAt(target); controls.update(); requestRender();
-    if (k < 1) anim = requestAnimationFrame(step); else if (fit) fitView();
+    const q = fromQ.clone().slerp(toQ, e); const t = fromT.clone().lerp(to.target, e);
+    controls.target.copy(t); camera.quaternion.copy(q); camera.up.set(0, 1, 0).applyQuaternion(q); camera.position.copy(t).add(new THREE.Vector3(0, 0, dist).applyQuaternion(q));
+    camera.zoom = fromZ * Math.pow(to.zoom / fromZ, e); camera.updateProjectionMatrix(); camera.lookAt(t); controls.update(); requestRender();
+    if (k < 1) anim = requestAnimationFrame(step);
   };
   step();
 }
-function fitView() {
-  const box = new THREE.Box3();
-  if (S.body) { S.body.computeBoundingBox(); box.union(S.body.boundingBox); }
+// Target and zoom that fit the model when looking with orientation q: by the extents as seen from that direction,
+// not by the bounding sphere, so a long thin part seen end-on fills the window.
+function fitFrame(q) {
+  const pts = []; const box = new THREE.Box3();
+  if (S.body) { const a = S.body.attributes.position; const step = Math.max(1, Math.floor(a.count / 20000)); for (let i = 0; i < a.count; i += step) pts.push(new THREE.Vector3().fromBufferAttribute(a, i)); }
   if (S.mode === 'asm') { asmGroup.updateMatrixWorld(true); asmGroup.traverse((o) => { if (o.isMesh) box.expandByObject(o); }); }
-  for (const f of S.doc.features || []) if (f.type === 'sketch' && (S.editing === f.id || sketchVisible(f))) for (const p of Object.values(f.sk.pts)) box.expandByPoint(toWorld(f.plane, p.x, p.y));
-  if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(), new THREE.Vector3(120, 120, 120));
-  const ctr = box.getCenter(new THREE.Vector3()); const sphere = box.getBoundingSphere(new THREE.Sphere());
-  const off = camera.position.clone().sub(controls.target); controls.target.copy(ctr); camera.position.copy(ctr).add(off);
+  for (const f of S.doc.features || []) if (f.type === 'sketch' && (S.editing === f.id || sketchVisible(f))) for (const p of Object.values(f.sk.pts)) pts.push(toWorld(f.plane, p.x, p.y));
+  if (!box.isEmpty()) for (let i = 0; i < 8; i++) pts.push(new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z));
+  if (!pts.length) for (const x of [-60, 60]) for (const y of [-60, 60]) for (const z of [-60, 60]) pts.push(new THREE.Vector3(x, y, z));
+  const m = new THREE.Matrix4().makeRotationFromQuaternion(q).setPosition(new THREE.Box3().setFromPoints(pts).getCenter(new THREE.Vector3())); const inv = m.clone().invert();
+  const vb = new THREE.Box3(); const v = new THREE.Vector3(); for (const p of pts) vb.expandByPoint(v.copy(p).applyMatrix4(inv));
+  const c = vb.getCenter(new THREE.Vector3()); c.z = 0; const sz = vb.getSize(new THREE.Vector3()); const pad = (d) => d / 2 * 1.12 + Math.min(1, d * 0.05 + 1e-3);
   const half = 160; const asp = (camera.right - camera.left) / (camera.top - camera.bottom);
-  camera.zoom = Math.max(0.05, half * Math.min(1, asp) / (sphere.radius * 1.25 + Math.min(1, sphere.radius * 0.1 + 1e-3))); camera.updateProjectionMatrix(); controls.update(); requestRender();
+  return { target: c.applyMatrix4(m), zoom: Math.max(0.05, Math.min(half * asp / pad(sz.x), half / pad(sz.y))) };
+}
+// Fit from the keyboard, the view bar or a middle double click glides there like the standard views do.
+const fitAnimated = () => setView(camera.position.clone().sub(controls.target), camera.up.clone());
+function fitView() {
+  const f = fitFrame(camera.quaternion); const off = camera.position.clone().sub(controls.target); controls.target.copy(f.target); camera.position.copy(f.target).add(off);
+  camera.zoom = f.zoom; camera.updateProjectionMatrix(); controls.update(); requestRender();
 }
 // All planes on or off at once (each reference plane also keeps its own Show/Hide).
 function togglePlanes() { S.showPlanes = S.showPlanes === false; buildPlanes(); requestRender(); toast(S.showPlanes ? 'Плоскости показаны' : 'Плоскости скрыты', 'info'); }
 function viewCmd(k) {
   if (k === 'section') return toggleSection();
-  if (k === 'fit') return fitView();
+  if (k === 'fit') return fitAnimated();
   if (k === 'iso') return setView(new THREE.Vector3(1, 1, 1), new THREE.Vector3(0, 1, 0));
   if (k === 'normal') {
     const pl = S.editing ? featById(S.editing).plane : S.selectedTree?.startsWith('plane:') ? (PLANES[S.selectedTree.slice(6)] || refPlane(featById(S.selectedTree.slice(6)))) : S.selectedTree?.startsWith('feat:') && featById(S.selectedTree.slice(5))?.type === 'sketch' ? featById(S.selectedTree.slice(5)).plane : S.pickedFace || null;
     if (!pl) return toast('Выберите грань, плоскость или эскиз, чтобы повернуть вид перпендикулярно', 'warn');
-    // Pressed again while already looking straight at it, the view turns round to the back side.
-    const n = new THREE.Vector3(...pl.n); const look = camera.position.clone().sub(controls.target).normalize(); if (look.dot(n) > 0.9999) n.negate();
+    // Pressed again while already looking straight at it, the view turns round to the back side. A plane or sketch seen
+    // from behind is squared up from that same side: flipping to the front first was a half turn nobody asked for.
+    const n = new THREE.Vector3(...pl.n); const look = camera.position.clone().sub(controls.target).normalize(); const d = look.dot(n); if (d > 0.9999) n.negate(); else if (d < -1e-3 && d > -0.9999 && !S.pickedFace) n.negate();
     return setView(n, new THREE.Vector3(...pl.y));
   }
   const back = { back: 'front', left: 'right', bottom: 'top' }[k]; if (back) { const p = PLANES[back]; return setView(new THREE.Vector3(...p.n).negate(), new THREE.Vector3(...p.y)); }
@@ -2135,7 +2169,7 @@ function toScreen(w) { const v = w.clone().project(camera); return { x: (v.x + 1
 const sScreen = (u, v) => toScreen(toWorld(editF().plane, u, v));
 function mouseToSketch(ev) {
   const r = canvas.getBoundingClientRect(); const ndc = new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
-  const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); const pl = editF().plane;
+  fitDepth(); const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); const pl = editF().plane;
   const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(...pl.n), new THREE.Vector3(...pl.o));
   const hit = new THREE.Vector3(); if (!rc.ray.intersectPlane(plane, hit)) { rc.ray.closestPointToPoint(new THREE.Vector3(...pl.o), hit); }
   const d = hit.sub(new THREE.Vector3(...pl.o)); return { u: d.dot(new THREE.Vector3(...pl.x)), v: d.dot(new THREE.Vector3(...pl.y)), sx: ev.clientX - r.left, sy: ev.clientY - r.top };
@@ -2540,7 +2574,7 @@ canvas.addEventListener('dblclick', (ev) => { if (S.editing && S.tool === 'selec
 canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
 // ---------------- part mode ----------------
-function rayFromEvent(ev) { const r = canvas.getBoundingClientRect(); const ndc = new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1); const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); return rc; }
+function rayFromEvent(ev) { const r = canvas.getBoundingClientRect(); const ndc = new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1); fitDepth(); const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); return rc; }
 function partPickAt(ev, anyFace) {
   const rc = rayFromEvent(ev);
   if (bodyMeshObj) { const hit = keptHit(rc.intersectObject(bodyMeshObj)); if (hit) { const face = faceForTriangle(hit.faceIndex); if (face && (anyFace || !face.cyl)) return { face, point: hit.point }; if (face) return null; } }
@@ -2579,7 +2613,7 @@ function sketchAt(ev, open) {
 }
 // The hover highlight goes when the pointer leaves the view (it stayed lit while the pointer was on the tree).
 // A double click of the middle button (the wheel) fits the model, as in SolidWorks.
-let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitView(); midClickAt = 0; } else midClickAt = t; });
+let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitAnimated(); midClickAt = 0; } else midClickAt = t; });
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
   // In a loft or sweep, sketches are picked in the view too: a loft takes or drops a section, a sweep takes a closed
@@ -4180,8 +4214,9 @@ function pickEdge(ev, topo, withDist) {
   for (const [a, b] of topo.lines) { const sa = toScreen(a), sb = toScreen(b); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1))); take({ edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), a.clone().lerp(b, t)); }
   // An edge behind the part (seen through it in the wireframe of hidden lines) is not picked: the nearest visible one is.
   const dirV = camera.getWorldDirection(new THREE.Vector3()); const span = (camera.top - camera.bottom) / camera.zoom; let best = null;
-  for (const cd of cands.sort((x, y) => x.pd - y.pd).slice(0, 8)) {
-    const hit = bodyMeshObj ? new THREE.Raycaster(cd.wq.clone().addScaledVector(dirV, -1e4), dirV).intersectObject(bodyMeshObj)[0] : null;
+  // Nor is one the section has cut away, and the cut-away material in front no longer hides an edge.
+  for (const cd of cands.sort((x, y) => x.pd - y.pd).filter((c) => !S.section || secPlane.distanceToPoint(c.wq) >= -1e-6).slice(0, 8)) {
+    const hit = bodyMeshObj ? keptHit(new THREE.Raycaster(cd.wq.clone().addScaledVector(dirV, -1e4), dirV).intersectObject(bodyMeshObj)) : null;
     if (!hit || hit.distance >= 1e4 - Math.max(span * 2e-3, 1e-3)) { best = cd; break; }
   }
   if (best) delete best.wq; return withDist ? best : best?.edge || null;
@@ -4316,6 +4351,13 @@ function toggleSection() {
     if (body && onSomeFace(body, { o: [0, 0, 0], n })) { body.computeBoundingBox(); const c = body.boundingBox.getCenter(new THREE.Vector3()); off = +V3(n).dot(c).toFixed(2); if (onSomeFace(body, { o: V3(n).multiplyScalar(off).toArray(), n })) off += 0.01; }
     S.section = { plane: 'front', off, flip: false }; }
   renderSectionBar(); applySection();
+}
+// Hover and selection highlights are cut by the section like the part is: otherwise a face hidden by the cut lit up
+// in mid-air. They are rebuilt all the time, so their materials are brought in line just before each frame.
+const SEC_CLIP = [secPlane];
+function clipHighlights() {
+  const cp = S.section ? SEC_CLIP : null;
+  for (const g of [groups.hover, selFaceGroup, selEdgeGroup]) g.traverse((o) => { for (const m of [o.material].flat()) if (m && (m.clippingPlanes || null) !== cp) { m.clippingPlanes = cp; m.needsUpdate = true; } });
 }
 // Picking ignores what the section has cut away.
 const keptHit = (hits) => (S.section ? hits.find((h2) => secPlane.distanceToPoint(h2.point) >= -1e-6) : hits[0]);
@@ -7364,7 +7406,7 @@ function projectFromJSON(o) {
 }
 function leaveCurrentDoc() {
   // Each document keeps its view and the sketch that was open, for when it is opened again.
-  { const ent0 = activeEntry(); if (ent0 && S.mode) Object.defineProperty(ent0, '_view', { value: { cam: camState(), editing: S.editing || null }, configurable: true, writable: true, enumerable: false }); }
+  { const ent0 = activeEntry(); if (ent0 && S.mode) Object.defineProperty(ent0, '_view', { value: { cam: camState(), editing: S.editing || null, section: S.section ? { ...S.section } : null }, configurable: true, writable: true, enumerable: false }); }
   if (S.editing) exitSketch(); if (S.measure) closeMeasure(); if (S.pm) closePM(true);
   const ent = activeEntry(); if (ent) { if (S.mode !== 'import') ent.data = S.doc; Object.defineProperty(ent, '_hist', { value: { undo: S.undo, redo: S.redo, last: lastSaved }, configurable: true, writable: true, enumerable: false }); }
 }
@@ -7379,12 +7421,14 @@ function enterDoc() {
   const ent = activeEntry(); S.sel.clear(); S.selEdges = []; selEdgeGroup.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
   S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
+  // The section belongs to the document it was made in: another part opens whole, and coming back finds the cut as it was.
+  S.section = (ent.kind !== 'drw' && ent._view?.section) || null; if (ent.kind === 'drw') { renderSectionBar(); applySection(); }
   if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); return; }
   if (S.ctx && S.ctx.doc !== ent.id) S.ctx = null; drawContext();
   if (ent.kind === 'part') { for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk); asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); if (!lastSaved) pushUndo(); }
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
-  renderDocTabs(); fitView();
+  renderDocTabs(); fitView(); renderSectionBar(); applySection();
   const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
 }
 function openProject(p) { S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
@@ -7858,7 +7902,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && S.mode === 'part' && !S.editing && !S.measure && !S.pickSketch && S.lastCmd) { e.preventDefault(); setHint(`Повтор: ${S.lastCmd.label}`); S.lastCmd.fn(); return; }
   if (e.key === 'Enter' && S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
   if (S.mode === 'asm') {
-    if (k === 'f') return fitView();
+    if (k === 'f') return fitAnimated();
     if (k === 'i') return cmdInsert();
     if (k === 'm') return S.pm?.kind === 'mate' ? closePM() : cmdMate();
     // Delete removes what was picked last: a mate selected in the tree, not the component picked before it.
@@ -7866,11 +7910,11 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'Delete' && S.asmSel) { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) asmDeleteComp(c); }
     return;
   }
-  if (S.mode === 'import') { if (k === 'f') return fitView(); if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); return; }
+  if (S.mode === 'import') { if (k === 'f') return fitAnimated(); if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); return; }
   if (S.mode === 'drw') { if (k === 'd') { S.drwTool = S.drwTool ? null : { picks: [] }; renderTools(); setHint(S.drwTool ? drwToolHint() : ''); } return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.editing) { e.preventDefault(); deleteSelection(); return; }
   if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:') && !S.pm) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
-  if (k === 'f') return fitView();
+  if (k === 'f') return fitAnimated();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
   if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase() && (t !== 'fix' || [...S.sel].every((x) => x.startsWith('p:')))); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
   if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); if (k === 'e' || k === 'x') { if (S.draw) endDrawing(); return cmdFeature('extrude', k === 'e' ? 'add' : 'cut'); } }
