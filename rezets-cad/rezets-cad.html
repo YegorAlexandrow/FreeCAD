@@ -2686,6 +2686,7 @@ const circleSegs = (cx, cy, r, a0, sw) => { const N = 64, out = []; for (let i =
 function drawClick(m) {
   const sk = editSk(); if (!S.draw || !S.draw.sn) drawMove(m);
   const D = S.draw; const sn = D.sn; const t = S.tool; const pending = [];
+  if (!D.stage && !D.pts?.length) S.lastDrawn = { f: S.editing, nid0: D.nid0 ?? sk.nid };
   if (t === 'point') { const id = snapToPoint(sk, sn.kind === 'pt' ? { ...sn, kind: null } : sn, pending); sk.pts[id].free = true; sk.pts[id].hole = true; addRelations(sk, pending); commitSketch(); return; }
   if (t === 'line') {
     if (D.stage === 0) { D.start = snapToPoint(sk, sn, pending); D.first = D.start; D.newPts = [D.start]; D.pending = pending; addRelations(sk, pending); D.stage = 1; refreshSketch(true); return; }
@@ -3091,7 +3092,10 @@ function showUnderDefined() {
   const why = explainFree(sk, S.analysis);
   toast(`Не определено: ${S.sel.size} ${plural(S.sel.size, 'объект', 'объекта', 'объектов')}, они выделены. ${why[0] || ''}`, 'info');
 }
-function toggleConstruction() { const sk = editSk(); let any = false; for (const k of S.sel) if (k.startsWith('e:') && sk.ents[k.slice(2)]) { const e = sk.ents[k.slice(2)]; e.constr = !e.constr; any = true; } if (any) commitSketch(); else toast('Выделите линии или окружности, чтобы сделать их вспомогательными', 'info'); }
+// With nothing selected, G turns what was just drawn (the whole last chain) into construction geometry.
+function toggleConstruction() { const sk = editSk(); let any = false;
+  const sel = S.sel.size || !S.lastDrawn || S.lastDrawn.f !== S.editing ? S.sel : new Set(Object.keys(sk.ents).filter((id) => /^\d+$/.test(id) && +id >= S.lastDrawn.nid0 && !sk.ents[id].ext).map((id) => 'e:' + id));
+  for (const k of sel) if (k.startsWith('e:') && sk.ents[k.slice(2)]) { const e = sk.ents[k.slice(2)]; e.constr = !e.constr; any = true; } if (any) commitSketch(); else toast('Выделите линии или окружности, чтобы сделать их вспомогательными', 'info'); }
 
 // ---------------- sketch tools: trim, fillet, offset, mirror, slot, polygon ----------------
 S.toolOpt = { filletR: 5, polySides: 6, offsetD: 5, offsetFlip: false };
