@@ -3963,6 +3963,10 @@ function facePrism(body, n, at, h) {
 // and length (or on the same line), the nearest to where it was.
 function followEdges(f, body, cyls) {
   const topo = edgeTopology(body, cyls); const tol = 1e-3;
+  // An edge still on the body keeps it; the others follow only edges nobody holds, so a corner moved away and back
+  // does not leave two stored edges on one and a corner without its fillet for good.
+  const onLine = (e, [a, b]) => { const d = b.clone().sub(a); const L2 = d.lengthSq(); if (L2 < 1e-12) return false; const on = (P) => { const t = P.clone().sub(a).dot(d) / L2; return t > -1e-4 && t < 1 + 1e-4 && P.clone().sub(a).addScaledVector(d, -t).length() < tol; }; return on(V3(e.a)) && on(V3(e.b)); };
+  const held = new Set(); for (const e of f.edges) if (e.t !== 'circle') topo.lines.forEach((l, i) => { if (onLine(e, l)) held.add(i); });
   f.edges = f.edges.map((e) => {
     if (e.t === 'circle') {
       const C = V3(e.c), N = V3(e.n || [0, 0, 1]).normalize(); const onAxis = topo.circles.filter((c) => Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6 && c.c.clone().sub(C).cross(N).length() < tol);
@@ -3983,11 +3987,11 @@ function followEdges(f, body, cyls) {
     // The two faces meeting at an edge (their normals) tell a top edge from the bottom one at the same distance.
     const sig = (a, b) => { try { return edgeFaceNormals(body, a, b).map((n) => n.toArray().map((v) => Math.round(v * 1e3)).join(',')).sort().join('|'); } catch { return ''; } };
     if (topo.lines.some(within)) return e.sig ? e : { ...e, sig: sig(A, B) };
-    let par = topo.lines.filter(([a, b]) => { const d = b.clone().sub(a); return d.length() > 1e-9 && Math.abs(d.clone().normalize().dot(dir)) > 1 - 1e-6; });
+    let par = topo.lines.filter((l, i) => !held.has(i)).filter(([a, b]) => { const d = b.clone().sub(a); return d.length() > 1e-9 && Math.abs(d.clone().normalize().dot(dir)) > 1 - 1e-6; });
     if (e.sig) { const same = par.filter(([a, b]) => sig(a, b) === e.sig); if (same.length) par = same; }
     const near = (list) => list.sort((p, q) => p[0].clone().add(p[1]).multiplyScalar(0.5).distanceTo(M) - q[0].clone().add(q[1]).multiplyScalar(0.5).distanceTo(M))[0];
     const hit = near(par.filter(([a, b]) => Math.abs(a.distanceTo(b) - len) < tol)) || near(par.filter(([a]) => a.clone().sub(A).cross(dir).length() < tol));
-    return hit ? { ...e, a: hit[0].toArray(), b: hit[1].toArray() } : e;
+    if (hit) held.add(topo.lines.indexOf(hit)); return hit ? { ...e, a: hit[0].toArray(), b: hit[1].toArray() } : e;
   });
 }
 function applyEdgeFeature(f, body, cyls) {
@@ -3996,7 +4000,7 @@ function applyEdgeFeature(f, body, cyls) {
   // and the feature says how many were lost.
   let out = body; let lost = 0;
   for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
-  if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление' : 'фаска'} сделана. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
+  if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление сделано' : 'фаска сделана'}. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
   return out;
 }
 const edgeId = (e) => (e.t === 'line' ? 'l' + [...e.a, ...e.b].map((v) => v.toFixed(3)).join(',') : 'c' + [...e.c, e.r].map((v) => v.toFixed(3)).join(','));
