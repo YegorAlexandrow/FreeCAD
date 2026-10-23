@@ -5132,6 +5132,9 @@ function innerOffsetBody(body, t, open) {
 }
 function applyShell(f, body, cyls) {
   if (!body) throw new Error('Сначала создайте тело'); if (!(f.t > 0)) throw new Error('Задайте толщину');
+  if (f.faces?.length) { const pos = body.getAttribute('position'); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); let kept = false;
+    for (let i = 0; i < pos.count && !kept; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = b.clone().sub(a).cross(c.clone().sub(a)); if (n.lengthSq() < 1e-18) continue; n.normalize(); const d = n.dot(a); if (!f.faces.some((x) => onFacePlane(n, d, x))) kept = true; }
+    if (!kept) throw new Error('Нельзя удалить все грани: оставьте хотя бы одну'); }
   const inner = innerOffsetBody(body, f.t, f.faces || []); const vb = geoVolume(body), vi = geoVolume(inner);
   if (!(vi > 0) || vi >= vb) throw new Error('Толщина слишком большая для этой детали');
   const out = boolean(body, inner, SUBTRACTION); const vo = geoVolume(out);
