@@ -4040,8 +4040,9 @@ function renderSweepLoftPM() {
 // in ГОСТ 2.305: top view below the front view, view from the left to its right), visible and
 // hidden lines, silhouettes of curved faces, title block, dimensions, SVG and print.
 // ============================================================================================
-const SHEETS = { A4: [297, 210], A3: [420, 297], A2: [594, 420] };
-const STD_SCALES = [10, 5, 4, 2.5, 2, 1, 1 / 2, 1 / 2.5, 1 / 4, 1 / 5, 1 / 10, 1 / 20, 1 / 50];
+// ГОСТ 2.301: A4 stands upright; the larger sheets lie or stand. Scales after ГОСТ 2.302.
+const SHEETS = { A4: [210, 297], 'A4 горизонтально': [297, 210], A3: [420, 297], 'A3 вертикально': [297, 420], A2: [594, 420], A1: [841, 594], A0: [1189, 841] };
+const STD_SCALES = [50, 40, 20, 10, 5, 4, 2.5, 2, 1, 1 / 2, 1 / 2.5, 1 / 4, 1 / 5, 1 / 10, 1 / 15, 1 / 20, 1 / 25, 1 / 40, 1 / 50, 1 / 75, 1 / 100, 1 / 200];
 const scaleText = (s) => (s >= 1 ? `${fmt(s)}:1` : `1:${fmt(1 / s)}`);
 const DRW_VIEWS = {
   front: { label: 'Главный вид', R: [1, 0, 0], U: [0, 1, 0], D: [0, 0, 1] },
@@ -4143,16 +4144,22 @@ function layoutDrawing(drw) {
   const [W, H] = SHEETS[drw.sheet] || SHEETS.A4; const fx0 = 20, fy0 = 5, fx1 = W - 5, fy1 = H - 5; const gap = 18;
   const w = (k) => views[k].box.umax - views[k].box.umin, hgt = (k) => views[k].box.vmax - views[k].box.vmin;
   const availW = fx1 - fx0 - 3 * gap, availH = fy1 - fy0 - 3 * gap - 10;
-  // With the isometric view the three views share the width with it when it does not fit above the title block.
-  let fit = Math.min(availW / (w('front') + w('left') + (views.iso ? w('iso') : 0) + (views.iso ? gap : 0) / 1), availH / (hgt('front') + hgt('top')));
-  if (views.iso) fit = Math.max(fit, Math.min(availW / (w('front') + w('left')), availH / (hgt('front') + hgt('top'))) * 0.7);
+  // The scale is chosen for the three views; the isometric one takes the room left over, at a smaller scale of its own
+  // if it must (it used to shrink the whole sheet to 1:2 for itself).
+  const fit = Math.min(availW / (w('front') + w('left')), availH / (hgt('front') + hgt('top')));
   const scale = drw.scale || STD_SCALES.find((s) => s <= fit) || STD_SCALES[STD_SCALES.length - 1];
   const x0 = fx0 + gap, y0 = fy0 + gap + 6; const pos = {};
   pos.front = { x: x0, y: y0 }; pos.left = { x: x0 + w('front') * scale + gap, y: y0 }; pos.top = { x: x0, y: y0 + hgt('front') * scale + gap };
-  if (views.iso) { const xi = pos.left.x + w('left') * scale + gap; const isoW = w('iso') * scale, isoH = hgt('iso') * scale; if (xi + isoW <= fx1 - 4 && y0 + isoH <= fy1 - 55 - 8) pos.iso = { x: xi, y: y0 }; else { const yi = pos.top.y; const xi2 = pos.top.x + w('top') * scale + gap; if (xi2 + isoW <= fx1 - 4 && yi + isoH <= fy1 - 55 - 8) pos.iso = { x: xi2, y: yi }; else delete views.iso; } }
+  let isoScale = null, isoDropped = false;
+  if (views.iso) {
+    const yb = fy1 - 55 - 8, xr = fx1 - 4; const xi = pos.left.x + w('left') * scale + gap, xi2 = pos.top.x + w('top') * scale + gap, ybelow = pos.top.y + hgt('top') * scale + gap;
+    const spots = [[xi, y0, xr - xi, yb - y0], [xi2, pos.top.y, xr - xi2, yb - pos.top.y], [x0, ybelow, (fx1 - 185) - 4 - x0, fy1 - 4 - ybelow], [x0, ybelow, xr - x0, yb - ybelow]];
+    let best = null; for (const [x, y, W2, H2] of spots) { if (W2 <= 0 || H2 <= 0) continue; const f = Math.min(W2 / w('iso'), H2 / hgt('iso')); const sc = Math.min(scale, STD_SCALES.find((q) => q <= f) || 0); if (sc > 0 && (!best || sc > best.sc)) best = { x, y, sc }; }
+    if (best && best.sc >= scale / 4) { pos.iso = { x: best.x, y: best.y }; if (best.sc !== scale) isoScale = best.sc; } else { delete views.iso; isoDropped = true; }
+  }
   // A view past the frame or over the title block at the chosen scale is reported, not silently cut by the sheet's edge.
   const overflow = ['front', 'top', 'left'].filter((k) => { const X1 = pos[k].x + w(k) * scale, Y1 = pos[k].y + hgt(k) * scale; return X1 > fx1 + 0.01 || Y1 > fy1 + 0.01 || (X1 > fx1 - 185 && Y1 > fy1 - 55); });
-  return { views, pos, scale, W, H, frame: [fx0, fy0, fx1, fy1], asm: docEntry(drw.src)?.kind === 'asm', overflow };
+  return { views, pos, scale, isoScale, isoDropped, W, H, frame: [fx0, fy0, fx1, fy1], asm: docEntry(drw.src)?.kind === 'asm', overflow };
 }
 // Paper coordinates of a model point in a view.
 function toPaper(L, key, w) { const v = L.views[key]; const p = V3(w); const u = p.dot(V3(v.R)), vv = p.dot(V3(v.U)); return [L.pos[key].x + (u - v.box.umin) * L.scale, L.pos[key].y + (v.box.vmax - vv) * L.scale]; }
@@ -4202,7 +4209,7 @@ function drawingSvg(drw, L) {
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}">`, `<rect width="${W}" height="${H}" fill="#fff"/>`);
   parts.push(`<rect x="${fx0}" y="${fy0}" width="${fx1 - fx0}" height="${fy1 - fy0}" fill="none" stroke="#000" stroke-width="0.7"/>`);
   for (const [k, v] of Object.entries(L.views)) {
-    if (!L.pos[k]) continue; const map = (u, vv) => [L.pos[k].x + (u - v.box.umin) * L.scale, L.pos[k].y + (v.box.vmax - vv) * L.scale];
+    if (!L.pos[k]) continue; const vsc = k === 'iso' && L.isoScale ? L.isoScale : L.scale; const map = (u, vv) => [L.pos[k].x + (u - v.box.umin) * vsc, L.pos[k].y + (v.box.vmax - vv) * vsc];
     // Pieces that meet end to end are written as one polyline: a dashed line restarts its pattern at every «M», and
     // a hidden curve made of 0.3 mm pieces would come out solid.
     const path = (segs) => { const key = (x, y) => `${Math.round(x * 1e3)},${Math.round(y * 1e3)}`; const at = new Map(); const used = new Uint8Array(segs.length);
@@ -4283,7 +4290,7 @@ function renderDrawingPanel() {
   const chk = (label, key) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!drw[key], onchange: (e) => { drw[key] = e.target.checked; pushUndo(); drwRefresh(); } }), label);
   const author = h('input', { type: 'text', value: drw.author || '', id: 'drwAuthor' }); author.onchange = () => { drw.author = author.value; pushUndo(); drwRefresh(); }; author.addEventListener('keydown', (e) => e.stopPropagation());
   side.append(h('div', { class: 'sec-h' }, h('span', {}, activeEntry().name), h('span', { class: 'meta' }, 'чертёж')),
-    h('div', { class: 'grp' }, h('label', { class: 'field' }, h('span', {}, 'Модель'), sel), h('label', { class: 'field' }, h('span', {}, 'Формат'), sheet), h('label', { class: 'field' }, h('span', {}, 'Масштаб'), sc), drwLayout?.overflow?.length ? h('div', { class: 'note', style: 'color:var(--bad)' }, `Виды не помещаются на лист ${drw.sheet} в масштабе ${scaleText(drwLayout.scale)}: возьмите формат больше или масштаб мельче`) : null, h('label', { class: 'field' }, h('span', {}, 'Разработал'), author)),
+    h('div', { class: 'grp' }, h('label', { class: 'field' }, h('span', {}, 'Модель'), sel), h('label', { class: 'field' }, h('span', {}, 'Формат'), sheet), h('label', { class: 'field' }, h('span', {}, 'Масштаб'), sc), drwLayout?.overflow?.length ? h('div', { class: 'note', style: 'color:var(--bad)' }, `Виды не помещаются на лист ${drw.sheet} в масштабе ${scaleText(drwLayout.scale)}: возьмите формат больше или масштаб мельче`) : null, drwLayout?.isoDropped && drw.iso ? h('div', { class: 'note' }, 'Изометрии не хватило места на листе: возьмите формат больше или масштаб мельче') : null, drwLayout?.isoScale ? h('div', { class: 'note' }, `Изометрия в масштабе ${scaleText(drwLayout.isoScale)}`) : null, h('label', { class: 'field' }, h('span', {}, 'Разработал'), author)),
     h('div', { class: 'grp' }, chk('Изометрия', 'iso'), chk('Невидимые линии', 'hidden'), chk('Габаритные размеры и диаметры', 'auto'),
       h('div', { class: 'note' }, `Своих размеров: ${drw.dims.length}`), drw.dims.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { drw.dims.pop(); pushUndo(); drwRefresh(); } }, 'Убрать последний'), h('button', { class: 'chip', onclick: () => { drw.dims = []; pushUndo(); drwRefresh(); } }, 'Убрать все')) : null));
 }
