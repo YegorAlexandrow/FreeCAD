@@ -4344,7 +4344,7 @@ function compColorMenu(c, x, y) { colorPopover(x, y, c.color, (hex) => { c.color
 // latest revisions of every document are kept. The browser copy (IndexedDB) stays as a cache
 // and for working offline; on start the newer of the two wins.
 // ============================================================================================
-const CLOUD = { db: null, uid: null, state: 'local', meta: null, lastHash: new Map(), saving: false, again: false, downloads: null, conflict: false };
+const CLOUD = { db: null, uid: null, state: 'local', meta: null, unreadable: new Set(), lastHash: new Map(), saving: false, again: false, downloads: null, conflict: false };
 const CHUNK = 90000; const KEEP_REVS = 3;
 const hashStr = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ':' + s.length; };
 const docToStore = (d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.kind === 'import' ? { ...d.data, pos: b64.enc(d.data.pos), nrm: d.data.nrm ? b64.enc(d.data.nrm) : null } : d.data });
@@ -4358,13 +4358,19 @@ function setCloudState(st, note) {
 }
 const metaRef = () => CLOUD.db.doc(`data/users/${CLOUD.uid}/project`);
 const chunkCol = () => metaRef().collection('chunks');
+// What this browser last had in step with the cloud: the cloud's save time then, and whether the browser copy has
+// changed since. On opening, a cloud copy saved elsewhere meanwhile and local changes not yet uploaded mean asking,
+// not picking the newer clock (that silently threw away edits made offline, or another window's work after a conflict).
+const SYNC = { get() { try { return JSON.parse(localStorage.getItem('rezets-sync') || 'null'); } catch { return null; } }, set(v) { try { localStorage.setItem('rezets-sync', JSON.stringify(v)); } catch { /* storage unavailable */ } } };
 async function cloudInit() {
   try {
     if (!window.claude?.use) return null;
     const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]); CLOUD.downloads = await window.claude.use('downloads');
     if (!db || !user) return null; const uid = await user.id(); if (!uid) return null;
     CLOUD.db = db; CLOUD.uid = uid;
-    const snap = await metaRef().get(); CLOUD.meta = snap.exists ? snap.data() : null; return CLOUD.meta;
+    // The first read is timed and tried again: one that never answered left «Загружаю из облака…» up for good.
+    let snap = null; for (let k = 0; k < 3 && !snap; k++) { try { snap = await dbCall(metaRef().get(), 20000); } catch (e) { if (k === 2) throw e; } }
+    CLOUD.meta = snap.exists ? snap.data() : null; CLOUD.initAt = Date.now(); return CLOUD.meta;
   } catch (e) { console.warn('cloud init', e); CLOUD.db = null; return null; }
 }
 async function loadRev(docMeta, rev) {
@@ -4382,7 +4388,9 @@ async function cloudLoadProject(meta) {
     let o = null; for (const rev of dm.revs || []) { try { o = await loadRev(dm, rev); break; } catch (e) { console.warn('rev', dm.id, rev.rev, e); fellBack++; } }
     // A document that cannot be read at all fails the whole load: a project opened without it would be
     // saved back without it, and the document would be gone from the cloud.
-    if (!o) throw new Error(`«${dm.name}» не загрузился`);
+    // A document that can't be read at all is left out of this session but kept in the cloud as it is (saves carry
+    // its entry over), instead of the whole project failing to open on a new device.
+    if (!o) { CLOUD.unreadable.add(dm.id); toast(`«${dm.name}» не загрузился из облака. Остальные документы открыты, он сохранён в облаке как был`, 'err'); continue; }
     docs.push(docFromStore(o)); CLOUD.lastHash.set(dm.id, (dm.revs.find((r) => r.hash) || {}).hash);
   }
   if (fellBack) toast(`Часть документов восстановлена из предыдущей версии (${fellBack})`, 'warn');
@@ -4414,7 +4422,8 @@ async function cloudSave() {
   try {
     // Someone saved after us (another tab or device): stop rather than overwrite their work.
     const cur = await dbCall(metaRef().get()); const curMeta = cur.exists ? cur.data() : null;
-    if (curMeta && CLOUD.meta && curMeta.savedAt > CLOUD.meta.savedAt && curMeta.writer !== CLOUD.writer) { CLOUD.conflict = true; setCloudState('conflict'); toast('Проект изменён в другом окне. Перезагрузите страницу, иначе изменения здесь не попадут в облако', 'err'); return; }
+    // With nothing read from the cloud yet (it was empty at start, or the first save failed) a project another device saved since counts too.
+    if (curMeta && curMeta.writer !== CLOUD.writer && (CLOUD.meta ? curMeta.savedAt > CLOUD.meta.savedAt : curMeta.savedAt > (CLOUD.initAt || 0))) { CLOUD.conflict = true; setCloudState('conflict'); toast('Проект изменён в другом окне. Перезагрузите страницу, иначе изменения здесь не попадут в облако', 'err'); return; }
     const prev = new Map((curMeta?.docs || []).map((d) => [d.id, d])); const docs = []; const drop = []; const puts = [];
     // Chunks written by a save that did not finish (it failed or the tab closed) are named in the meta's `pending`;
     // whatever no revision took is removed here, otherwise every failed save of a big model leaks megabytes.
@@ -4437,9 +4446,13 @@ async function cloudSave() {
     if (puts.length && cur.exists) await dbCall(metaRef().set({ ...curMeta, pending: puts.map(({ prefix, n }) => ({ prefix, n })) }));
     try { for (const p of puts) for (let i = 0; i < p.n; i++) await dbCall(chunkCol().doc(`${p.prefix}~${i}`).set({ s: p.json.slice(i * CHUNK, (i + 1) * CHUNK) })); }
     catch (e) { for (const p of puts) for (let i = 0; i < p.n; i++) chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {}); throw e; }
-    for (const [id, old] of prev) if (!docs.some((d) => d.id === id)) for (const r of old.revs || []) drop.push([id, r]);
+    for (const [id, old] of prev) if (!docs.some((d) => d.id === id)) { if (CLOUD.unreadable.has(id)) { docs.push(old); continue; } for (const r of old.revs || []) drop.push([id, r]); }
+    // Nothing changed but the open document (a tab where the project is only looked at): no write, so that tab does
+    // not make the one where it is edited stop on «changed in another window».
+    const same = curMeta && !puts.length && !drop.length && JSON.stringify([curMeta.name, curMeta.nid, curMeta.docs]) === JSON.stringify([S.project.name, S.project.nid, docs]);
+    if (same) { CLOUD.meta = curMeta; SYNC.set({ cloud: curMeta.savedAt, dirty: false }); setCloudState('saved'); return; }
     const meta = { version: 1, name: S.project.name, active: S.project.active, nid: S.project.nid, docs, savedAt: Date.now(), writer: CLOUD.writer };
-    await dbCall(metaRef().set(meta)); CLOUD.meta = meta;
+    await dbCall(metaRef().set(meta)); CLOUD.meta = meta; SYNC.set({ cloud: meta.savedAt, dirty: false });
     const keep = new Set(); for (const dm of docs) for (const r of dm.revs) { keep.add(`${dm.id}~${r.rev}`); if (r.geo) keep.add(geoPrefix(dm.id, r.geo.key)); }
     const gone = new Set();
     for (const [id, r] of drop) {
@@ -6644,7 +6657,7 @@ function saveProjectSoon() {
   saveTimer = setTimeout(async () => {
     if (!S.project) return; const ent = activeEntry(); if (ent && (S.mode === 'part' || S.mode === 'asm')) ent.data = S.doc;
     const plain = { name: S.project.name, active: S.project.active, nid: S.project.nid, savedAt: Date.now(), docs: S.project.docs.map((d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.data })) };
-    const ok = await idbPut('project', plain);
+    const ok = await idbPut('project', plain); if (CLOUD.db && S.touched) SYNC.set({ ...(SYNC.get() || {}), dirty: true });
     if (!ok) try { localStorage.setItem('rezets-cad-doc', JSON.stringify(S.doc)); } catch { /* storage unavailable */ }
     if (SRV.on) serverSaveSoon(); else cloudSaveSoon();
   }, 400);
@@ -7120,7 +7133,9 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
   // goes up to the cloud: an older browser copy must never be saved over newer work there.
   CLOUD.blocked = true;
   const meta = await cloudInit(); if (CLOUD.db && CLOUD.blocked) setCloudState('loading'); if (!CLOUD.db) { setCloudState('local'); return; }
-  if (meta && (!hadLocal || (meta.savedAt || 0) > (proj.savedAt || 0))) {
+  const sy = SYNC.get(); const known = !!(sy && meta && hadLocal && sy.cloud != null); const cloudMoved = known && meta.savedAt > sy.cloud; const localDirty = known && sy.dirty;
+  if (known && localDirty && !cloudMoved) { CLOUD.meta = meta; CLOUD.blocked = false; setCloudState('saving'); cloudSave(); return; }
+  if (meta && (!hadLocal || (meta.savedAt || 0) > (proj.savedAt || 0) || (cloudMoved && localDirty))) {
     let cp = null;
     try { cp = await cloudLoadProject(meta); }
     catch (e) {
@@ -7128,16 +7143,17 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
       toast(`Не удалось загрузить проект из облака (${e.message}). Открыта копия из браузера, она старее облачной; в облако она не сохраняется, чтобы не затереть новое. Перезагрузите страницу`, 'err', [{ label: 'Перезагрузить', act: () => location.reload() }]); return;
     }
     // Work started on the browser copy while the cloud was loading is not thrown away silently.
-    if (S.touched) {
+    if (S.touched || (cloudMoved && localDirty && cp)) {
       CLOUD.meta = meta; setCloudState('error', 'В облаке более новая версия');
       // The choice waits in a dialog (a toast went away in seconds and left the cloud stopped for good); closed
       // unanswered, it opens again from the save badge.
-      const ask = () => showModal('В облаке более новая версия', 'Пока проект грузился из облака, вы уже начали менять копию из браузера. Какую оставить? Пока не выбрано, в облако ничего не сохраняется.', null, [
+      const why = S.touched ? 'Пока проект грузился из облака, вы уже начали менять копию из браузера.' : 'В этом браузере есть изменения, которые не успели попасть в облако, а в облаке тем временем сохранили другую версию (с другого устройства или из другого окна).';
+      const ask = () => showModal('В облаке более новая версия', why + ' Какую оставить? Пока не выбрано, в облако ничего не сохраняется.', null, [
         ['Открыть облачную', async () => { closeModal(); CLOUD.choice = null; openProject(cp); await idbPut('project', { ...cp }); CLOUD.blocked = false; setCloudState('saved'); }],
         ['Оставить эту и сохранить в облако', () => { closeModal(); CLOUD.choice = null; CLOUD.meta = meta; CLOUD.blocked = false; cloudSave(); }], ['Закрыть', closeModal]]);
       CLOUD.choice = ask; ask(); return;
     }
-    if (cp.docs.length) { openProject(cp); await idbPut('project', { ...cp }); toast('Проект загружен из облака', 'info'); }
+    if (cp.docs.length) { openProject(cp); await idbPut('project', { ...cp }); SYNC.set({ cloud: meta.savedAt, dirty: false }); toast('Проект загружен из облака', 'info'); }
     CLOUD.blocked = false; setCloudState('saved');
   } else { CLOUD.meta = meta; CLOUD.blocked = false; setCloudState('saving'); cloudSave(); }
 })();
