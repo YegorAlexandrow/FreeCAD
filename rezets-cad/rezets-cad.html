@@ -7233,7 +7233,7 @@ function renderTree() {
   const rb = rollbackIndex(); const consumed = new Set(S.doc.features.filter((f) => f.sketch).map((f) => f.sketch));
   const featRow = (f, i, child) => {
     const off = i >= rb || f.suppressed; const nd = S.dangling.get(f.id)?.length; const err = S.errors[f.id] || (S.offFace.has(f.id) && 'плоскость эскиза больше не лежит на грани детали: грань сдвинулась. Правый щелчок → «Сменить плоскость…»') || (nd && `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели ${nd === 1 ? 'висит' : 'висят'}: тех рёбер или вершин больше нет. Откройте эскиз и нажмите «Привязать к модели»`);
-    const icon = f.type === 'stepbody' ? ICON.insert : f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude;
+    const icon = featIcon(f);
     const meta = f.type === 'stepbody' ? (docEntry(f.doc)?.name || 'нет модели') : f.type === 'extrude' ? (f.end === 'through' ? 'насквозь' : f.end === 'next' ? 'до следующей' : f.end === 'face' ? 'до грани' : fmt(f.depth) + ' мм') + (f.draft > 0 ? ' ∠' + fmt(f.draft) + '°' : '') : f.type === 'revolve' ? fmt(f.angle) + '°' : f.type === 'fillet' ? 'R' + fmt(f.r) : f.type === 'chamfer' ? fmt(f.d) + ' мм' : f.type === 'plane' ? (f.mid ? 'средняя' : fmt(f.d) + ' мм') : f.type === 'lpattern' ? `${f.n}${f.dir2 ? '×' + f.n2 : ''} шт` : f.type === 'cpattern' ? `${f.n} шт` : f.type === 'hole' ? (f.std ? stdLabel(f.std) : '⌀' + fmt(f.dia)) : f.type === 'shell' ? fmt(f.t) + ' мм' : '';
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i)], ...rollMore(), ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
@@ -7358,7 +7358,31 @@ const numField = (label, id, val, onset, unit = 'мм') => {
   inp.addEventListener('wheel', (e) => { if (document.activeElement !== inp) return; e.preventDefault(); step(e.deltaY < 0 ? 1 : -1, e); }, { passive: false });
   return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
 };
-function renderPM() {
+// Below the panel the feature tree folds out, as SolidWorks' flyout tree: planes and features can be picked from it
+// for what the panel is asking (the sketch plane, a reference plane's base, the mirror plane, features to copy).
+function renderPM() { renderPM0(); if (S.mode === 'part' && S.pm && !S.measure) side.append(flyTree()); }
+const featIcon = (f) => (f.type === 'stepbody' ? ICON.insert : f.type === 'sweep' ? ICON.sweep : f.type === 'loft' ? ICON.loft : f.type === 'shell' ? ICON.shell : f.type === 'hole' ? ICON.hole : PATTERN_TYPES.has(f.type) ? ICON[f.type] : f.type === 'plane' ? ICON.plane : f.type === 'sketch' ? ICON.sketch : f.type === 'revolve' ? ICON.revolve : f.type === 'fillet' ? ICON.fillet : f.type === 'chamfer' ? ICON.chamfer : f.mode === 'cut' ? ICON.cut : ICON.extrude);
+function flyTree() {
+  const pm = S.pm; const f = pm.feature; const rows = [];
+  const pickPlane = (key) => {
+    const spec = key.startsWith('f:') ? { plane: key.slice(2) } : { std: key };
+    if (pm.kind === 'pickPlane') return sketchOnPlane(planeByKey(key));
+    if (f?.type === 'plane') { if (key === 'f:' + f.id) return; const slot = pm.slot || 'base'; f[slot] = spec; if (f.mid && slot === 'base' && !f.base2) pm.slot = 'base2'; renderSide(); rebuild(); return; }
+    if (f?.type === 'mirror') { f.plane = spec; delete f.planeGuessed; if (pm.isNew) pm.pickFor = 'feats'; renderSide(); schedulePreview(); return; }
+    toast('Эта панель не выбирает плоскость', 'info');
+  };
+  const takesFeats = f && ['lpattern', 'cpattern', 'mirror'].includes(f.type);
+  for (const [k, p] of Object.entries(PLANES)) rows.push(h('div', { class: 'row', tabindex: '0', role: 'treeitem', onclick: () => pickPlane(k) }, svg(ICON.plane), h('span', { class: 'nm' }, p.label)));
+  const upto = pm.isNew ? rollbackIndex() : S.doc.features.indexOf(f);
+  for (const x of S.doc.features.slice(0, upto < 0 ? undefined : upto)) {
+    if (x.type === 'sketch' || x === f) continue;
+    const on = takesFeats && f.feats?.includes(x.id);
+    rows.push(h('div', { class: 'row' + (on ? ' sel' : ''), tabindex: '0', role: 'treeitem', onclick: () => (x.type === 'plane' ? pickPlane('f:' + x.id) : takesFeats ? togglePatternSeed(x.id) : toast('Эта панель не выбирает операции', 'info')) }, svg(featIcon(x)), h('span', { class: 'nm' }, x.name)));
+  }
+  const d = h('details', { class: 'grp flytree', open: S.flyOpen || null, ontoggle: (e) => { S.flyOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Дерево конструирования'), h('div', { class: 'tree', role: 'tree' }, rows));
+  return d;
+}
+function renderPM0() {
   side.textContent = ''; const pm = S.pm;
   if (pm.kind === 'pickPlane') {
     side.append(h('div', { class: 'pm' }, pmHeader(pm.replan ? `Плоскость «${featById(pm.replan)?.name}»` : 'Эскиз', ICON.sketch, false),
