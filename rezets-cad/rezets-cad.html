@@ -72,6 +72,19 @@ button { font: inherit; color: inherit; }
 #menu.doclist { min-width: 240px; max-height: min(70vh, 560px); overflow: auto; }
 #menu .dl-h { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg-2); padding: 8px 10px 3px; }
 #menu .dl-row { display: flex; align-items: center; gap: 8px; }
+#menu.doclist.docgrid { width: min(760px, calc(100vw - 24px)); max-height: min(78vh, 680px); padding: 8px; }
+#menu .dl-search { width: 100%; box-sizing: border-box; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; margin-bottom: 4px; }
+#menu .dl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; padding: 2px 2px 6px; }
+#menu .dl-tile { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); cursor: pointer; text-align: left; font: inherit; font-size: 12px; min-width: 0; }
+#menu .dl-tile:hover, #menu .dl-tile:focus-visible { border-color: var(--accent); outline: none; background: var(--panel-2); }
+#menu .dl-tile.cur { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+#menu .dl-thumb { aspect-ratio: 4 / 3; border-radius: 5px; background: var(--panel-2); display: grid; place-items: center; overflow: hidden; color: var(--fg-2); }
+#menu .dl-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+#menu .dl-thumb svg { width: 34px; height: 34px; opacity: .55; }
+#menu .dl-name { display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#menu .dl-name svg { width: 14px; height: 14px; flex: none; color: var(--fg-2); }
+#menu .dl-name span { overflow: hidden; text-overflow: ellipsis; }
+#menu .dl-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); color: var(--fg-2); font-size: 11px; }
 #menu .dl-row svg { width: 15px; height: 15px; flex: 0 0 15px; color: var(--fg-2); }
 #menu .dl-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #menu .dl-row.cur { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
@@ -7424,12 +7437,12 @@ function setHint(text) {
 const menu = $('menu');
 // An item may carry a third element, called with true while the pointer is over it and false after.
 function openMenu(x, y, items) {
-  menu.textContent = ''; menu.onHover = null; delete menu.dataset.kind; menu.classList.remove('doclist');
+  menu.textContent = ''; menu.onHover = null; menu.onkeydown = null; delete menu.dataset.kind; menu.classList.remove('doclist', 'docgrid');
   for (const it of items) { if (!it) { menu.append(h('hr')); continue; } const b = h('button', { onclick: () => { closeMenu(); it[1](); } }, it[0]);
     if (it[2]) { b.addEventListener('pointerenter', () => { menu.onHover?.(false); menu.onHover = it[2]; it[2](true); }); b.addEventListener('pointerleave', () => { it[2](false); menu.onHover = null; }); } menu.append(b); }
   menu.hidden = false; const r = menu.getBoundingClientRect(); menu.style.left = Math.min(x, innerWidth - r.width - 8) + 'px'; menu.style.top = Math.min(y, innerHeight - r.height - 8) + 'px';
 }
-function closeMenu() { menu.hidden = true; delete menu.dataset.kind; menu.classList.remove('doclist'); menu.onHover?.(false); menu.onHover = null; }
+function closeMenu() { menu.hidden = true; delete menu.dataset.kind; menu.classList.remove('doclist', 'docgrid'); menu.onHover?.(false); menu.onHover = null; }
 document.addEventListener('pointerdown', (e) => { if (!menu.hidden && !menu.contains(e.target) && !(menu.dataset.kind === 'docs' && e.target.closest?.('.doccur'))) closeMenu(); });
 
 // Toasts
@@ -7487,6 +7500,7 @@ function projectFromJSON(o) {
   return { name: o.name || 'Проект', active: o.active, nid: o.nid || 100, docs: o.docs.map((d) => ({ ...d, data: d.kind === 'import' ? { ...d.data, pos: b64.dec(d.data.pos, Float32Array), nrm: d.data.nrm ? b64.dec(d.data.nrm, Float32Array) : null } : d.data })) };
 }
 function leaveCurrentDoc() {
+  thumbs.capture();
   // Each document keeps its view and the sketch that was open, for when it is opened again.
   { const ent0 = activeEntry(); if (ent0 && S.mode) Object.defineProperty(ent0, '_view', { value: { cam: camState(), editing: S.editing || null, section: S.section ? { ...S.section } : null }, configurable: true, writable: true, enumerable: false }); }
   if (S.editing) exitSketch(); if (S.measure) closeMeasure(); if (S.pm) closePM(true);
@@ -7510,7 +7524,7 @@ function enterDoc() {
   if (ent.kind === 'part') { for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk); asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); if (!lastSaved) pushUndo(); }
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
-  renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar();
+  renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar(); noteRecent(ent.id);
   const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
 }
 function openProject(p) { S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
@@ -7526,29 +7540,104 @@ function uniqueDocName(base) { let n = base, i = 2; while (S.project.docs.some((
 const docMenuItems = (d, x, y, btn) => [['Переименовать', () => renameDoc(d, btn)], ['Дублировать', () => addDoc(d.kind, d.name, d.kind === 'import' ? { ...clone({ ...d.data, pos: undefined, nrm: undefined }), pos: d.data.pos.slice(), nrm: d.data.nrm?.slice() } : clone(d.data), false)], ...(SRV.on ? [['Прежние версии…', () => serverVersionsMenu(d, x, y)]] : CLOUD.db ? [['Прежние версии…', () => docVersionsMenu(d, x, y)]] : []), null, ['Удалить', () => deleteDoc(d)]];
 function renderDocTabs() {
   const box = $('docTabs'); box.textContent = ''; const d = activeEntry(); if (!d) return;
-  const b = h('button', { class: 'doctab doccur', 'aria-selected': 'true', 'aria-haspopup': 'true', title: 'Документы проекта. Двойной щелчок: переименовать' }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name), h('b', { class: 'caret' }, '▾'));
+  const b = h('button', { class: 'doctab doccur', 'aria-selected': 'true', 'aria-haspopup': 'true', title: 'Документы проекта (Ctrl+O). Двойной щелчок: переименовать' }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name), h('b', { class: 'caret' }, '▾'));
   b.onclick = () => openDocList(b);
   b.ondblclick = () => { closeMenu(); renameDoc(d, b); };
   b.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, b)); };
   box.append(b);
 }
 const GROUP_NAME = { part: 'Детали', asm: 'Сборки', import: 'Импорт (STEP, STL)', drw: 'Чертежи' };
+// Recently opened documents of the project, most recent first: the switcher starts on the one before this, so
+// Ctrl+O and Enter go back and forth between two documents.
+const RECENT_KEY = 'rezets-recent';
+function recentDocs() { try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '{}')[S.project?.name || ''] || []; } catch { return []; } }
+function noteRecent(id) {
+  try { const all = JSON.parse(localStorage.getItem(RECENT_KEY) || '{}'); const k = S.project?.name || ''; all[k] = [id, ...(all[k] || []).filter((x) => x !== id)].slice(0, 12); localStorage.setItem(RECENT_KEY, JSON.stringify(all)); } catch { /* private mode: no recent list */ }
+}
+// Thumbnails of the documents: an isometric picture of each part, import and assembly drawn by a small renderer of
+// its own, so it does not depend on how the main view is turned. Each is kept with a fingerprint of what it shows
+// and redrawn when that changes; they live in localStorage per project and are made one at a time in idle moments.
+const thumbs = (() => {
+  const W = 200, H = 150, KEY = 'rezets-thumbs'; let r = null; const mem = new Map(); const queue = []; let busy = false;
+  const key = (d) => (S.project?.name || '') + '|' + d.id;
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; } };
+  const save = (k, v) => { try { const all = load(); if (v) all[k] = v; else delete all[k]; localStorage.setItem(KEY, JSON.stringify(all)); } catch { /* storage full or blocked: thumbnails stay in memory */ } };
+  const dataOf = (d) => (d.id === S.project.active && S.mode === d.kind ? S.doc : d.data);
+  const sig = (d) => { const x = dataOf(d); return d.kind === 'part' ? hashStr(JSON.stringify([x.features, x.rollback, x.vars, x.color, x.faceColors])) : d.kind === 'asm' ? hashStr(JSON.stringify([x.comps, x.explode?.on])) : d.kind === 'import' ? hashStr(JSON.stringify([x.name, x.zup, x.scale, x.pos?.length])) : null; };
+  const items = (d) => {
+    const active = d.id === S.project.active && S.mode === d.kind;
+    if (d.kind === 'asm') { if (!active) return null; const out = []; asmGroup.updateMatrixWorld(true); asmGroup.traverse((o) => { if (o.isMesh && o.visible && o.geometry && !o.userData.sec) out.push({ geo: o.geometry, matrix: o.matrixWorld.clone(), color: o.material?.color || colors.body }); }); return out; }
+    const geo = active ? S.body : docInfo(d.id)?.geo; return geo ? [{ geo, color: colors.body }] : null;
+  };
+  function draw(list) {
+    if (!list?.length) return null;
+    if (!r) { r = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true }); r.setPixelRatio(1); r.setSize(W, H, false); }
+    const sc = new THREE.Scene(); sc.add(new THREE.HemisphereLight(0xffffff, 0x6b7380, 1.5)); const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(1, 2, 1.5); sc.add(dl); const box = new THREE.Box3(); const mats = [];
+    for (const it of list) { const mat = new THREE.MeshStandardMaterial({ color: it.geo.attributes.color ? 0xffffff : it.color, vertexColors: !!it.geo.attributes.color, metalness: 0.08, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }); mats.push(mat);
+      const m = new THREE.Mesh(it.geo, mat); if (it.matrix) { m.matrixAutoUpdate = false; m.matrix.copy(it.matrix); } sc.add(m); m.updateMatrixWorld(true); box.expandByObject(m);
+      if (it.geo.attributes.position.count < 300000) { const lm = new THREE.LineBasicMaterial({ color: 0x1b2027, transparent: true, opacity: 0.55 }); mats.push(lm); const e = new THREE.LineSegments(new THREE.EdgesGeometry(it.geo, 25), lm); if (it.matrix) { e.matrixAutoUpdate = false; e.matrix.copy(it.matrix); } sc.add(e); } }
+    if (box.isEmpty()) return null;
+    const dir = new THREE.Vector3(1, 0.85, 1.15).normalize(); const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(dir, new THREE.Vector3(), new THREE.Vector3(0, 1, 0)));
+    const inv = new THREE.Matrix4().makeRotationFromQuaternion(q).invert(); const vb = new THREE.Box3(); for (let i = 0; i < 8; i++) vb.expandByPoint(new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).applyMatrix4(inv));
+    const c = vb.getCenter(new THREE.Vector3()); const sz = vb.getSize(new THREE.Vector3()); const half = Math.max(sz.x / 2 / (W / H), sz.y / 2) * 1.12 + 1e-3; const R = box.getBoundingSphere(new THREE.Sphere()).radius;
+    const cam = new THREE.OrthographicCamera(-half * W / H, half * W / H, half, -half, -R * 4 - 1, R * 4 + 1); cam.quaternion.copy(q); cam.position.copy(c.applyQuaternion(q)); cam.updateMatrixWorld();
+    r.render(sc, cam); const url = r.domElement.toDataURL('image/webp', 0.85);
+    sc.traverse((o) => { if (o.isLineSegments) o.geometry.dispose(); }); for (const m of mats) m.dispose(); return url;
+  }
+  // Makes the picture of d now (from what is open) or after the queue; null when there is nothing to show yet.
+  function make(d) { const sg = sig(d); if (sg == null) return null; let url = null; try { url = draw(items(d)); } catch (e) { console.warn('thumb', d.id, e); }
+    if (!url) return null; const v = { sig: sg, url }; mem.set(key(d), v); save(key(d), v); return url; }
+  function get(d, onReady) {
+    const k = key(d); const sg = sig(d); if (sg == null) return null; const v = mem.get(k) || load()[k]; if (v) mem.set(k, v);
+    if (v && v.sig === sg) return v.url;
+    if (onReady && !queue.some((x) => x.d === d)) { queue.push({ d, onReady }); pump(); }
+    return v?.url || null;
+  }
+  function pump() { if (busy || !queue.length) return; busy = true; setTimeout(() => { const { d, onReady } = queue.shift(); const url = S.project.docs.includes(d) ? make(d) : null; busy = false; if (url) onReady(url); pump(); }, 30); }
+  // The open document is pictured as it is left: an assembly can only be drawn while it is open.
+  const capture = () => { const d = activeEntry(); if (d && d.kind !== 'drw' && sig(d) !== (mem.get(key(d)) || load()[key(d)])?.sig) make(d); };
+  return { get, capture, make, drop: (d) => { mem.delete(key(d)); save(key(d), null); }, cancel: () => { queue.length = 0; } };
+})();
 function openDocList(btn) {
   if (!menu.hidden && menu.dataset.kind === 'docs') { closeMenu(); return; }
-  menu.textContent = ''; menu.onHover = null; menu.dataset.kind = 'docs'; menu.classList.add('doclist');
-  for (const kind of ['part', 'asm', 'import', 'drw']) {
-    const ds = S.project.docs.filter((d) => d.kind === kind); if (!ds.length) continue;
-    menu.append(h('div', { class: 'dl-h' }, GROUP_NAME[kind]));
-    for (const d of ds) {
-      const row = h('button', { class: 'dl-row' + (d.id === S.project.active ? ' cur' : ''), title: d.name }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name));
-      row.onclick = () => { closeMenu(); if (d.id !== S.project.active) switchDoc(d.id); };
-      row.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, btn)); };
-      menu.append(row);
+  thumbs.capture();
+  menu.textContent = ''; menu.onHover = null; menu.dataset.kind = 'docs'; menu.classList.add('doclist', 'docgrid');
+  const search = h('input', { type: 'search', class: 'dl-search', placeholder: 'Найти документ', 'aria-label': 'Найти документ' });
+  const body = h('div'); const recent = recentDocs().filter((id) => id !== S.project.active && docEntry(id)).slice(0, 6);
+  const tile = (d) => {
+    const th = h('div', { class: 'dl-thumb' }); const put = (url) => { th.replaceChildren(h('img', { src: url, alt: '' })); };
+    const url = thumbs.get(d, put); if (url) put(url); else th.append(svg(ICON[KIND_ICON[d.kind]]));
+    const b = h('button', { class: 'dl-tile' + (d.id === S.project.active ? ' cur' : ''), title: d.name, 'data-doc': d.id }, th, h('div', { class: 'dl-name' }, svg(ICON[KIND_ICON[d.kind]]), h('span', {}, d.name)));
+    b.onclick = () => { closeMenu(); thumbs.cancel(); if (d.id !== S.project.active) switchDoc(d.id); };
+    b.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); openMenu(e.clientX, e.clientY, docMenuItems(d, e.clientX, e.clientY, btn)); };
+    return b;
+  };
+  const fill = () => {
+    const q = search.value.trim().toLowerCase(); body.textContent = ''; thumbs.cancel();
+    if (!q && recent.length) body.append(h('div', { class: 'dl-h' }, 'Недавние'), h('div', { class: 'dl-grid' }, recent.map((id) => tile(docEntry(id)))));
+    for (const kind of ['part', 'asm', 'import', 'drw']) {
+      const ds = S.project.docs.filter((d) => d.kind === kind && (!q || d.name.toLowerCase().includes(q))); if (!ds.length) continue;
+      body.append(h('div', { class: 'dl-h' }, GROUP_NAME[kind]), h('div', { class: 'dl-grid' }, ds.map(tile)));
     }
-  }
-  menu.append(h('hr'), h('button', { class: 'dl-row', onclick: () => { closeMenu(); $('bAdd').click(); } }, '＋ Новый документ…'));
+    if (!body.childNodes.length) body.append(h('div', { class: 'dl-h' }, 'Ничего не найдено'));
+  };
+  // Arrows move between tiles by their places on screen; Enter opens; typing goes to the search field.
+  menu.onkeydown = (e) => {
+    const tiles = [...menu.querySelectorAll('.dl-tile')]; const cur = document.activeElement?.classList?.contains('dl-tile') ? document.activeElement : null;
+    if (e.key === 'Enter' && document.activeElement === search) { e.preventDefault(); tiles[0]?.click(); return; }
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) { if (cur && e.key.length === 1 && e.key !== ' ' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); search.value += e.key; search.focus(); fill(); } return; }
+    if (!cur) { if (e.key === 'ArrowDown') { e.preventDefault(); tiles[0]?.focus(); } return; }
+    e.preventDefault(); const a = cur.getBoundingClientRect(); const ax = a.left + a.width / 2, ay = a.top + a.height / 2; let best = null;
+    for (const t of tiles) { if (t === cur) continue; const b = t.getBoundingClientRect(); const bx = b.left + b.width / 2, by = b.top + b.height / 2; const dx = bx - ax, dy = by - ay;
+      const ok = e.key === 'ArrowLeft' ? dx < -4 && Math.abs(dy) < a.height / 2 : e.key === 'ArrowRight' ? dx > 4 && Math.abs(dy) < a.height / 2 : e.key === 'ArrowUp' ? dy < -4 : dy > 4;
+      if (!ok) continue; const dist = Math.abs(dx) + Math.abs(dy) * 2; if (!best || dist < best[0]) best = [dist, t]; }
+    if (best) { best[1].focus(); best[1].scrollIntoView({ block: 'nearest' }); } else if (e.key === 'ArrowUp') search.focus();
+  };
+  search.oninput = fill; search.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(); } });
+  fill();
+  menu.append(search, body, h('div', { class: 'dl-foot' }, h('span', {}, 'Ctrl+O: этот список. Стрелки и Enter: выбор'), h('button', { class: 'dl-row', onclick: () => { closeMenu(); $('bAdd').click(); } }, '＋ Новый документ…')));
   menu.hidden = false; const r = btn.getBoundingClientRect(), m = menu.getBoundingClientRect(); menu.style.left = Math.max(8, Math.min(r.left, innerWidth - m.width - 8)) + 'px'; menu.style.top = r.bottom + 4 + 'px';
-  menu.querySelector('.dl-row.cur')?.scrollIntoView({ block: 'nearest' });
+  const first = menu.querySelector('.dl-tile:not(.cur)') || menu.querySelector('.dl-tile'); (first || search).focus(); first?.scrollIntoView({ block: 'nearest' });
 }
 function renameDoc(d, btn) {
   const inp = h('input', { type: 'text', value: d.name, 'aria-label': 'Имя документа' }); btn.replaceChildren(svg(ICON[KIND_ICON[d.kind]]), inp); inp.focus(); inp.select();
@@ -7920,6 +8009,8 @@ window.addEventListener('keydown', (e) => {
   // Esc in a panel field drops what was typed there (it used to apply it on leaving the field) and, as in SolidWorks,
   // cancels the operation; elsewhere it only leaves the field.
   if (typing) { if (e.key === 'Escape' && !e.defaultPrevented) { const t = e.target; if (t.dataset.v0 != null) t.value = t.dataset.v0; t.blur(); if (S.pm && S.mode === 'part' && t.closest('#side .pm')) closePM(); } return; }
+  // In the document switcher the keys move between its tiles, not the view behind it.
+  if (menu.dataset.kind === 'docs' && e.target.closest?.('#menu')) { if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } return; }
   // Enter and Space belong to the focused button or checkbox (pressing it), not to the shortcuts behind it.
   if ((tag === 'BUTTON' || (tag === 'INPUT' && ['checkbox', 'radio', 'button'].includes(e.target.type))) && (e.key === 'Enter' || e.key === ' ')) return;
   if (tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
@@ -7941,6 +8032,8 @@ window.addEventListener('keydown', (e) => {
   // Ctrl+C / Ctrl+V in an assembly: another instance of the copied component, next to it, turned the same way.
   if ((e.ctrlKey || e.metaKey) && S.mode === 'asm' && !S.pm && k === 'c') { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) { S.asmClip = c.doc; S.asmClipT = c.T.slice(); toast(`«${c.name}» скопирован: Ctrl+V вставит ещё один`, 'info'); } return; }
   if ((e.ctrlKey || e.metaKey) && S.mode === 'asm' && !S.pm && k === 'v' && S.asmClip) { e.preventDefault(); if (!docEntry(S.asmClip)) return; asmInsert(S.asmClip); const c = S.doc.comps.at(-1); if (c && S.asmClipT) { const inf = docInfo(c.doc); inf.geo.computeBoundingBox(); const w = inf.geo.boundingBox.getSize(new THREE.Vector3()).length() * 0.6; const T = S.asmClipT.slice(); T[12] += w; T[13] += w * 0.3; c.T = T; c.fixed = false; S.asmSel = c.id; asmRefresh(true); pushUndo(true); } return; }
+  // Ctrl+O: the document switcher with pictures (the browser would offer to open a file).
+  if ((e.ctrlKey || e.metaKey) && k === 'o') { e.preventDefault(); const b = document.querySelector('#docTabs .doccur'); if (b) openDocList(b); return; }
   if ((e.ctrlKey || e.metaKey) && /^[1-8]$/.test(e.key) && S.mode !== 'drw') { e.preventDefault(); viewCmd(VIEW_KEYS[+e.key - 1]); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Escape' && S.pickSketch) { S.pickSketch = null; updateSketchVisuals(); setHint(); requestRender(); return; }
