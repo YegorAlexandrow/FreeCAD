@@ -5185,6 +5185,21 @@ function patternMatrices(f, features) {
 }
 function mirrorPlane(f, features) { const b = f.plane || { std: 'right' }; if (b.std) return PLANES[b.std]; if (b.face) return b.face; const g = features.find((x) => x.id === b.plane); if (!g) throw new Error('Плоскости отражения больше нет. Выберите другую'); return refPlane(g, features); }
 // Places a tool; a reflection also reverses the triangles so the solid stays outward facing.
+// Many copies stay inside Manifold from the first boolean to the last: converting the whole body to and from a mesh
+// for every copy made a pattern of 100 holes take 15 s.
+function patternInManifold(body, tools, mats, op, missed) {
+  if (!MF) return null; const live = []; let A = null;
+  try {
+    A = toManifold(body); const T = tools.map((t) => { const m = toManifold(t); live.push(m); return m; });
+    // All copies are joined first and applied in one boolean; a cut copy whose box clears the body's box misses it.
+    const bb = A.boundingBox(); const copies = [];
+    mats.forEach((M, i) => { let hit = false; for (const t of T) { const B = t.transform(M.elements); live.push(B); copies.push(B); const c = B.boundingBox(); if ([0, 1, 2].every((k) => c.min[k] < bb.max[k] - 1e-9 && c.max[k] > bb.min[k] + 1e-9)) hit = true; }
+      if (op === SUBTRACTION && !hit) missed.add(i); });
+    const U = MF.Manifold.union(copies); live.push(U); const R = op === SUBTRACTION ? A.subtract(U) : A.add(U); A.delete(); A = R;
+    return fromManifold(A);
+  } catch (e) { console.warn('manifold pattern: one copy at a time', e?.message || e); return null; }
+  finally { A?.delete(); for (const m of live) m.delete(); }
+}
 function placeTool(g, M) {
   const t = (g.index ? g.toNonIndexed() : g.clone()); t.applyMatrix4(M);
   if (M.determinant() < 0) { const pos = t.getAttribute('position'); for (let i = 0; i < pos.count; i += 3) { const x = pos.getX(i + 1), y = pos.getY(i + 1), z = pos.getZ(i + 1); pos.setXYZ(i + 1, pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2)); pos.setXYZ(i + 2, x, y, z); } }
@@ -5221,6 +5236,7 @@ function applyPattern(f, body, cyls, features) {
   for (const sd of seeds) {
     if (sd.type !== 'extrude' && sd.type !== 'revolve' && sd.type !== 'hole') throw new Error(`«${sd.name}»: копировать можно вытягивания, вращения и отверстия`);
     const own = []; const tools = sd.type === 'hole' ? holeTool(sd, out, own) : [buildTool(sd, out, own)]; const op = sd.type === 'hole' || sd.mode === 'cut' ? SUBTRACTION : ADDITION;
+    const fast = mats.length >= 4 && patternInManifold(out, tools, mats, op, missed); if (fast) { out = fast; for (const M of mats) for (const c of own) added.push(placeCyl(c, M)); continue; }
     mats.forEach((M, i) => { const v0 = op === SUBTRACTION ? geoVolume(out) : 0; for (const tool of tools) out = boolean(out, placeTool(tool, M), op); for (const c of own) added.push(placeCyl(c, M)); if (op === SUBTRACTION && Math.abs(geoVolume(out) - v0) < 1e-6 * Math.max(1, v0)) missed.add(i); });
   }
   if (!out.getAttribute('position').count) throw new Error('Результат пустой');
