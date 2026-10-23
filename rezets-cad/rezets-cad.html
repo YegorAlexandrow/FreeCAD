@@ -3563,6 +3563,7 @@ function cmdFeature(type, mode) {
   // A planar face picked first: Extrude opens a sketch on it and comes back when it closes (SolidWorks does the same).
   if (!S.editing && !S.pm && S.selectedTree === 'face' && S.pickedFace && (type === 'extrude' || type === 'revolve')) { S.afterSketch = { type, mode }; cmdSketch(); return; }
   const sf = pickSketchForFeature();
+  if (sf && S.doc.features.indexOf(sf) >= rollbackIndex()) { toast(`«${sf.name}» ниже черты отката. Перетащите черту под него`, 'warn'); return; }
   if (!sf) {
     // Every sketch can feed more than one feature: with no unused one, the user picks one, in the tree or in the window.
     // No sketch yet: go straight into one, as SolidWorks does, and come back to this feature when the sketch closes.
