@@ -7276,7 +7276,7 @@ function updateRelBar() {
   const bar = $('relbar'); const sk = editSk();
   const opts = sk && S.tool === 'select' && S.sel.size && !S.drag && !S.box ? relationOptions(sk) : [];
   if (!opts.length || !S.lastClick) { bar.hidden = true; return; }
-  bar.textContent = ''; for (const [t, l, fn] of opts) bar.append(h('button', { title: l + ' (' + REL_KEYS[t] + ')', onclick: () => applyRelation(fn) }, h('b', {}, CON_GLYPH[t] || ''), l, h('kbd', { class: 'k' }, REL_KEYS[t])));
+  bar.textContent = ''; const onlyPts = [...S.sel].every((x) => x.startsWith('p:')); for (const [t, l, fn] of opts) { const key = t === 'fix' && !onlyPts ? null : REL_KEYS[t]; bar.append(h('button', { title: key ? l + ' (' + key + ')' : l, onclick: () => applyRelation(fn) }, h('b', {}, CON_GLYPH[t] || ''), l, key ? h('kbd', { class: 'k' }, key) : null)); }
   bar.hidden = false; const w = bar.offsetWidth, hh = bar.offsetHeight; const W2 = view.clientWidth, H2 = view.clientHeight;
   // The bar goes to whichever side of the click covers the least sketch geometry.
   const pts = []; for (const e of Object.values(sk.ents)) { if (e.ext) continue;
