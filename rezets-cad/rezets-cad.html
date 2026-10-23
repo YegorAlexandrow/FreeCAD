@@ -5078,7 +5078,10 @@ function applyPattern(f, body, cyls, features) {
   // Copies are made in tree order, whatever order they were picked in: a cut picked before its boss
   // would otherwise cut empty space and then be covered by the boss copy.
   const seeds = (f.feats || []).map((id) => features.find((x) => x.id === id)).filter((x) => x && !x.suppressed).sort((a, b) => features.indexOf(a) - features.indexOf(b));
-  if (!seeds.length) throw new Error('Выберите элементы для копирования');
+  if (!seeds.length) { const ids = f.feats || []; if (!ids.length) throw new Error('Выберите элементы для копирования');
+    // Say what happened to the elements it copies, not «pick some»: they were suppressed or deleted.
+    const gone = ids.filter((id) => !features.some((x) => x.id === id)).length; const off = ids.filter((id) => features.find((x) => x.id === id)?.suppressed).length;
+    throw new Error(off && !gone ? 'Копируемые элементы погашены: высветите их или выберите другие' : gone && !off ? 'Копируемые элементы удалены: выберите другие' : 'Копируемые элементы погашены или удалены: выберите другие'); }
   let out = body; const missed = new Set();
   for (const sd of seeds) {
     if (sd.type !== 'extrude' && sd.type !== 'revolve' && sd.type !== 'hole') throw new Error(`«${sd.name}»: копировать можно вытягивания, вращения и отверстия`);
@@ -5158,6 +5161,10 @@ function patternPick(ev, click) {
     delete f.planeGuessed; if (pm.isNew) pm.pickFor = 'feats'; renderSide(); schedulePreview(); return;
   }
   let e = pickEdge(ev, pm.topo); if (e && pm.pickFor === 'dir' || pm.pickFor === 'dir2') { if (e && e.t !== 'line') e = null; }
+  // A cylindrical face gives its axis (a hole or a boss for a circular pattern), and a planar face its normal as the
+  // direction, as SolidWorks takes them.
+  if (!e && click) { const fp = partPickAt(ev, true); if (fp?.face?.cyl && pm.pickFor === 'axis') { const cy = fp.face.cyl; e = { t: 'circle', c: V3(cy.p).toArray(), n: V3(cy.dir).normalize().toArray(), r: cy.r }; }
+    else if (fp?.face && !fp.face.cyl && (pm.pickFor === 'dir' || pm.pickFor === 'dir2')) { const n = (fp.face.n.isVector3 ? fp.face.n.clone() : V3(fp.face.n)).normalize(); const a = fp.point.clone(); e = { t: 'line', a: a.toArray(), b: a.clone().add(n).toArray() }; } }
   if (!click) { if (JSON.stringify(e) !== JSON.stringify(pm.hoverEdge)) { pm.hoverEdge = e; drawPatternRefs(); } return; }
   if (!e) return; const spec = { edge: e };
   if (pm.pickFor === 'dir') f.dir = spec; else if (pm.pickFor === 'dir2') f.dir2 = spec; else f.axis = spec; if (pm.pickFor !== 'axis') autoFlipDir(f, pm.pickFor);
