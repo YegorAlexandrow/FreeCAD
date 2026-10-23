@@ -2191,7 +2191,10 @@ function reportAdd(r, c) {
   const sk = editSk(); if (r.status === 'ok') S.conflict = new Set();
   if (r.replaced?.length) toast(`Взаимосвязь «${CON_NAMES[c.t]}» добавлена. ${r.replaced.map((x) => '«' + x.name + '»' + (x.driven ? ': размер стал справочным' : ' удалена, она следует из новой')).join('; ')}`, 'info');
   if (r.status === 'redundant') toast(`Взаимосвязь «${CON_NAMES[c.t]}» уже следует из других${r.group.length ? ': ' + r.group.map((g) => conLabel(sk, g)).join(', ') : ''}, поэтому не добавлена`, 'info');
-  if (r.status === 'driven') toast(`Размер переопределил бы эскиз и стал справочным${r.group.length ? ' (уже задано: ' + r.group.map((g) => conLabel(sk, g)).join(', ') + ')' : ''}.`, 'warn');
+  // As SolidWorks asks: the new dimension may drive instead, the one in its way then turns reference (or a relation goes).
+  if (r.status === 'driven') toast(`Размер переопределил бы эскиз и стал справочным${r.group.length ? ' (уже задано: ' + r.group.map((g) => conLabel(sk, g)).join(', ') + ')' : ''}`, 'warn', r.group.length === 1 ? [{ label: 'Сделать управляющим', act: () => {
+    const k = editSk(); const old = k?.cons[r.group[0]]; if (!old || !k.cons[c.id]) return; if (DIM_TYPES.has(old.t)) old.driven = true; else delete k.cons[old.id];
+    delete k.cons[c.id]; delete c.driven; reportAdd(tryAddConstraint(k, c), c); commitSketch(); } }] : []);
   if (r.status === 'conflict') { S.conflict = new Set(r.group); toast(`${CON_NAMES[c.t]} противоречит: ${r.group.map((g) => conLabel(sk, g)).join(', ') || 'другим взаимосвязям'}. Конфликтующие выделены красным.`, 'err', r.group.length ? [{ label: 'Выделить', act: () => { S.sel = new Set(r.group.map((g) => 'c:' + g)); refreshSketch(); } },
     // One relation in the way: it can be swapped for the new one in a click.
     ...(r.group.length === 1 ? [{ label: 'Заменить', act: () => { const k = editSk(); if (!k?.cons[r.group[0]]) return; delete k.cons[r.group[0]]; S.conflict = new Set(); const c2 = { ...c, id: nid(k) }; reportAdd(tryAddConstraint(k, c2), c2); commitSketch(); } }] : [])] : []); }
