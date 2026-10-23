@@ -1861,7 +1861,10 @@ function rebuild() {
   // So does editing a sketch: the bodies built from it would hide what is being drawn and change under every drag.
   else if (S.editing) { const i = list.findIndex((f) => f.id === S.editing); if (i >= 0) list = list.slice(0, i + 1); }
   const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
-  updateBodyMesh(); buildPlanes(); renderTree(); updateSketchVisuals(); requestRender();
+  updateBodyMesh(); buildPlanes(); renderTree(); updateSketchVisuals();
+  // What the open operation adds or cuts is tinted, so the preview stands out from the part (SolidWorks shows it yellow).
+  if (preview && S.body && !S.errors[preview.id] && !['sketch', 'plane'].includes(preview.type)) { const i = list.indexOf(preview); const base = i > 0 ? computeBody(list.slice(0, i)).body : null; showPreviewFaces(base); } else if (preview) originGroup.clear();
+  requestRender();
 }
 
 // ============================================================================================
@@ -1881,7 +1884,7 @@ const groups = { planes: new THREE.Group(), body: new THREE.Group(), sketch: new
 Object.values(groups).forEach((g) => scene.add(g));
 const lineMats = []; const lineMat = (color, width = 2, opts = {}) => { const m = new LineMaterial({ color, linewidth: width, worldUnits: false, dashed: !!opts.dashed, dashSize: opts.dashSize || 3, gapSize: opts.gapSize || 2, depthTest: opts.depthTest ?? true, transparent: !!opts.opacity, opacity: opts.opacity ?? 1 }); m.resolution.set(view.clientWidth, view.clientHeight); lineMats.push(m); return m; };
 const segLines = (arr, mat) => { const g = new LineSegmentsGeometry(); g.setPositions(arr); const l = new LineSegments2(g, mat); l.computeLineDistances(); return l; };
-const colors = {}; const readColors = () => { for (const k of ['geo-ext', 'geo-under', 'geo-full', 'geo-constr', 'geo-sel', 'geo-hover', 'geo-bad', 'dim', 'body', 'edge', 'region', 'accent']) colors[k] = new THREE.Color(css('--' + k) || '#888'); };
+const colors = {}; const readColors = () => { for (const k of ['geo-ext', 'geo-under', 'geo-full', 'geo-constr', 'geo-sel', 'geo-hover', 'geo-bad', 'dim', 'body', 'edge', 'region', 'accent', 'warn']) colors[k] = new THREE.Color(css('--' + k) || '#888'); };
 readColors();
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = false; controls.zoomToCursor = true; controls.screenSpacePanning = true; controls.rotateSpeed = 0.9;
@@ -2027,6 +2030,13 @@ function faceCreator(face, steps = solidSteps()) {
   return (face.creator = steps[k].f.id);
 }
 const originGroup = new THREE.Group(); scene.add(originGroup);
+// Faces of the part that were not on it before the open operation: what the operation adds or cuts.
+function showPreviewFaces(base) {
+  originGroup.clear(); if (!S.body || S.mode !== 'part') return; const pos = S.body.getAttribute('position'); const arr = [];
+  for (const face of faceIndex) { const sm = faceSample(face); if (!sm || (base && onSurface(base, sm.p, sm.n))) continue; for (const t of face.tris) for (let k = 0; k < 3; k++) arr.push(pos.getX(3 * t + k), pos.getY(3 * t + k), pos.getZ(3 * t + k)); }
+  if (!arr.length) return; const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors.warn, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })); m.renderOrder = 12; originGroup.add(m);
+}
 // The faces a tree operation left on the finished part, drawn in the accent colour.
 function showFeatureFaces(fid) {
   originGroup.clear(); if (!fid || !S.body || S.mode !== 'part') { requestRender(); return; }
