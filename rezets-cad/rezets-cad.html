@@ -4234,7 +4234,7 @@ function pathPoints(sf) {
   const used = new Set(); const pts = [gp(sk, from)]; let e = start;
   while (e && !used.has(e.id)) {
     used.add(e.id); const fwd = e.p1 === from; const to = fwd ? e.p2 : e.p1;
-    if (e.t === 'arc') { const { a0, sw } = arcSpan(sk, e); const c = gp(sk, e.c); const N = Math.max(4, Math.ceil(sw / (2 * Math.acos(Math.max(-1, 1 - 0.002 / Math.max(e.r, 1e-6)))))); for (let i = 1; i <= N; i++) { const t = fwd ? a0 + sw * i / N : a0 + sw * (1 - i / N); pts.push(i === N ? gp(sk, to) : { x: c.x + e.r * Math.cos(t), y: c.y + e.r * Math.sin(t) }); } }
+    if (e.t === 'arc') { const { a0, sw } = arcSpan(sk, e); const c = gp(sk, e.c); const N = Math.min(180, Math.max(4, Math.ceil(sw / (2 * Math.acos(Math.max(-1, 1 - Math.max(0.002, e.r * 2e-5) / Math.max(e.r, 1e-6))))))); for (let i = 1; i <= N; i++) { const t = fwd ? a0 + sw * i / N : a0 + sw * (1 - i / N); pts.push(i === N ? gp(sk, to) : { x: c.x + e.r * Math.cos(t), y: c.y + e.r * Math.sin(t) }); } }
     else pts.push(gp(sk, to));
     from = to; e = ents.find((x) => !used.has(x.id) && (x.p1 === to || x.p2 === to));
   }
