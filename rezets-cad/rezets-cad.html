@@ -172,7 +172,8 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .dimlbl.driven { color: var(--fg-2); }
 .dimlbl.sel { color: var(--geo-sel); outline: 1px solid var(--geo-sel); }
 .dimlbl.bad { color: var(--geo-bad); outline: 1px solid var(--geo-bad); }
-#overlay.tooling .glyph, #overlay.tooling .dimlbl { pointer-events: none; }
+#overlay.tooling .glyph, #overlay.tooling .dimlbl, #overlay.dimtool .glyph { pointer-events: none; }
+#relbar.far { opacity: .3; pointer-events: none; }
 .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
 .kv span { color: var(--fg-2); }
 .kv b { font-family: var(--font-num); font-weight: 500; text-align: right; }
@@ -846,6 +847,9 @@ function offsetDistance(sk, nId, oId) {
   return Math.abs(n.r - o.r);
 }
 const snapshotGeo = (sk) => ({ pts: clone(sk.pts), r: Object.fromEntries(Object.entries(sk.ents).filter(([, e]) => e.r != null).map(([k, e]) => [k, e.r])) });
+// A line that came out pointing the other way passed through zero length: a fillet bigger than its corner, a
+// dimension that turned the profile inside out. The solver sees no error in that, the user sees garbage.
+const flippedLine = (sk, before) => Object.values(sk.ents).find((e) => { if (e.t !== 'line' || e.ext) return false; const a0 = before.pts[e.p1], b0 = before.pts[e.p2]; if (!a0 || !b0) return false; const a = sk.pts[e.p1], b = sk.pts[e.p2]; return (b.x - a.x) * (b0.x - a0.x) + (b.y - a.y) * (b0.y - a0.y) < 0; });
 const restoreGeo = (sk, s) => { for (const id in s.pts) if (sk.pts[id]) Object.assign(sk.pts[id], s.pts[id]); for (const id in s.r) if (sk.ents[id]) sk.ents[id].r = s.r[id]; };
 const lineLens = (sk) => Object.values(sk.ents).filter((e) => e.t === 'line').map((e) => [e.id, Math.hypot(gp(sk, e.p2).x - gp(sk, e.p1).x, gp(sk, e.p2).y - gp(sk, e.p1).y)]);
 // Adds a constraint the way SolidWorks does: a duplicate relation is dropped, a dimension that
@@ -2230,7 +2234,7 @@ function openDimEditor(c) {
     if (!Number.isFinite(v) || v <= 0 && c.t !== 'angle') { toast('Введите положительное число, например 25 или 50/2', 'warn'); refreshSketch(); return; }
     if (c.driven) { refreshSketch(); return; }
     const old = c.v, oldExpr = c.expr; const before = snapshotGeo(sk); c.v = v; if (hasIdent(inp.value)) c.expr = inp.value.trim(); else delete c.expr;
-    if (!solveSketch(sk)) { c.v = old; if (oldExpr) c.expr = oldExpr; else delete c.expr; restoreGeo(sk, before); toast(`Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
+    if (!solveSketch(sk) || flippedLine(sk, before)) { const fl = flippedLine(sk, before); c.v = old; if (oldExpr) c.expr = oldExpr; else delete c.expr; restoreGeo(sk, before); toast(fl ? `При ${fmt(v)} линия вывернулась бы наизнанку (скругление или размер больше, чем помещается). Размер оставлен ${fmt(old)}` : `Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
     commitSketch(false, fresh);
   };
   inp.addEventListener('blur', () => setTimeout(() => { if (S.dimEdit?.el === el && !el.contains(document.activeElement)) apply(); }, 0));
@@ -2255,6 +2259,10 @@ function startDimDrag(ev, c) {
 // ============================================================================================
 let down = null;
 canvas.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0 || S.editing || S.mode !== 'part') return; const hd = depthHandleHit(ev); if (!hd) return;
+  ev.stopImmediatePropagation(); ev.preventDefault(); startDepthDrag(ev, hd);
+}, true);
+canvas.addEventListener('pointerdown', (ev) => {
   closeMenu();
   if (S.dimEdit) S.dimEdit.apply();
   down = { x: ev.clientX, y: ev.clientY, button: ev.button, moved: false, shift: ev.shiftKey || ev.ctrlKey || ev.metaKey };
@@ -2268,7 +2276,7 @@ canvas.addEventListener('pointermove', (ev) => {
   if (down && Math.hypot(ev.clientX - down.x, ev.clientY - down.y) > 4) down.moved = true;
   if (S.editing) { sketchMove(ev); return; }
   if (S.mode === 'asm' && !S.measure) { asmMove(ev); return; }
-  if (!down) partHover(ev);
+  if (!down) { if (S.mode === 'part' && S.pm?.feature?.type === 'extrude' && depthHandleHit(ev)) { canvas.style.cursor = 'grab'; return; } if (canvas.style.cursor === 'grab') canvas.style.cursor = 'default'; partHover(ev); }
 });
 canvas.addEventListener('pointerup', (ev) => {
   const d = down; down = null;
@@ -2427,7 +2435,7 @@ function dragTo(m) {
 // ---------------- drawing tools ----------------
 function setTool(t) {
   if (!S.editing && t !== 'select') return;
-  S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); S.dimPreview = null; S.hover = null;
+  S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
 }
@@ -2640,7 +2648,12 @@ function relationOptions(sk) {
 }
 function applyRelation(fn) {
   const sk = editSk(); const list = fn(); S.conflict = new Set();
-  for (const c of list) { c.id = nid(sk); const r = tryAddConstraint(sk, c); reportAdd(r, c); if (r.status !== 'ok' && r.status !== 'driven') break; }
+  if (list.length < 2) { for (const c of list) { c.id = nid(sk); reportAdd(tryAddConstraint(sk, c), c); } commitSketch(); return; }
+  // Several entities at once (SW: three lines made equal): one that already holds or conflicts is skipped, the rest still go in.
+  let ok = 0, red = 0; const bad = new Set();
+  for (const c of list) { c.id = nid(sk); const r = tryAddConstraint(sk, c); if (r.status === 'ok' || r.status === 'driven') ok++; else if (r.status === 'redundant') red++; else for (const g of r.group || []) bad.add(g); if (r.status === 'conflict') bad.add('x' + c.id); }
+  const nb = [...bad].filter((g) => g.startsWith('x')).length; S.conflict = new Set([...bad].filter((g) => !g.startsWith('x')));
+  if (red || nb) toast(`${CON_NAMES[list[0].t]}: добавлено ${ok} из ${list.length}` + (red ? `, ${red} уже следуют из других взаимосвязей` : '') + (nb ? `, ${nb} противоречат эскизу (выделены красным)` : ''), nb ? 'err' : 'info');
   commitSketch();
 }
 function setEllipseAxis(sk, e, t, v) {
@@ -2657,7 +2670,7 @@ function setRadii(sk, ents, r) {
     if (c) { c.v = c.t === 'diam' ? 2 * r : r; delete c.expr; }
     else { const cc = gp(sk, e.c); const id = nid(sk); sk.cons[id] = { id, t: e.t === 'circle' ? 'diam' : 'rad', refs: [e.id], v: e.t === 'circle' ? 2 * r : r, pos: [cc.x + e.r * 1.3, cc.y + e.r * 0.5] }; }
   }
-  if (!solveSketch(sk)) { sk.cons = JSON.parse(saved); restoreGeo(sk, before); toast(`Радиус ${fmt(r)} недостижим при текущих взаимосвязях`, 'err'); refreshSketch(); return; }
+  if (!solveSketch(sk) || flippedLine(sk, before)) { sk.cons = JSON.parse(saved); restoreGeo(sk, before); toast(`Радиус ${fmt(r)} недостижим: не помещается на линиях или противоречит взаимосвязям`, 'err'); refreshSketch(); return; }
   commitSketch(); toast(`Радиус ${fmt(r)} мм: ${ents.length} ${plural(ents.length, 'дуга', 'дуги', 'дуг')}`, 'info');
 }
 // «Контур грани», like Convert Entities: the outline of the model face clicked in the sketch plane becomes sketch
@@ -3334,7 +3347,47 @@ function drawRegions() {
   }
   const arr = []; for (const s of discretize(sf.sk)) arr.push(...toWorld(sf.plane, s[0], s[1]).toArray(), ...toWorld(sf.plane, s[2], s[3]).toArray());
   if (arr.length) { const l = segLines(arr, lineMat(colors.region, 1.6, { depthTest: false })); l.renderOrder = 6; groups.regions.add(l); }
-  requestRender();
+  drawDepthHandle(); requestRender();
+}
+// An extrusion's depth can be pulled by an arrow on the model, as with SolidWorks' drag handle: it sits at the end
+// of the extrusion over the middle of the selected regions and moves along the sketch normal; dragged back
+// through the sketch it turns the extrusion the other way.
+function depthHandle() {
+  const f = S.pm?.feature; if (!f || f.type !== 'extrude' || (f.end !== 'blind' && f.end !== 'mid') || !S.pm.regionsOf) return null;
+  const sf = featById(f.sketch); if (!sf) return null; const reg = sketchRegions(sf); const ids = selectedRegionIds(f, reg); const sel = reg.faces.filter((r) => ids.has(r.id)); if (!sel.length) return null;
+  let u = 0, v = 0; for (const r of sel) { u += r.sample[0]; v += r.sample[1]; } u /= sel.length; v /= sel.length;
+  const n = new THREE.Vector3(...sf.plane.n); const sgn = f.dir === -1 ? -1 : 1;
+  const s0 = f.from === 'offset' ? (f.fromOffset || 0) * (sgn === -1 && f.end !== 'mid' ? -1 : 1) : 0;
+  const base = toWorld(sf.plane, u, v).addScaledVector(n, s0); const D = n.clone().multiplyScalar(sgn);
+  return { f, base, D, tip: base.clone().addScaledVector(D, f.end === 'mid' ? f.depth / 2 : f.depth) };
+}
+function drawDepthHandle() {
+  const hd = depthHandle(); if (!hd) return; const k = unitsPerPx(); const col = S.depthDrag ? colors['geo-sel'] : colors['geo-hover'];
+  const len = 28 * k, rad = 8 * k; const cone = new THREE.Mesh(new THREE.ConeGeometry(rad, len, 16), new THREE.MeshBasicMaterial({ color: col, depthTest: false, depthWrite: false }));
+  cone.position.copy(hd.tip).addScaledVector(hd.D, len / 2); cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), hd.D); cone.renderOrder = 8; cone.userData.depthHandle = true;
+  const stem = segLines([...hd.base.toArray(), ...hd.tip.toArray()], lineMat(col, 1.6, { depthTest: false, dashed: true, dashSize: 3, gapSize: 2 })); stem.renderOrder = 8;
+  groups.regions.add(cone, stem);
+}
+function depthHandleHit(ev) {
+  const hd = depthHandle(); if (!hd) return null; const r = canvas.getBoundingClientRect(); const k = unitsPerPx();
+  const pt = hd.tip.clone().addScaledVector(hd.D, 14 * k).project(camera); const sx = (pt.x + 1) / 2 * r.width + r.left, sy = (1 - pt.y) / 2 * r.height + r.top;
+  return Math.hypot(ev.clientX - sx, ev.clientY - sy) < 20 ? hd : null;
+}
+function startDepthDrag(ev, hd) {
+  const f = hd.f; const D0 = hd.D.clone(), base = hd.base.clone(), dir0 = f.dir === -1 ? -1 : 1, depth0 = f.depth, exprs0 = f.exprs ? { ...f.exprs } : null;
+  const tAt = (e) => { const ray = rayFromEvent(e).ray; const w0 = base.clone().sub(ray.origin); const b = D0.dot(ray.direction), d = D0.dot(w0), e2 = ray.direction.dot(w0); const den = 1 - b * b; return den < 1e-6 ? null : (b * e2 - d) / den; };
+  const grab = tAt(ev) ?? 0; const tip0 = f.end === 'mid' ? depth0 / 2 : depth0; let moved = false;
+  S.depthDrag = true; controls.enabled = false; canvas.setPointerCapture(ev.pointerId);
+  const step = (() => { const w = unitsPerPx() * 4; const p = 10 ** Math.floor(Math.log10(w)); return w / p < 2 ? p : w / p < 5 ? 2 * p : 5 * p; })();
+  const mv = (e) => { const t0 = tAt(e); if (t0 == null) return; moved = true; let t = tip0 + t0 - grab;
+    const flip = f.end !== 'mid' && t < 0; t = Math.abs(t); const val = Math.max(step, Math.round((f.end === 'mid' ? 2 * t : t) / step) * step);
+    f.dir = flip ? -dir0 : dir0; f.depth = +val.toFixed(6); if (f.exprs) { delete f.exprs.depth; if (!Object.keys(f.exprs).length) delete f.exprs; }
+    const inp = $('pmDepth'); if (inp) { inp.value = fmt(f.depth, 4); inp.title = ''; } setHint(`Глубина ${fmt(f.depth, 4)} мм${flip ? ', в обратную сторону' : ''}. Esc вернёт ${fmt(depth0, 4)}`); schedulePreview(); };
+  const done = (cancel) => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); window.removeEventListener('keydown', key, true); S.depthDrag = false; controls.enabled = true;
+    if (cancel) { f.depth = depth0; f.dir = dir0; if (exprs0) f.exprs = exprs0; }
+    if (moved || cancel) { renderSide(); schedulePreview(); } setHint(); };
+  const up = () => done(false); const key = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(true); } };
+  window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up); window.addEventListener('keydown', key, true);
 }
 
 
@@ -6616,8 +6669,22 @@ function updateRelBar() {
   if (!opts.length || !S.lastClick) { bar.hidden = true; return; }
   bar.textContent = ''; for (const [t, l, fn] of opts) bar.append(h('button', { title: l + ' (' + REL_KEYS[t] + ')', onclick: () => applyRelation(fn) }, h('b', {}, CON_GLYPH[t] || ''), l, h('kbd', { class: 'k' }, REL_KEYS[t])));
   bar.hidden = false; const w = bar.offsetWidth, hh = bar.offsetHeight; const W2 = view.clientWidth, H2 = view.clientHeight;
-  bar.style.left = Math.max(8, Math.min(W2 - w - 8, S.lastClick.x + 18)) + 'px'; bar.style.top = Math.max(8, Math.min(H2 - hh - 8, S.lastClick.y + 18)) + 'px';
+  // The bar goes to whichever side of the click covers the least sketch geometry.
+  const pts = []; for (const e of Object.values(sk.ents)) { if (e.ext) continue;
+    if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); for (let i = 0; i <= 16; i++) pts.push(sScreen(a.x + (b.x - a.x) * i / 16, a.y + (b.y - a.y) * i / 16)); }
+    else if (isCurve(e)) { for (const q of curvePts(sk, e, 8)) pts.push(sScreen(q.x, q.y)); }
+    else { const c = gp(sk, e.c); for (let i = 0; i < 32; i++) pts.push(sScreen(c.x + e.r * Math.cos(i * Math.PI / 16), c.y + e.r * Math.sin(i * Math.PI / 16))); } }
+  for (const id in sk.pts) pts.push(sScreen(sk.pts[id].x, sk.pts[id].y));
+  let best = null; for (const [ox, oy] of [[18, 18], [18, -18 - hh], [-18 - w, 18], [-18 - w, -18 - hh], [-w / 2, 40], [-w / 2, -40 - hh]]) {
+    const x = Math.max(8, Math.min(W2 - w - 8, S.lastClick.x + ox)), y = Math.max(8, Math.min(H2 - hh - 8, S.lastClick.y + oy));
+    let n = 0; for (const q of pts) if (q.x > x - 6 && q.x < x + w + 6 && q.y > y - 6 && q.y < y + hh + 6) n++;
+    if (!best || n < best.n) best = { n, x, y }; if (!n) break;
+  }
+  bar.style.left = best.x + 'px'; bar.style.top = best.y + 'px';
+  bar.classList.remove('far');
 }
+// Like SW's context toolbar: away from the cursor the bar fades and lets clicks through to the geometry under it.
+view.addEventListener('pointermove', (ev) => { const bar = $('relbar'); if (bar.hidden) return; const r = bar.getBoundingClientRect(); const dx = Math.max(r.left - ev.clientX, 0, ev.clientX - r.right), dy = Math.max(r.top - ev.clientY, 0, ev.clientY - r.bottom); bar.classList.toggle('far', Math.hypot(dx, dy) > 36); });
 function updateSketchVisuals() {
   groups.sketch.clear();
   for (const f of (S.doc.features || []).slice(0, rollbackIndex())) if (f.type === 'sketch' && f.id !== S.editing && (sketchVisible(f) || S.selectedTree === 'feat:' + f.id || (S.pickSketch && sketchRegions(f).faces.length)) && (!S.pm?.regionsOf || canSwitchSketch())) drawSketchObjects(f, false);
@@ -6949,5 +7016,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, depthHandle, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
