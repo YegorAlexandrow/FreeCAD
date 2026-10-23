@@ -2144,8 +2144,11 @@ function pick(m, opts = {}) {
 function distSeg(px, py, a, b) { const dx = b.x - a.x, dy = b.y - a.y; const l = dx * dx + dy * dy || 1; let t = ((px - a.x) * dx + (py - a.y) * dy) / l; t = Math.max(0, Math.min(1, t)); return Math.hypot(px - a.x - t * dx, py - a.y - t * dy); }
 function angleInArc(sk, e, ang) { const c = gp(sk, e.c), p1 = gp(sk, e.p1), p2 = gp(sk, e.p2); const a0 = Math.atan2(p1.y - c.y, p1.x - c.x); let sw = Math.atan2(p2.y - c.y, p2.x - c.x) - a0; while (sw <= 0) sw += 2 * Math.PI; let d = ang - a0; while (d < 0) d += 2 * Math.PI; while (d > 2 * Math.PI) d -= 2 * Math.PI; return d <= sw; }
 // Snap for drawing: existing point, midpoint, curve, axis, then horizontal/vertical alignment.
+// Held Ctrl puts snapping off, to place a point right next to another without landing on it (as in SolidWorks).
+let ctrlHeld = false; window.addEventListener('keydown', (e) => { if (e.key === 'Control') ctrlHeld = true; }); window.addEventListener('keyup', (e) => { if (e.key === 'Control') ctrlHeld = false; }); window.addEventListener('blur', () => { ctrlHeld = false; });
 function snap(m, ctx = {}) {
   const sk = editSk(); const res = { u: m.u, v: m.v, kind: null, ref: null, guides: [] };
+  if (ctrlHeld && S.draw) return res;
   const pp = pick(m, { pointsOnly: true, tol: 10, excludePts: ctx.excludePts });
   if (pp) { const id = pp.key.slice(2); const p = gp(sk, id); return { u: p.x, v: p.y, kind: 'pt', ref: id, guides: [], glyph: '●' }; }
   if (S.refs) { let best = null; S.refs.verts.forEach(([x, y], i) => { const s = sScreen(x, y); const d = Math.hypot(s.x - m.sx, s.y - m.sy); if (d < 10 && (!best || d < best.d)) best = { d, i, x, y }; }); if (best) return { u: best.x, v: best.y, kind: 'ref', ref: 'r:v:' + best.i, guides: [], glyph: '●' }; }
