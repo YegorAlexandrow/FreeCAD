@@ -6893,7 +6893,7 @@ function renderTree() {
     const menu = f.type === 'plane' ? [['Эскиз на плоскости', () => startSketch(refPlane(f))], ['Редактировать элемент', () => editFeature(f)], [f.show === false ? 'Показать' : 'Скрыть', () => { f.show = f.show === false; buildPlanes(); requestRender(); pushUndo(); renderTree(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i)], ...rollMore(), ['Удалить', () => deleteFeature(f)]]
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], ['Сменить плоскость…', () => { if (S.pm) closePM(); openPM({ kind: 'pickPlane', replan: f.id }); }], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i)], ...rollMore(), ['Удалить', () => deleteFeature(f)]]
-      : [['Редактировать элемент', () => editFeature(f)], ...(f.sketch ? [['Редактировать эскиз', () => editFeature(featById(f.sketch))]] : []), [f.suppressed ? 'Высветить' : 'Погасить', () => { f.suppressed = !f.suppressed; rebuild(); pushUndo(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i)], ...rollMore(), ['Удалить', () => deleteFeature(f)]];
+      : [['Редактировать элемент', () => editFeature(f)], ...(f.sketch ? [['Редактировать эскиз', () => editFeature(featById(f.sketch))]] : []), [f.suppressed ? 'Высветить' : 'Погасить', () => toggleSuppress(f)], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i)], ...rollMore(), ['Удалить', () => deleteFeature(f)]];
     const wn = !err && S.warns?.[f.id]; return row('feat:' + f.id, icon, f.name, { cls: (child ? ' child' : '') + (off ? ' off' : '') + (err ? ' err' : '') + (wn ? ' warn' : ''), meta, title: err ? f.name + ': ' + err : wn ? f.name + ': ' + wn : f.name, onOpen: () => editFeature(f), menu });
   };
   const rbBar = () => { const bar = h('div', { class: 'rollbar', title: 'Перетащите, чтобы откатить модель', role: 'separator', tabindex: '0' }); bar.addEventListener('pointerdown', startRollDrag); bar.addEventListener('keydown', (e) => { if (e.key === 'ArrowUp') setRollback(Math.max(0, rb - 1)); if (e.key === 'ArrowDown') setRollback(Math.min(S.doc.features.length, rb + 1)); }); return bar; };
@@ -6912,6 +6912,14 @@ function renderTree() {
 // Features are moved in the tree by dragging, like in SolidWorks. A feature cannot go above anything it
 // is built on (its sketch, the face its sketch sits on, the features it copies); its own sketch moves up
 // with it when needed.
+// Suppressing a feature suppresses what is built on it (a sketch on its face, a fillet of its edges, a pattern of it),
+// as SolidWorks does; showing it again brings those back too.
+function toggleSuppress(f) {
+  if (f.suppressed) { delete f.suppressed; for (const g of S.doc.features) if (g.suppressedBy === f.id) { delete g.suppressed; delete g.suppressedBy; } rebuild(); pushUndo(); return; }
+  f.suppressed = true; const off = new Set([f.id]); let grew = true; const kids = [];
+  while (grew) { grew = false; for (const g of S.doc.features) if (!off.has(g.id) && !g.suppressed && [...featDeps(g)].some((d) => off.has(d))) { off.add(g.id); g.suppressed = true; g.suppressedBy = f.id; kids.push(g.name); grew = true; } }
+  rebuild(); pushUndo(); if (kids.length) toast(`Погашено вместе с «${f.name}»: ${kids.map((n) => '«' + n + '»').join(', ')}`, 'info');
+}
 function featDeps(x) { const ids = new Set(S.doc.features.map((g) => g.id)); const out = new Set(); const walk = (v) => { if (typeof v === 'string') { if (ids.has(v) && v !== x.id) out.add(v); } else if (Array.isArray(v)) v.forEach(walk); else if (v && typeof v === 'object') for (const [k, w] of Object.entries(v)) if (k !== 'sk') walk(w); }; walk(x); return out; }
 function moveFeature(id, beforeId) {
   const list = S.doc.features.filter((g) => g.id !== id); const f = featById(id); if (!f) return false;
