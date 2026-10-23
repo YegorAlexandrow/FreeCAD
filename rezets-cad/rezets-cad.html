@@ -6773,6 +6773,8 @@ function explodeOffset(asm, c) {
   const ex = asm.explode; const off = new THREE.Vector3(); if (!ex?.on) return off; const id = c.seed || c.id;
   // While the explode is played (S.explodeAnim = 0…number of steps), the steps run one after another.
   const T = S.explodeAnim; ex.steps.forEach((st, i) => { const k = T == null ? 1 : Math.max(0, Math.min(1, T - i)); if (k && st.comps.includes(id)) off.addScaledVector(V3(st.dir).normalize(), st.d * k); });
+  // The step being made shows where it takes its components before it is added.
+  const cur = S.pm?.kind === 'explode' && S.doc === asm && T == null ? S.pm.cur : null; if (cur?.comps.includes(id)) off.addScaledVector(V3(cur.dir).normalize(), cur.d);
   return off;
 }
 // Plays the explode step by step (or the collapse backwards), about half a second a step.
@@ -6809,8 +6811,8 @@ function renderExplodePM() {
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: autoExplode }, 'Авторазнос'), ex.steps.length ? h('button', { class: 'chip', onclick: () => { ex.steps = []; asmRefresh(); pushUndo(); } }, 'Сбросить') : null),
     ex.steps.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Показать разнос по шагам', onclick: () => playExplode(true) }, '▶ Разнести'), h('button', { class: 'chip', title: 'Показать сборку по шагам', onclick: () => playExplode(false) }, '◀ Собрать')) : null));
   const g = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Новый шаг'), h('button', { class: 'rel pickbox on' }, h('b', {}, '▣'), cur.comps.length ? cur.comps.map(cname).join(', ') : 'щёлкните компоненты'),
-    h('div', { class: 'chips' }, [['X', [1, 0, 0]], ['−X', [-1, 0, 0]], ['Y', [0, 1, 0]], ['−Y', [0, -1, 0]], ['Z', [0, 0, 1]], ['−Z', [0, 0, -1]]].map(([l, d]) => h('button', { class: 'chip', style: d.join() === cur.dir.join() ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { cur.dir = d; renderSide(); } }, l))),
-    numField('Расстояние', 'exDist', cur.d, (v) => { cur.d = v; }), h('button', { class: 'ghost-btn', onclick: addExplodeStep }, 'Добавить шаг'));
+    h('div', { class: 'chips' }, [['X', [1, 0, 0]], ['−X', [-1, 0, 0]], ['Y', [0, 1, 0]], ['−Y', [0, -1, 0]], ['Z', [0, 0, 1]], ['−Z', [0, 0, -1]]].map(([l, d]) => h('button', { class: 'chip', style: d.join() === cur.dir.join() ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { cur.dir = d; renderSide(); asmRefresh(); } }, l))),
+    numField('Расстояние', 'exDist', cur.d, (v) => { cur.d = v; asmRefresh(); }), h('button', { class: 'ghost-btn', onclick: addExplodeStep }, 'Добавить шаг'));
   box.append(g);
   if (ex.steps.length) { const l = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Шаги: ${ex.steps.length}`));
     // Each step keeps its distance editable and can move up or down the order.
