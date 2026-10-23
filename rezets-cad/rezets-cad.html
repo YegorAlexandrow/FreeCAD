@@ -2903,6 +2903,14 @@ function relationOptions(sk) {
     else { out.push(['oncircle', 'На окружности', () => [{ t: 'oncircle', refs: [pts[0], e.id] }]]); if (e.c !== pts[0]) out.push(['concentric', 'Концентрично', () => [{ t: 'coincident', refs: [pts[0], e.c] }]]); }
   }
   if (pts.length === 2 && lines.length === 1 && !circs.length) out.push(['symmetric', 'Симметрично', () => [{ t: 'symmetric', refs: [pts[0], pts[1], lines[0].id] }]]);
+  // Two lines or two circles and a line to mirror about (a centreline, else the last picked): ends or centres in pairs.
+  if (!pts.length && ents.length === 3 && lines.length) {
+    const axis = lines.find((e) => e.constr) || lines[lines.length - 1]; const [a, b2] = ents.filter((e) => e !== axis);
+    if (a.t === 'line' && b2.t === 'line') out.push(['symmetric', 'Симметрично', () => { const A = gp(sk, axis.p1), B = gp(sk, axis.p2); const dx = B.x - A.x, dy = B.y - A.y, L = dx * dx + dy * dy || 1;
+      const refl = (q) => { const p = gp(sk, q); const t = ((p.x - A.x) * dx + (p.y - A.y) * dy) / L; return { x: 2 * (A.x + t * dx) - p.x, y: 2 * (A.y + t * dy) - p.y }; }; const d = (q, r) => { const u = refl(q), v = gp(sk, r); return Math.hypot(u.x - v.x, u.y - v.y); };
+      const straight = d(a.p1, b2.p1) + d(a.p2, b2.p2) <= d(a.p1, b2.p2) + d(a.p2, b2.p1); return [[a.p1, straight ? b2.p1 : b2.p2], [a.p2, straight ? b2.p2 : b2.p1]].map(([u, v]) => ({ t: 'symmetric', refs: [u, v, axis.id] })); }]);
+    if ((a.t === 'circle' || a.t === 'arc') && (b2.t === 'circle' || b2.t === 'arc')) out.push(['symmetric', 'Симметрично', () => [{ t: 'symmetric', refs: [a.c, b2.c, axis.id] }, { t: 'equal', refs: [a.id, b2.id] }]]);
+  }
   if (lines.length === 1 && circs.length === 1 && !pts.length) out.push(['tangent', 'Касательно', () => [{ t: 'tangent', refs: [lines[0].id, circs[0].id] }]]);
   if (circs.length >= 2 && !lines.length && !pts.length) {
     const pairs = circs.slice(1).map((e) => [circs[0], e]);
