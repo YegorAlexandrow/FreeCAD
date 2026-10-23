@@ -6802,13 +6802,14 @@ function deleteFeature(f) {
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; if (g.type === 'mirror' && g.plane?.plane === f.id) g.plane = { face: pl }; } }
   // A mirror left without its features would turn into a mirror of the whole body: it is flagged instead.
   for (const g of S.doc.features) if (Array.isArray(g.feats)) { const n = g.feats.length; g.feats = g.feats.filter((x) => x !== f.id); if (n && !g.feats.length && g.type === 'mirror') g.lostFeats = true; }
-  const dependents = S.doc.features.filter((g) => g.sketch === f.id);
+  // A loft loses its shape without any of its sections and a sweep without its path: they go with it, as one with its profile does.
+  const dependents = S.doc.features.filter((g) => g.sketch === f.id || g.sketches?.includes(f.id) || g.path === f.id);
   // The rollback bar stays under the same feature: every removed one above it moves it up by one.
   const rb = S.doc.rollback; const above = rb == null ? 0 : S.doc.features.slice(0, rb).filter((g) => g === f || dependents.includes(g)).length;
   S.doc.features = S.doc.features.filter((g) => g !== f && !dependents.includes(g));
   if (f.sketch) { const sf = featById(f.sketch); if (sf) sf.show = undefined; }
   if (rb != null) S.doc.rollback = Math.min(rb - above, S.doc.features.length);
-  S.selectedTree = null; rebuild(); pushUndo(); toast(`«${f.name}» удалён${dependents.length ? ' вместе с ' + dependents.map((d) => '«' + d.name + '»').join(', ') : ''}.`, 'info', [{ label: 'Отменить', act: undo }]);
+  S.selectedTree = null; rebuild(); pushUndo(); toast(`«${f.name}» удалён${dependents.length ? ' вместе с ' + dependents.map((d) => '«' + d.name + '»').join(', ') : ''}`, 'info', [{ label: 'Отменить', act: undo }]);
 }
 function renameFeature(f, redraw = renderTree) {
   const r = side.querySelector(`.row.sel .nm`); if (!r) return; const inp = h('input', { type: 'text', value: f.name, id: 'renameInput', 'aria-label': 'Имя элемента' }); r.replaceWith(inp); inp.focus(); inp.select();
