@@ -6914,8 +6914,9 @@ function cmdInterference() {
   // Pair by pair, with the window kept alive in between: a big STEP part takes seconds per pair.
   // The overlaps are where the parts are assembled: an exploded view is put together for the check and comes back after.
   const exploded = !!S.doc.explode?.on; if (exploded) { S.doc.explode.on = false; asmRefresh(true); }
-  const t0 = performance.now(); const pairs = interferencePairs(S.doc); const res = []; S.asmSel = null; const doc = S.doc;
-  openPM({ kind: 'interf', res, sel: null, ms: 0, busy: { done: 0, of: pairs.length }, exploded }); drawInterference();
+  // With a component selected, only its pairs are checked (SolidWorks checks the selected components).
+  const only = S.asmSel; const t0 = performance.now(); const pairs = interferencePairs(S.doc).filter(([A, B]) => !only || A.c.id === only || B.c.id === only || A.c.seed === only || B.c.seed === only); const res = []; S.asmSel = null; const doc = S.doc;
+  openPM({ kind: 'interf', res, sel: null, ms: 0, busy: { done: 0, of: pairs.length }, exploded, only }); drawInterference();
   const step = async (k) => {
     if (S.doc !== doc || S.pm?.kind !== 'interf' || S.pm.res !== res) return;
     if (k >= pairs.length) { S.pm.busy = null; S.pm.ms = performance.now() - t0; renderSide(); drawInterference(); return; }
@@ -6970,7 +6971,7 @@ function renderAsmPM() {
   if (pm.kind === 'interf') {
     const cname = (id) => allComps(S.doc).find((c) => c.id === id)?.name || '?';
     const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.interf), h('span', {}, 'Проверка пересечений'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
-    const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Пересечения: ${pm.res.length}`));
+    const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Пересечения: ${pm.res.length}`), pm.only ? h('div', { class: 'note' }, `Только с «${cname(pm.only)}». `, h('button', { class: 'chip', onclick: () => { closePM(); cmdInterference(); } }, 'Проверить всю сборку')) : null);
     if (pm.busy) grp.append(h('div', { class: 'note' }, `Считаю: пара ${pm.busy.done} из ${pm.busy.of}`));
     else if (!pm.res.length) grp.append(h('div', { class: 'note', style: 'color:var(--good)' }, 'Компоненты не пересекаются'));
     pm.res.forEach((r, i) => { const row = h('button', { class: 'rel pickbox' + (pm.sel === i ? ' on' : ''), onclick: () => { pm.sel = pm.sel === i ? null : i; renderSide(); drawInterference(); } }, h('b', {}, '✕'), `${cname(r.a)} ↔ ${cname(r.b)}: ${fmt(r.vol, 2)} мм³`); grp.append(row); });
