@@ -298,7 +298,11 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
   .brand { font-size: 0; gap: 0; }
   .doctabs { flex: 1 1 0; margin-left: 4px; }
   .filebtns { display: none; }
-  #viewbar { top: auto; bottom: 10px; }
+  #viewbar { top: auto; bottom: 10px; max-width: calc(100% - 20px); overflow-x: auto; scrollbar-width: none; }
+  /* Notes sit above the view bar instead of over it; the view cube takes less room. */
+  #toasts { bottom: 58px; right: 8px; width: calc(100% - 16px); }
+  #viewCube { width: 84px; height: 84px; }
+  #triad { bottom: 52px; }
 }
 @media (prefers-reduced-motion: reduce) { #side { transition: none; } }
 </style>
