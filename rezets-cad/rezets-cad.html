@@ -3614,7 +3614,7 @@ function toggleRegion(id) {
 
 // ---------------- property manager ----------------
 function openPM(pm) {
-  S.pm = pm; renderSide(); renderCorner(); if (pm.feature) { rebuild(); drawRegions(); } setHint();
+  S.pm = pm; renderSide(); renderCorner(); renderTools(); if (pm.feature) { rebuild(); drawRegions(); } setHint();
   if (pm.kind === 'feature' && pm.isNew) {
     // Seen straight along the sketch's normal, an extrusion's depth is invisible: the view turns to an isometric one.
     const sfp = featById(pm.feature.sketch)?.plane; const look = camera.position.clone().sub(controls.target).normalize();
@@ -3625,7 +3625,7 @@ function openPM(pm) {
 }
 function closePM(silent) {
   if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
-  const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') S.afterSketch = null; groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); setHint(); requestRender(); }
+  const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') S.afterSketch = null; groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); renderTools(); setHint(); requestRender(); }
 function okPM() {
   const pm = S.pm; if (!pm) return;
   if (pm.kind === 'mate') { if (pm.picks.length) okMate(); else closePM(); return; }
@@ -6667,24 +6667,26 @@ function renderTools() {
   }
   if (S.mode === 'import') { toolsEl.append(toolBtn('Рулетка', ICON.ruler, () => (S.measure ? closeMeasure() : cmdMeasure()), { pressed: !!S.measure, title: 'Измерить (M)', kbd: 'M' }), toolBtn('Масса', ICON.mass, () => (S.pm?.kind === 'mass' ? closePM() : cmdMass()), { pressed: S.pm?.kind === 'mass', title: 'Материал, масса, центр масс' })); return; }
   if (S.tab === 'feat') {
+    // The button of the operation whose panel is open looks pressed.
+    const on = (type, mode) => { const f = S.pm?.kind === 'feature' ? S.pm.feature : null; return !!f && f.type === type && (mode == null || (f.mode || 'add') === mode); };
     toolsEl.append(
       toolBtn('Эскиз', ICON.sketch, () => (S.editing ? exitSketch() : cmdSketch()), { pressed: !!S.editing, title: 'Новый эскиз на плоскости или грани (S)', kbd: 'S' }),
       h('div', { class: 'sep' }),
-      toolBtn('Вытянуть', ICON.extrude, () => cmdFeature('extrude', 'add'), { title: 'Вытянутая бобышка (E)', kbd: 'E' }),
-      toolBtn('Вырез', ICON.cut, () => cmdFeature('extrude', 'cut'), { title: 'Вытянутый вырез (X)', kbd: 'X' }),
-      toolBtn('Повернуть', ICON.revolve, () => cmdFeature('revolve', 'add'), { title: 'Повёрнутая бобышка' }),
-      toolBtn('Вырез пов.', ICON.revolve, () => cmdFeature('revolve', 'cut'), { title: 'Повёрнутый вырез' }),
-      toolBtn('Траектория', ICON.sweep, () => cmdSweep('add'), { title: 'По траектории: профиль вдоль линии (вырез — в настройках)' }),
-      toolBtn('Сечения', ICON.loft, () => cmdLoft('add'), { title: 'По сечениям между замкнутыми эскизами (вырез — в настройках)' }),
+      toolBtn('Вытянуть', ICON.extrude, () => cmdFeature('extrude', 'add'), { pressed: on('extrude', 'add'), title: 'Вытянутая бобышка (E)', kbd: 'E' }),
+      toolBtn('Вырез', ICON.cut, () => cmdFeature('extrude', 'cut'), { pressed: on('extrude', 'cut'), title: 'Вытянутый вырез (X)', kbd: 'X' }),
+      toolBtn('Повернуть', ICON.revolve, () => cmdFeature('revolve', 'add'), { pressed: on('revolve', 'add'), title: 'Повёрнутая бобышка' }),
+      toolBtn('Вырез пов.', ICON.revolve, () => cmdFeature('revolve', 'cut'), { pressed: on('revolve', 'cut'), title: 'Повёрнутый вырез' }),
+      toolBtn('Траектория', ICON.sweep, () => cmdSweep('add'), { pressed: on('sweep'), title: 'По траектории: профиль вдоль линии (вырез — в настройках)' }),
+      toolBtn('Сечения', ICON.loft, () => cmdLoft('add'), { pressed: on('loft'), title: 'По сечениям между замкнутыми эскизами (вырез — в настройках)' }),
       h('div', { class: 'sep' }),
-      toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { disabled: !S.body, title: 'Скруглить рёбра' }),
-      toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { disabled: !S.body, title: 'Фаска на рёбрах' }),
-      toolBtn('Оболочка', ICON.shell, cmdShell, { disabled: !S.body, title: 'Оболочка: полая деталь с открытыми гранями' }),
-      toolBtn('Отверстие', ICON.hole, cmdHole, { disabled: !S.body, title: 'Отверстие под крепёж: простое, цековка, зенковка, под резьбу' }),
+      toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { pressed: on('fillet'), disabled: !S.body, title: 'Скруглить рёбра' }),
+      toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { pressed: on('chamfer'), disabled: !S.body, title: 'Фаска на рёбрах' }),
+      toolBtn('Оболочка', ICON.shell, cmdShell, { pressed: on('shell'), disabled: !S.body, title: 'Оболочка: полая деталь с открытыми гранями' }),
+      toolBtn('Отверстие', ICON.hole, cmdHole, { pressed: on('hole'), disabled: !S.body, title: 'Отверстие под крепёж: простое, цековка, зенковка, под резьбу' }),
       h('div', { class: 'sep' }),
-      toolBtn('Массив', ICON.lpattern, () => cmdPattern('lpattern'), { disabled: !S.body, title: 'Линейный массив элементов' }),
-      toolBtn('Круговой', ICON.cpattern, () => cmdPattern('cpattern'), { disabled: !S.body, title: 'Круговой массив элементов' }),
-      toolBtn('Зеркало', ICON.mirror, () => cmdPattern('mirror'), { disabled: !S.body, title: 'Зеркальное отражение элементов или всего тела' }),
+      toolBtn('Массив', ICON.lpattern, () => cmdPattern('lpattern'), { pressed: on('lpattern'), disabled: !S.body, title: 'Линейный массив элементов' }),
+      toolBtn('Круговой', ICON.cpattern, () => cmdPattern('cpattern'), { pressed: on('cpattern'), disabled: !S.body, title: 'Круговой массив элементов' }),
+      toolBtn('Зеркало', ICON.mirror, () => cmdPattern('mirror'), { pressed: on('mirror'), disabled: !S.body, title: 'Зеркальное отражение элементов или всего тела' }),
       h('div', { class: 'sep' }),
       h('div', { class: 'sep' }),
       toolBtn('STEP / STL', ICON.insert, cmdStepBody, { title: 'Взять STEP- или STL-модель из проекта телом детали: на ней можно рисовать эскизы, резать и сверлить' }),
