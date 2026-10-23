@@ -1404,7 +1404,7 @@ function vertNormals(body, v) {
   return out;
 }
 const vertRef = (body, v) => ({ w: v.toArray().map((x) => +x.toFixed(6)), ns: vertNormals(body, v).map((n) => n.toArray().map((x) => +x.toFixed(5))) });
-const circleRef = (c) => ({ w: c.c.toArray().map((x) => +x.toFixed(6)), circle: true, r: c.r });
+const circleRef = (c) => ({ w: c.c.toArray().map((x) => +x.toFixed(6)), circle: true, r: c.r, ...(c.src ? { src: c.src } : {}) });
 // An older sketch put on a face without remembering which one stays where the face was; when no face of the
 // body lies in its plane any more, it is flagged so the plane can be picked again.
 function onSomeFace(body, pl) {
@@ -1424,9 +1424,19 @@ function followSketchRefs(f, body, cyls) {
     const w = world(p);
     // Older sketches stored only the coordinates: a point that sits on the model now starts following it from here.
     if (!p.mref) { const v = verts.find((q) => q.distanceTo(w) < 1e-3); const c = !v && circles.find((q) => q.c.distanceTo(w) < 1e-3); if (v) p.mref = vertRef(body, v); else if (c) p.mref = circleRef(c); continue; }
+    // A circle reference from before holes were told apart learns which one it is while it still sits on it.
+    if (p.mref.circle && !p.mref.src) { const c = circles.find((q) => q.c.distanceTo(w) < 1e-6 && (p.mref.r == null || Math.abs(q.r - p.mref.r) < 1e-6)); if (c?.src) p.mref = { ...p.mref, src: c.src }; }
     let best = null;
-    if (p.mref.circle) { for (const c of circles) { const d = c.c.distanceTo(w); if (!best || d < best.d) best = { d, v: c.c, c }; } }
-    else {
+    // A circle follows the hole of the same size wherever a dimension moved it, or one of another size that still
+    // overlaps where it was (the diameter changed). Nothing like that left (the hole was deleted): the point stays
+    // and is reported lost, instead of jumping to some other hole.
+    if (p.mref.circle && p.mref.src) { for (const c of circles) { if (c.src !== p.mref.src) continue; const d = c.c.distanceTo(w); if (!best || d < best.d) best = { d, v: c.c, c }; } }
+    else if (p.mref.circle) { const r0 = p.mref.r ?? null; for (const c of circles) { const d = c.c.distanceTo(w); const same = r0 == null || Math.abs(c.r - r0) < 1e-6; if (!same && d > Math.max(r0, c.r)) continue; const k = d < 1e-6 ? -1 : same ? 0 : 1; if (!best || k < best.k || (k === best.k && d < best.d)) best = { d, v: c.c, c, k }; } }
+    else if (!p.mref.ns?.length) {
+      // No faces recorded (a point put on a hole's centre): it can only follow that centre.
+      for (const c of circles) { const d = c.c.distanceTo(w); if (d <= c.r && (!best || d < best.d)) best = { d, v: c.c, c }; }
+      if (best) p.mref = circleRef(best.c);
+    } else {
       // Faces that meet at the vertex, by their normals; a curved face shows a different facet each time, so the
       // vertex sharing the most of them wins, and the nearest one among those.
       const want = p.mref.ns.map((n) => V3(n));
@@ -1437,7 +1447,8 @@ function followSketchRefs(f, body, cyls) {
         if (!best || score > best.score || (score === best.score && d < best.d)) best = { d, v, score };
       }
     }
-    if (!best || best.d < 1e-6) continue;
+    if (!best) continue;
+    if (best.d < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
     const d = best.v.clone().sub(o); const x = +d.dot(X).toFixed(6), y = +d.dot(Y).toFixed(6);
     for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && best.c) e.r = best.c.r;
     p.x = x; p.y = y; p.mref = { ...p.mref, w: best.v.toArray().map((q) => +q.toFixed(6)), ...(best.c ? { r: best.c.r } : {}) }; moved = true;
@@ -1677,7 +1688,7 @@ function buildTool(f, body, cyls = []) {
     } else g = extrudeGeometry(loops, z0, z1);
     if (s0) g.translate(0, 0, s0);
     const n = new THREE.Vector3(...sf.plane.n);
-    if (!(f.draft > 0)) for (const e of Object.values(sf.sk.ents)) if ((e.t === 'circle' || e.t === 'arc') && !e.constr && !e.ext) { const c = gp(sf.sk, e.c); cyls.push({ p: toWorld(sf.plane, c.x, c.y), dir: n.clone(), r: e.r }); }
+    if (!(f.draft > 0)) for (const e of Object.values(sf.sk.ents)) if ((e.t === 'circle' || e.t === 'arc') && !e.constr && !e.ext) { const c = gp(sf.sk, e.c); cyls.push({ p: toWorld(sf.plane, c.x, c.y), dir: n.clone(), r: e.r, src: f.id + ':' + e.id }); }
     if (clip) { g.applyMatrix4(M); g.computeVertexNormals(); return boolean(g, clip, INTERSECTION); }
   } else {
     let ap, ad;
@@ -3429,7 +3440,7 @@ function edgeTopology(body, cyls) {
       g.segs.forEach((i) => (onCircle[i] = true)); if (g.segs.length < 3) continue;
       if (kept.some((t) => Math.abs(t - g.t) < 0.01)) continue; kept.push(g.t);
       const c = cy.p.clone().addScaledVector(cy.dir, g.t);
-      if (!circles.some((x) => x.c.distanceTo(c) < 1e-4 && Math.abs(x.r - cy.r) < 1e-6)) circles.push({ c, r: cy.r, n: cy.dir.clone() });
+      if (!circles.some((x) => x.c.distanceTo(c) < 1e-4 && Math.abs(x.r - cy.r) < 1e-6)) circles.push({ c, r: cy.r, n: cy.dir.clone(), src: cy.src });
     }
   }
   // Seams along cylinder walls are artefacts of the mesh, not edges of the part.
