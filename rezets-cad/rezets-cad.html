@@ -4472,7 +4472,11 @@ function renderSweepLoftPM() {
     h('div', { class: 'note' }, 'Профиль лучше рисовать в плоскости, перпендикулярной началу траектории, и в её начальной точке.')));
   else { const g = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Сечения: ${f.sketches.length}`));
     for (const sf of closedSketches(idx)) g.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.sketches.includes(sf.id), onchange: (e) => { f.sketches = e.target.checked ? S.doc.features.filter((x) => x.id === sf.id || f.sketches.includes(x.id)).map((x) => x.id) : f.sketches.filter((x) => x !== sf.id); f.sketch = f.sketches[0]; renderSide(); schedulePreview(); } }), sf.name));
-    g.append(h('div', { class: 'note' }, 'Сечения соединяются в порядке дерева. Через три и больше проходит плавная поверхность.')); body.append(g); }
+    // The order the sections are joined in, changed with the arrows (new ones come in tree order).
+    if (f.sketches.length > 2) { g.append(h('div', { class: 'note', style: 'margin-top:6px' }, 'Порядок соединения'));
+      f.sketches.forEach((id, i) => { const mv = (d) => { const a = f.sketches.slice(); [a[i], a[i + d]] = [a[i + d], a[i]]; f.sketches = a; f.sketch = a[0]; renderSide(); schedulePreview(); };
+        g.append(h('div', { class: 'rel' }, h('b', {}, String(i + 1)), featById(id)?.name || id, i > 0 ? h('button', { class: 'x', title: 'Выше', onclick: () => mv(-1) }, '↑') : null, i < f.sketches.length - 1 ? h('button', { class: 'x', title: 'Ниже', onclick: () => mv(1) }, '↓') : null)); }); }
+    g.append(h('div', { class: 'note' }, 'Через три сечения и больше проходит плавная поверхность.')); body.append(g); }
   if (err) body.append(pmErr(err));
   side.append(body);
 }
