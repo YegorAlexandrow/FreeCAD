@@ -5098,9 +5098,17 @@ async function importStepFile(file) {
 // neighbours, a cylinder recognised as such), so an STL can be sketched on, cut and mated like a STEP model.
 function parseStl(buf) {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength); const n = buf.byteLength >= 84 ? dv.getUint32(80, true) : 0;
-  if (n && 84 + 50 * n === buf.byteLength) { const out = new Float32Array(n * 9); for (let t = 0; t < n; t++) for (let k = 0; k < 9; k++) out[9 * t + k] = dv.getFloat32(84 + 50 * t + 12 + 4 * k, true); return out; }
-  const txt = new TextDecoder().decode(buf); const nums = []; const re = /vertex\s+(\S+)\s+(\S+)\s+(\S+)/g; let m; while ((m = re.exec(txt))) nums.push(+m[1], +m[2], +m[3]);
-  if (!nums.length || nums.length % 9) throw new Error('не похоже на STL'); return Float32Array.from(nums);
+  // A few bytes of padding after the last triangle (some exporters add them) don't make a binary file unreadable.
+  const ascii = buf.byteLength >= 5 && /^\s*solid/i.test(new TextDecoder().decode(buf.subarray(0, 80))) && /facet/i.test(new TextDecoder().decode(buf.subarray(0, Math.min(buf.byteLength, 4096))));
+  if (n && !ascii && 84 + 50 * n <= buf.byteLength && buf.byteLength - (84 + 50 * n) < 50) { const out = new Float32Array(n * 9); for (let t = 0; t < n; t++) for (let k = 0; k < 9; k++) out[9 * t + k] = dv.getFloat32(84 + 50 * t + 12 + 4 * k, true); return out; }
+  const txt = new TextDecoder().decode(buf); const nums = []; const re = /vertex\s+(\S+)\s+(\S+)\s+(\S+)/gi; let m; while ((m = re.exec(txt))) nums.push(+m[1], +m[2], +m[3]);
+  if (!nums.length || nums.length % 9 || nums.some((v) => !Number.isFinite(v))) {
+    // Say what is wrong with it, not only that it isn't STL.
+    if (!buf.byteLength) throw new Error('файл пустой');
+    if (n && 84 + 50 * n > buf.byteLength) throw new Error(`файл обрезан: заголовок обещает ${n} треугольников, а данных на ${Math.max(0, Math.floor((buf.byteLength - 84) / 50))}`);
+    if (buf.byteLength >= 84 && !n && !nums.length) throw new Error('в файле 0 треугольников');
+    throw new Error('не похоже на STL'); }
+  return Float32Array.from(nums);
 }
 function stlFaces(tri) {
   const nT = tri.length / 9; const key = (t, k) => `${Math.round(tri[9 * t + 3 * k] * 1e4)},${Math.round(tri[9 * t + 3 * k + 1] * 1e4)},${Math.round(tri[9 * t + 3 * k + 2] * 1e4)}`;
@@ -7026,10 +7034,17 @@ function watertight(g) {
 async function saveStl(list, zipName) {
   const fixed = list.map((x) => ({ ...x, ...watertight(x.geo) })); const bad = fixed.reduce((s, x) => s + x.bad, 0);
   if (bad) toast(`В STL остались незамкнутые рёбра (${bad}): слайсер предложит починку. Пришлите проект, разберёмся, откуда они`, 'warn');
-  const blob = zipFiles(fixed.map((x) => ({ name: x.name + '.stl', data: stlBinary(x.geo) })));
-  if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: zipName + '.zip', data: blob }); return true; } catch (e) { if (e?.code === 'declined') return false; console.warn('download', e); } }
+  // File names lose the characters Windows refuses («Вал: ось/2?» gave a folder and an unopenable name); one body
+  // is one .stl, several go in a zip.
+  const safe = (n) => n.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim() || 'Деталь';
+  const one = fixed.length === 1; const filename = safe(one ? fixed[0].name : zipName) + (one ? '.stl' : '.zip');
+  const blob = one ? new Blob([stlBinary(fixed[0].geo)], { type: 'model/stl' }) : zipFiles(fixed.map((x) => ({ name: safe(x.name) + '.stl', data: stlBinary(x.geo) })));
+  if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename, data: blob }); return true; } catch (e) { if (e?.code === 'declined') return false;
+    // A host that doesn't let .stl through gets it in a zip, as before.
+    if (one && (e?.code === 'rejected_extension' || e?.code === 'extension_not_enabled')) { try { await CLOUD.downloads.save({ filename: safe(fixed[0].name) + '.zip', data: zipFiles([{ name: safe(fixed[0].name) + '.stl', data: stlBinary(fixed[0].geo) }]) }); return true; } catch (e2) { if (e2?.code === 'declined') return false; } }
+    console.warn('download', e); } }
   // Outside claude.ai (the local server or a plain file) the browser saves it directly.
-  const a = h('a', { href: URL.createObjectURL(blob), download: zipName + '.zip' }); document.body.append(a); a.click(); a.remove(); return true;
+  const a = h('a', { href: URL.createObjectURL(blob), download: filename }); document.body.append(a); a.click(); a.remove(); return true;
 }
 $('bStl').onclick = () => {
   if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
