@@ -1674,7 +1674,7 @@ function followPlane(pl, body, steps) {
 function computeBody(features) {
   let body = null; const errors = {}; const key = []; let cyls = [];
   for (const f of features) if (f.type === 'sketch' && f.planeRef) { const pf = features.find((g) => g.id === f.planeRef); if (pf) { const pl = refPlane(pf, features); f.plane = { ...pl, label: pf.name }; } }
-  const steps = []; let lastSolid = null;
+  const steps = []; let lastSolid = null; let nBodies = 1;
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
@@ -1691,7 +1691,7 @@ function computeBody(features) {
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
     const k = key.join('\n');
-    if (S.cache.has(k)) { const c = S.cache.get(k); S.cache.delete(k); S.cache.set(k, c); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
+    if (S.cache.has(k)) { const c = S.cache.get(k); S.cache.delete(k); S.cache.set(k, c); if (c.bodies) nBodies = c.bodies; body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
     let err = null; let warn = null;
     try {
       if (f.varErr) throw new Error(f.varErr);
@@ -1712,8 +1712,10 @@ function computeBody(features) {
       if (!body.getAttribute('position').count) err = 'Результат пустой';
       else if (f.type === 'loft' || f.type === 'sweep') { if (badEdges(body)) body = watertight(body).geo; checkSolid(body, f.type); }
     } catch (e) { err = e.message || String(e); if (e.partial) body = e.partial; }
+    // A cut that splits the part, or a boss that does not touch it, leaves several bodies: said, as SolidWorks does.
+    if (!err && !warn && body && (f.type === 'extrude' || f.type === 'revolve' || f.type === 'hole')) { const n = bodyCount(body); if (n > nBodies) warn = `Деталь теперь из ${n} отдельных тел`; nBodies = n; }
     if (err) errors[f.id] = err; S.warns[f.id] = warn;
-    S.cache.set(k, { body, err, cyls, warn });
+    S.cache.set(k, { body, err, cyls, warn, bodies: nBodies });
   }
   // Least recently used entries go first, down to what two builds of this part need (each one adds a body per feature).
   const cap = Math.max(80, 2 * features.length); while (S.cache.size > cap) S.cache.delete(S.cache.keys().next().value);
@@ -7328,6 +7330,15 @@ const copyText = async () => { const t = $('mText'); try { await navigator.clipb
 $('bExport').onclick = () => exportProjectFile();
 // Separate solids of a part: triangles joined through shared vertices form one shell; a shell facing
 // inwards (a void) belongs to the solid around it.
+// How many separate solids a body is: shells by shared vertices, those enclosing a volume of their own.
+function bodyCount(geo) {
+  const pos = geo.getAttribute('position'); const nT = pos.count / 3; const key = (i) => `${Math.round(pos.getX(i) * 1e4)},${Math.round(pos.getY(i) * 1e4)},${Math.round(pos.getZ(i) * 1e4)}`;
+  const par = Int32Array.from({ length: nT }, (_, i) => i); const find = (x) => { while (par[x] !== x) x = par[x] = par[par[x]]; return x; };
+  const owner = new Map(); for (let t = 0; t < nT; t++) for (let k = 0; k < 3; k++) { const kk = key(3 * t + k); const o = owner.get(kk); if (o === undefined) owner.set(kk, t); else par[find(t)] = find(o); }
+  const vol = new Map(); const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  for (let t = 0; t < nT; t++) { a.fromBufferAttribute(pos, 3 * t); b.fromBufferAttribute(pos, 3 * t + 1); c.fromBufferAttribute(pos, 3 * t + 2); const r = find(t); vol.set(r, (vol.get(r) || 0) + a.dot(b.clone().cross(c)) / 6); }
+  const big = Math.max(0, ...vol.values()); return [...vol.values()].filter((v) => v > big * 1e-6).length;
+}
 function splitBodies(geo) {
   const pos = geo.getAttribute('position'); const nT = pos.count / 3; const key = (i) => `${Math.round(pos.getX(i) * 1e4)},${Math.round(pos.getY(i) * 1e4)},${Math.round(pos.getZ(i) * 1e4)}`;
   const par = Int32Array.from({ length: nT }, (_, i) => i); const find = (x) => { while (par[x] !== x) x = par[x] = par[par[x]]; return x; };
@@ -7337,7 +7348,7 @@ function splitBodies(geo) {
   let shells = [...groups.values()].map((tris) => { const g = mk(tris); return { tris, g, v: geoVolume(g) }; });
   // Booleans leave scraps: tiny loose patches of surface with next to no volume. They are not bodies;
   // each goes with the nearest real one, so nothing is lost from the export.
-  const big = Math.max(0, ...shells.map((s) => s.v)); const minV = Math.max(0.5, big * 1e-3);
+  const big = Math.max(0, ...shells.map((s) => s.v)); const minV = big * 1e-6;
   const solids = shells.filter((s) => s.v >= minV).sort((a, b) => b.v - a.v);
   const centre = (s) => { s.g.computeBoundingBox(); return s.g.boundingBox.getCenter(new THREE.Vector3()); };
   for (const s of shells.filter((s) => s.v > 0 && s.v < minV)) { const c = centre(s); const host = solids.slice().sort((a, b) => centre(a).distanceTo(c) - centre(b).distanceTo(c))[0]; if (host) host.tris.push(...s.tris); }
