@@ -2156,6 +2156,15 @@ function snap(m, ctx = {}) {
     const a = gp(sk, e.p1), b = gp(sk, e.p2); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2; const s = sScreen(mx, my);
     if (Math.hypot(s.x - m.sx, s.y - m.sy) < 9) return { u: mx, v: my, kind: 'mid', ref: e.id, guides: [], glyph: '½' };
   }
+  // Quadrants of circles and arcs, and crossings of two lines, snap like points (on both curves).
+  { let best = null; const near = (x, y, o) => { const sc = sScreen(x, y); const d = Math.hypot(sc.x - m.sx, sc.y - m.sy); if (d < 9 && (!best || d < best.d)) best = { d, x, y, ...o }; };
+    const curves = Object.values(sk.ents).filter((e) => !ctx.excludeEnts?.has(e.id) && (e.t === 'circle' || e.t === 'arc'));
+    for (const e of curves) { const c = gp(sk, e.c); for (let k = 0; k < 4; k++) { const a = k * Math.PI / 2; if (e.t === 'arc' && !angleInArc(sk, e, a)) continue; near(c.x + e.r * Math.cos(a), c.y + e.r * Math.sin(a), { kind: 'on', ref: e.id, glyph: '◇' }); } }
+    const ls = Object.values(sk.ents).filter((e) => e.t === 'line' && !ctx.excludeEnts?.has(e.id) && !(ctx.excludePts?.has(e.p1) || ctx.excludePts?.has(e.p2)));
+    for (let i = 0; i < ls.length; i++) for (let j = i + 1; j < ls.length; j++) { const a = gp(sk, ls[i].p1), b = gp(sk, ls[i].p2), c = gp(sk, ls[j].p1), d = gp(sk, ls[j].p2); const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x); if (Math.abs(den) < 1e-12) continue;
+      const t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den, u = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den; if (t <= 1e-6 || t >= 1 - 1e-6 || u <= 1e-6 || u >= 1 - 1e-6) continue;
+      near(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), { kind: 'x', ref: ls[i].id, ref2: ls[j].id, glyph: '✕' }); }
+    if (best) return { u: best.x, v: best.y, kind: best.kind, ref: best.ref, ref2: best.ref2, guides: [], glyph: best.glyph }; }
   // The middle of a model edge snaps as well, without converting the edge first.
   if (S.refs) for (const [i, [x1, y1, x2, y2]] of S.refs.lines.entries()) { const mx = (x1 + x2) / 2, my = (y1 + y2) / 2; const s = sScreen(mx, my); if (Math.hypot(s.x - m.sx, s.y - m.sy) < 9) return { u: mx, v: my, kind: 'refmid', ref: 'r:l:' + i, guides: [], glyph: '½' }; }
   const pe = pick(m, { tol: 7, excludeEnts: ctx.excludeEnts, noAxes: false });
@@ -2190,6 +2199,7 @@ function snapToPoint(sk, sn, pending) {
   if (sn.kind === 'refmid') { const ek = materialize(sk, sn.ref).slice(2); sn = { ...sn, kind: 'mid', ref: ek }; }
   const id = nid(sk); sk.pts[id] = { id, x: sn.u, y: sn.v };
   if (sn.kind === 'mid') pending.push({ t: 'midpoint', refs: [id, sn.ref] });
+  if (sn.kind === 'x') pending.push({ t: 'online', refs: [id, sn.ref] }, { t: 'online', refs: [id, sn.ref2] });
   if (sn.kind === 'on') { const e = ge(sk, sn.ref); pending.push({ t: e.t === 'line' ? 'online' : 'oncircle', refs: [id, sn.ref] }); }
   return id;
 }
