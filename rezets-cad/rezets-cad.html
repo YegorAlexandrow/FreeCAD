@@ -6970,6 +6970,9 @@ function renderPM() {
     const body = h('div', { class: 'pm' }, pmHeader(isF ? 'Скругление' : 'Фаска', isF ? ICON.fillet : ICON.chamfer),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Размер'), isF ? numField('Радиус', 'pmRadius', f.r, (v) => { f.r = v; schedulePreview(); }) : numField('Расстояние', 'pmDist', f.d, (v) => { f.d = v; schedulePreview(); })),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Рёбра: ${f.edges.length}`), h('div', { class: 'note' }, 'Щёлкайте рёбра модели, повторный щелчок убирает ребро.'),
+        // Each edge is listed by what it is, so one can be taken out without hunting for it in the view.
+        ...f.edges.map((e, i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), e.t === 'circle' ? `Окружность ⌀${fmt(2 * e.r, 2)}` : `Прямое ${fmt(Math.hypot(...e.b.map((v, k) => v - e.a[k])), 2)} мм`,
+          h('button', { class: 'x', title: 'Убрать ребро', onclick: () => { f.edges.splice(i, 1); renderSide(); drawEdgeSelection(); schedulePreview(); } }, '✕'))),
         f.edges.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { f.edges.length = 0; renderSide(); drawEdgeSelection(); schedulePreview(); } }, 'Очистить')) : null));
     if (err) body.append(pmErr(err));
     side.append(body); return;
