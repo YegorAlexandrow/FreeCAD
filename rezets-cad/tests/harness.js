@@ -7,7 +7,7 @@ module.exports = async function open(opts = {}) {
   const ctx = await b.newContext({ viewport: opts.viewport || { width: 1400, height: 860 }, ignoreHTTPSErrors: true, colorScheme: opts.dark ? 'dark' : 'light' });
   await ctx.route('https://rezets.test/**', r => r.request().url().endsWith('.wasm')
     ? r.fulfill({ status: 200, contentType: 'application/wasm', body: fs.readFileSync(process.env.OCCT_WASM || ROOT + '/occt-import-js.wasm') })
-    : r.fulfill({ status: 200, contentType: 'text/html', body: fs.readFileSync(ROOT + '/test.html', 'utf8') }));
+    : r.fulfill({ status: 200, contentType: 'text/html', body: fs.readFileSync(process.env.TEST_HTML || ROOT + '/test.html', 'utf8') }));
   if (opts.clearStorage !== false) await ctx.addInitScript(() => { try { localStorage.clear(); } catch {} });
   if (opts.init) await ctx.addInitScript(opts.init);
   const p = await ctx.newPage(); const logs = [];

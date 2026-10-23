@@ -5146,8 +5146,8 @@ function renderImportPanel() {
 // their faces and axes, solved with the same minimum-norm Gauss-Newton as sketches.
 // ============================================================================================
 const newAsm = () => ({ comps: [], mates: [], nid: 1 });
-const MATE_NAMES = { coincident: 'Совпадение', parallel: 'Параллельность', perpendicular: 'Перпендикулярность', distance: 'Расстояние', angle: 'Угол', concentric: 'Концентричность', path: 'Путь', slot: 'Паз', cam: 'Кулачок' };
-const MATE_GLYPH = { coincident: '◆', parallel: '∥', perpendicular: '⊥', distance: '↔', angle: '∠', concentric: '◎', path: '⤳', slot: '⊂', cam: '◔' };
+const MATE_NAMES = { coincident: 'Совпадение', parallel: 'Параллельность', perpendicular: 'Перпендикулярность', distance: 'Расстояние', angle: 'Угол', concentric: 'Концентричность', tangent: 'Касательность', path: 'Путь', slot: 'Паз', cam: 'Кулачок' };
+const MATE_GLYPH = { coincident: '◆', parallel: '∥', perpendicular: '⊥', distance: '↔', angle: '∠', concentric: '◎', tangent: '⌒', path: '⤳', slot: '⊂', cam: '◔' };
 const COMP_COLORS = ['#b9c3cf', '#c9b79b', '#9fb8a5', '#b3a7c7', '#c2a2a2', '#9eb4c9'];
 // Geometry and recognisable faces of the document a component shows.
 const infoCache = new WeakMap();
@@ -5283,7 +5283,13 @@ function mateResiduals(m, A, B) {
     case 'coincident':
       if (A.kind === 'plane' && B.kind === 'plane') return [...par(), sep.dot(A.d)];
       if (A.kind === 'axis' && B.kind === 'axis') { const [u1, u2] = perpBasis(A.d); return [...par(), sep.dot(u1), sep.dot(u2)]; }
-      { const pl = A.kind === 'plane' ? A : B, ax = A.kind === 'plane' ? B : A; return [pl.d.dot(ax.d), ax.p.clone().sub(pl.p).dot(pl.d)]; }
+      { const pl = A.kind === 'plane' ? A : B, ax = A.kind === 'plane' ? B : A;
+        // A circular edge lies on the plane (its own plane coincides with it); an axis lies in it.
+        if (ax.edge) { const [u1, u2] = perpBasis(pl.d); return [ax.d.dot(u1), ax.d.dot(u2), ax.p.clone().sub(pl.p).dot(pl.d)]; }
+        return [pl.d.dot(ax.d), ax.p.clone().sub(pl.p).dot(pl.d)]; }
+    case 'tangent':
+      if (A.kind === 'axis' && B.kind === 'axis') { const t = sep.clone().addScaledVector(A.d, -sep.dot(A.d)); return [...par(), t.length() - (m.side === -1 ? Math.abs((A.r || 0) - (B.r || 0)) : (A.r || 0) + (B.r || 0))]; }
+      { const pl = A.kind === 'plane' ? A : B, ax = A.kind === 'plane' ? B : A; return [pl.d.dot(ax.d), ax.p.clone().sub(pl.p).dot(pl.d) * (m.side || 1) - (ax.r || 0)]; }
     case 'concentric': { const [u1, u2] = perpBasis(A.d); return [...par(), sep.dot(u1), sep.dot(u2)]; }
     case 'distance':
       // Axis to plane: the axis stays parallel to the plane at the given distance from it.
@@ -5458,6 +5464,18 @@ function alongAxis(asm, m) {
 }
 // Turns the moving component over first when the requested alignment is the far solution.
 function preAlign(asm, m) {
+  // An axis that must lie along a plane (tangency, axis in or parallel to the plane) but stands across it starts
+  // where the solver's gradient is zero: the part is first laid down by a quarter turn. A circular edge that must
+  // lie on the plane is stood up the same way.
+  if (m.a.kind !== m.b.kind && m.a.kind !== 'point' && m.b.kind !== 'point' && ['tangent', 'coincident', 'distance', 'parallel'].includes(m.type)) {
+    const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
+    const A = worldEnt(m.a, poseOf(ca)), B = worldEnt(m.b, poseOf(cb)); const ax = A.kind === 'axis' ? A : B, pl = ax === A ? B : A; const movAx = (mov === ca) === (ax === A);
+    const along = !(m.type === 'coincident' && ax.edge); const c = Math.abs(ax.d.dot(pl.d)); if (along ? c < 0.7 : c > 0.7) return;
+    let k = new THREE.Vector3().crossVectors(ax.d, pl.d); if (k.lengthSq() < 1e-12) k = perpBasis(pl.d)[0]; k.normalize();
+    const phi = Math.acos(Math.max(-1, Math.min(1, ax.d.dot(pl.d)))); const ang = along ? phi - Math.PI / 2 : phi > Math.PI / 2 ? phi - Math.PI : phi;
+    const rq = new THREE.Quaternion().setFromAxisAngle(k, movAx ? ang : -ang); const pivot = movAx ? ax.p : pl.p; const pose = poseOf(mov);
+    setPose(mov, pose.t.clone().sub(pivot).applyQuaternion(rq).add(pivot), rq.multiply(pose.q)); return;
+  }
   if (!['coincident', 'parallel', 'distance', 'concentric'].includes(m.type) || m.a.kind !== m.b.kind || m.a.kind === 'point') return;
   const ca = asm.comps.find((c) => c.id === m.a.comp), cb = asm.comps.find((c) => c.id === m.b.comp); const mov = !cb.fixed ? cb : !ca.fixed ? ca : null; if (!mov) return;
   const A = worldEnt(m.a, poseOf(ca)), B = worldEnt(m.b, poseOf(cb)); const want = m.flip ? 1 : -1;
@@ -5613,7 +5631,10 @@ function mateOptions0(a, b) {
   if (a.kind === 'point' || b.kind === 'point') { const o = a.kind === 'point' ? b : a; return ['coincident', 'distance']; }
   if (a.kind === 'axis' && b.kind === 'axis' && !a.r && !b.r) return ['coincident', 'parallel', 'perpendicular', 'distance', 'angle'];
   if (a.kind === 'plane' && b.kind === 'plane') return ['coincident', 'parallel', 'perpendicular', 'distance', 'angle'];
-  if (a.kind === 'axis' && b.kind === 'axis') return ['concentric', 'parallel', 'perpendicular', 'distance', 'angle'];
+  // A cylinder's face against a plane or another cylinder is first of all a tangency (SolidWorks' default there).
+  const cyl = (r) => r.kind === 'axis' && r.r && !r.edge;
+  if (a.kind === 'axis' && b.kind === 'axis') return cyl(a) && cyl(b) ? ['concentric', 'tangent', 'parallel', 'perpendicular', 'distance', 'angle'] : ['concentric', 'parallel', 'perpendicular', 'distance', 'angle'];
+  if (cyl(a) || cyl(b)) return ['tangent', 'coincident', 'parallel', 'perpendicular', 'distance'];
   return ['coincident', 'parallel', 'perpendicular', 'distance'];
 }
 function previewMate() {
@@ -5627,6 +5648,8 @@ function previewMate() {
   const m = { id: 'm' + asm.nid, type: pm.type, a: mr ? mr[0] : a, b: mr ? mr[1] : b, flip: pm.flip };
   // Distance keeps the side the parts are on now.
   if (pm.type === 'distance') { if (pm.v == null) { const raw = mateResiduals({ ...m, v: 0, side: 1 }, A, B).at(-1); pm.v = Math.abs(raw); pm.side = Math.sign(raw) || 1; } m.v = pm.v; m.side = pm.side || 1; }
+  // Tangency keeps the side the cylinder is on now (above or below the plane, outside or inside the other one).
+  if (pm.type === 'tangent') { if (pm.side == null) { if (A.kind === B.kind) { const sep = B.p.clone().sub(A.p); const t = sep.addScaledVector(A.d, -sep.dot(A.d)).length(); pm.side = t < Math.max(A.r || 0, B.r || 0) ? -1 : 1; } else { const pl = A.kind === 'plane' ? A : B, ax = pl === A ? B : A; pm.side = Math.sign(ax.p.clone().sub(pl.p).dot(pl.d)) || 1; } } m.side = pm.side; }
   if (pm.type === 'angle') { if (pm.v == null) pm.v = Math.round(Math.acos(Math.min(1, Math.abs(A.d.dot(B.d)))) * 180 / Math.PI); m.v = pm.v; m.side = pm.flip ? -1 : 1; }
   pm.result = tryAddMate(asm, m);
   // As in SolidWorks, when the faces cannot meet the way they face now (another mate holds the part's
@@ -5664,7 +5687,7 @@ function reverseMate(m) {
   asmRefresh(true);
 }
 // A distance from a plane to an axis or a vertex is signed: its reverse puts the part on the other side.
-const sideFlip = (a, b, type) => a && b && type === 'distance' && a.kind !== b.kind && (a.kind === 'plane' || b.kind === 'plane');
+const sideFlip = (a, b, type) => a && b && (type === 'tangent' || type === 'distance' && a.kind !== b.kind && (a.kind === 'plane' || b.kind === 'plane'));
 const canReverse = (a, b, type) => sideFlip(a, b, type) || (a && b && a.kind === b.kind && a.kind !== 'point' && ['coincident', 'parallel', 'distance', 'angle', 'concentric'].includes(type));
 // Why a direction mate cannot hold: an earlier mate between the same parts already leaves only a
 // turn about one axis, and a turn keeps the angle each picked face makes with that axis.
