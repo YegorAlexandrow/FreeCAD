@@ -2580,7 +2580,8 @@ function setTool(t) {
     for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) for (const q of [lines[i].p1, lines[i].p2]) if (q === lines[j].p1 || q === lines[j].p2) corners.add(q);
     if (corners.size) { let n = 0; const errs = []; for (const id of corners) { const r = filletCorner(sk, id, S.toolOpt.filletR); if (r?.arc) n++; else if (typeof r === 'string') errs.push(r); } S.sel.clear(); commitSketch(); toast(n ? `Скруглено углов: ${n}${errs.length ? `, не получилось: ${errs.length} (${errs[0]})` : ''}` : errs[0] || 'Нечего скруглять', n ? 'info' : 'warn'); } }
   if (t !== 'select' && t !== 'dim' && t !== 'sfillet' && S.sel.size) { S.sel.clear(); }
-  S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
+  const preDim = t === 'dim' && S.editing ? [...S.sel].filter((k) => k.startsWith('e:') || k.startsWith('p:')).slice(0, 2) : [];
+  S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
 }
@@ -5821,7 +5822,7 @@ function asmEdgePick(ev) {
   for (const c of S.doc.comps) {
     if (c.hidden) continue; const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
     // A circle's centre is not a corner of the part: a click there means the circle (its axis), not a vertex.
-    for (const v of T.verts) { if (T.circles.some((ci) => ci.c.distanceTo(v) < 1e-6)) continue; const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
+    for (const v of T.verts) { const cc = T.circles.find((ci) => ci.c.distanceTo(v) < 1e-6); if (cc) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'axis', p: cc.c.toArray(), d: cc.n.toArray(), r: cc.r, edge: { t: 'circle', c: cc.c.toArray(), n: cc.n.toArray(), r: cc.r } }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); continue; } const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
     for (const ci of T.circles) {
       const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
       // Circles far from the cursor are skipped before sampling; each circle gives one candidate.

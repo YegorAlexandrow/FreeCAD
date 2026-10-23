@@ -8,5 +8,5 @@ const open = require('./harness.js');
     R.loadDoc({ name: 'T', nid: 10, rollback: null, features: [{ id: 'f1', type: 'sketch', name: 'Эскиз1', plane: R.PLANES.front, sk }, { id: 'f2', type: 'extrude', name: 'Б1', sketch: 'f1', mode: 'add', end: 'blind', depth: 10, dir: 1, regions: null },
       { id: 'f3', type: 'fillet', name: 'Скругление1', r: 5, edges: [{ t: 'line', a: [40, 20, 0], b: [40, 20, 10] }] }, { id: 'f4', type: 'sketch', name: 'Эскиз2', plane: top, sk: R.newSketchData() }] });
     const refs = R.modelRefs(R.featById('f4')); return { err: JSON.stringify(S.errors), lines: refs.lines.length, circles: refs.circles.map((c) => [+c.x.toFixed(2), +c.y.toFixed(2), +c.r.toFixed(2)]), verts: refs.verts.length }; })));
-  console.log('expect no errors; 4 lines; a circle [35,15,5]; 6 vertices');
+  console.log('expect no errors; 6 lines (4 sides + Эскиз1 lines on the parallel plane); a circle [35,15,5]; 7 vertices');
   console.log(logs.join('\n')); await b.close(); })();
