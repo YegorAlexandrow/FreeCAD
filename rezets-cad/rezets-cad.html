@@ -4301,7 +4301,14 @@ function renderSectionBar() {
     h('span', { id: 'secArea', class: 'num', style: 'width:auto;color:var(--fg-2)' }, sc.area != null ? `S = ${fmt(sc.area, 2)} мм²` : ''),
     h('button', { title: 'Показать другую половину', onclick: () => { sc.flip = !sc.flip; applySection(); } }, '⇄'), h('button', { title: 'Закрыть разрез', onclick: () => toggleSection() }, '✕'));
 }
-function toggleSection() { S.section = S.section ? null : { plane: 'front', off: 0, flip: false }; renderSectionBar(); applySection(); }
+// A new section goes through the middle of the part when the plane through the origin would lie on one of its faces
+// (a cut along a face shows nothing useful).
+function toggleSection() {
+  if (S.section) S.section = null; else { let off = 0; const body = S.mode === 'part' ? S.body : null; const n = PLANES.front.n;
+    if (body && onSomeFace(body, { o: [0, 0, 0], n })) { body.computeBoundingBox(); const c = body.boundingBox.getCenter(new THREE.Vector3()); off = +V3(n).dot(c).toFixed(2); if (onSomeFace(body, { o: V3(n).multiplyScalar(off).toArray(), n })) off += 0.01; }
+    S.section = { plane: 'front', off, flip: false }; }
+  renderSectionBar(); applySection();
+}
 // Picking ignores what the section has cut away.
 const keptHit = (hits) => (S.section ? hits.find((h2) => secPlane.distanceToPoint(h2.point) >= -1e-6) : hits[0]);
 
