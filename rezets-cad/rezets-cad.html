@@ -5267,16 +5267,17 @@ const fmtQty = (v) => { const a = Math.abs(v); if (!(a > 0)) return '0'; if (a >
 const fmtMass = (g) => (g >= 1000 ? fmtQty(g / 1000) + ' кг' : g >= 1 ? fmtQty(g) + ' г' : g >= 1e-3 ? fmtQty(g * 1e3) + ' мг' : fmtQty(g * 1e6) + ' мкг');
 function cmdMass() {
   if (S.editing) exitSketch(); if (S.measure) closeMeasure();
-  if (S.mode === 'asm') { if (!S.doc.comps.length) { toast('Сборка пустая', 'warn'); return; } openPM({ kind: 'mass' }); drawMassMarker(); return; }
+  if (S.mode === 'asm') { if (!S.doc.comps.length) { toast('Сборка пустая', 'warn'); return; } const sel = S.asmSel; openPM({ kind: 'mass', massOff: new Set(sel ? allComps(S.doc).filter((c) => c.id !== sel).map((c) => c.id) : []) }); drawMassMarker(); return; } // with a component selected, its own mass
   if (!S.body) { toast('Нет тела', 'warn'); return; }
   openPM({ kind: 'mass' }); drawMassMarker();
 }
+// Components unticked in the mass panel (S.pm.massOff) are listed but left out of the total and the centre of mass.
 function asmMass() {
-  const rows = []; let mass = 0; const com = new THREE.Vector3();
+  const rows = []; let mass = 0; const com = new THREE.Vector3(); const off = S.pm?.kind === 'mass' && S.pm.massOff || new Set();
   for (const c of allComps(S.doc)) {
     const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const ent = docEntry(c.doc); const mat = matOf(ent.data);
-    const mp = massProps(inf.geo, new THREE.Matrix4().fromArray(c.T)); const m = mp.vol * MATERIALS[mat][1] / 1000;
-    rows.push({ c, ent, mat, vol: mp.vol, mass: m }); mass += m; com.addScaledVector(mp.com, m);
+    const mp = massProps(inf.geo, new THREE.Matrix4().fromArray(c.T)); const m = mp.vol * MATERIALS[mat][1] / 1000; const on = !off.has(c.id);
+    rows.push({ c, ent, mat, vol: mp.vol, mass: m, on }); if (on) { mass += m; com.addScaledVector(mp.com, m); }
   }
   return { rows, mass, com: mass ? com.divideScalar(mass) : com };
 }
@@ -5290,8 +5291,11 @@ function renderMassPM() {
   const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mass), h('span', {}, S.mode === 'asm' ? 'Масса сборки' : 'Свойства массы'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
   const xyz = (v) => `${fmt(v.x, 2)}; ${fmt(v.y, 2)}; ${fmt(v.z, 2)} мм`;
   if (S.mode === 'asm') {
-    const r = asmMass(); const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Итого'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(r.mass))), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(r.com))));
-    const list = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), ...r.rows.map((x) => h('div', { class: 'kv' }, h('span', {}, `${x.c.name}, ${MATERIALS[x.mat][0]}${x.ent?.data?.material ? '' : ' (материал не задан)'}`), h('b', {}, fmtMass(x.mass)))));
+    const r = asmMass(); const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, r.rows.every((x) => x.on) ? 'Итого' : `Итого по отмеченным: ${r.rows.filter((x) => x.on).length} из ${r.rows.length}`), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(r.mass))), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(r.com))));
+    const pm = S.pm; pm.massOff ||= new Set(); const tick = (id, on) => { if (on) pm.massOff.delete(id); else pm.massOff.add(id); renderSide(); drawMassMarker(); };
+    const all = r.rows.every((x) => x.on);
+    const list = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { for (const x of r.rows) tick(x.c.id, e.target.checked); } }), 'Все'),
+      ...r.rows.map((x) => h('div', { class: 'kv' }, h('label', { class: 'chk', style: 'flex:1;min-width:0' }, h('input', { type: 'checkbox', checked: x.on, onchange: (e) => tick(x.c.id, e.target.checked) }), h('span', {}, `${x.c.name}, ${MATERIALS[x.mat][0]}${x.ent?.data?.material ? '' : ' (материал не задан)'}`)), h('b', {}, fmtMass(x.mass)))));
     box.append(grp, list, h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Материал задаётся в детали: откройте её и нажмите «Масса».')));
     side.append(box); return;
   }
