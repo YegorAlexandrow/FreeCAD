@@ -4481,7 +4481,8 @@ function cloudSaveSoon() {
   clearTimeout(cloudTimer); setCloudState('saving'); cloudTimer = setTimeout(cloudSave, Math.max(1500, (CLOUD.lastStart || 0) + 5000 - Date.now()));
 }
 document.getElementById('saveState')?.addEventListener('click', () => { if (CLOUD.choice) { CLOUD.choice(); return; } if (['error', 'offline', 'wait'].includes(CLOUD.state) && CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudRetry); cloudSave(); } });
-window.addEventListener('beforeunload', (e) => { if (CLOUD.db && (CLOUD.saving || cloudTimer && CLOUD.state === 'saving')) { e.preventDefault(); e.returnValue = ''; } });
+// Closing while the cloud copy is behind (saving, waiting out a limit, offline, failed) asks first: the edits live only in this browser then.
+window.addEventListener('beforeunload', (e) => { if (CLOUD.db && !CLOUD.conflict && (CLOUD.saving || ['saving', 'wait', 'offline'].includes(CLOUD.state) || (CLOUD.state === 'error' && SYNC.get()?.dirty))) { e.preventDefault(); e.returnValue = ''; } });
 // Earlier revisions of a document, to roll back from the tab's menu.
 function docVersionsMenu(d, x, y) {
   const dm = CLOUD.meta?.docs.find((q) => q.id === d.id); if (!dm || (dm.revs || []).length < 2) { toast('Других версий в облаке нет', 'info'); return; }
