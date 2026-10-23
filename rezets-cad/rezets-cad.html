@@ -2696,7 +2696,12 @@ function finishSpline(closed) {
   const id = nid(sk); const pts = D.pts.slice(); sk.ents[id] = { id, t: 'spline', pts, p1: pts[0], p2: closed ? pts[0] : pts[pts.length - 1], closed: !!closed };
   addRelations(sk, D.pend || []); S.draw = null; commitSketch();
 }
-function endDrawing() { S.draw = null; updateSketchVisuals(); setHint(); }
+// Points the unfinished figure put down (an arc's centre, a chain's last start) go with it, with their relations.
+function endDrawing() {
+  const D = S.draw; S.draw = null; const sk = editSk();
+  if (sk && D?.newPts) { let gone = false; for (const id of D.newPts) { const q = sk.pts[id]; if (!q || q.hole || q.fixed || Object.values(sk.ents).some((e) => entPts(e).includes(id))) continue; delete sk.pts[id]; for (const c of Object.values(sk.cons)) if (c.refs.includes(id)) delete sk.cons[c.id]; gone = true; } if (gone) commitSketch(); }
+  updateSketchVisuals(); setHint();
+}
 function drawMove(m) {
   const sk = editSk(); const D = S.draw || (S.draw = { stage: 0, nid0: sk.nid });
   const exclude = new Set(D.newPts || []);
