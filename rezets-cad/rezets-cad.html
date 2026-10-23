@@ -182,6 +182,7 @@ button { font: inherit; color: inherit; }
 #mateBar { position: absolute; display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); z-index: 5; }
 #mateBar button { border: none; background: none; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 14px; color: var(--fg); min-width: 28px; }
 #mateBar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+#hoverTip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 2px 7px; font-size: 12px; color: var(--fg); box-shadow: 0 2px 8px rgb(0 0 0 / .12); z-index: 4; white-space: nowrap; }
 #mateBar .ok { color: var(--good); } #mateBar .no { color: var(--bad); }
 #relbar b { font-size: 13px; min-width: 12px; text-align: center; }
 kbd.k { font-family: var(--font-num); font-size: 10px; color: var(--fg-2); border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; margin-left: 2px; }
@@ -331,6 +332,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div id="editLayer"></div>
     <div id="relbar" hidden></div>
     <div id="mateBar" hidden></div>
+    <div id="hoverTip" hidden></div>
     <div id="viewbar">
       <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button>
     </div>
@@ -2742,6 +2744,8 @@ function partHover(ev) {
   const p = partPickAt(ev, !S.pm); const wantFace = S.pm?.kind === 'pickPlane' || S.pm?.feature?.type === 'plane' || !S.pm;
   showFaceHover(p?.face && wantFace ? p.face : null);
   const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); }
+  // The plane under the cursor says its name next to it.
+  const tip = $('hoverTip'); const name = hp && (PLANES[hp]?.label || (hp.startsWith?.('f:') && featById(hp.slice(2))?.name)); tip.hidden = !name; if (name) { const r = view.getBoundingClientRect(); tip.textContent = name; tip.style.left = ev.clientX - r.left + 14 + 'px'; tip.style.top = ev.clientY - r.top + 16 + 'px'; }
 }
 // The sketch whose curves pass nearest the cursor, among those before the rollback bar.
 function sketchAt(ev, open) {
@@ -2757,6 +2761,7 @@ function sketchAt(ev, open) {
 }
 // The hover highlight goes when the pointer leaves the view (it stayed lit while the pointer was on the tree).
 // A double click of the middle button (the wheel) fits the model, as in SolidWorks.
+canvas.addEventListener('pointerleave', () => { $('hoverTip').hidden = true; });
 // A double tap on a touch screen fits the model, like a double middle click.
 let tapAt = null; canvas.addEventListener('pointerup', (ev) => { if (ev.pointerType !== 'touch') return; const t = performance.now(); if (tapAt && t - tapAt.t < 320 && Math.hypot(ev.clientX - tapAt.x, ev.clientY - tapAt.y) < 24 && !S.editing) { fitAnimated(); tapAt = null; } else tapAt = { t, x: ev.clientX, y: ev.clientY }; });
 let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitAnimated(); midClickAt = 0; } else midClickAt = t; });
