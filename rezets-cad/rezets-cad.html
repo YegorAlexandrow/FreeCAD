@@ -4344,7 +4344,7 @@ function compColorMenu(c, x, y) { colorPopover(x, y, c.color, (hex) => { c.color
 // latest revisions of every document are kept. The browser copy (IndexedDB) stays as a cache
 // and for working offline; on start the newer of the two wins.
 // ============================================================================================
-const CLOUD = { db: null, uid: null, state: 'local', meta: null, unreadable: new Set(), lastHash: new Map(), saving: false, again: false, downloads: null, conflict: false };
+const CLOUD = { db: null, uid: null, state: 'local', meta: null, unreadable: new Set(), written: new Set(), lastHash: new Map(), saving: false, again: false, downloads: null, conflict: false };
 const CHUNK = 90000; const KEEP_REVS = 3;
 const hashStr = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ':' + s.length; };
 const docToStore = (d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.kind === 'import' ? { ...d.data, pos: b64.enc(d.data.pos), nrm: d.data.nrm ? b64.enc(d.data.nrm) : null } : d.data });
@@ -4428,7 +4428,10 @@ async function cloudSave() {
     // Chunks written by a save that did not finish (it failed or the tab closed) are named in the meta's `pending`;
     // whatever no revision took is removed here, otherwise every failed save of a big model leaks megabytes.
     const used = new Set(); for (const dm of curMeta?.docs || []) for (const r of dm.revs || []) { used.add(`${dm.id}~${r.rev}`); if (r.geo) used.add(geoPrefix(dm.id, r.geo.key)); }
-    for (const p of curMeta?.pending || []) if (!used.has(p.prefix)) for (let i = 0; i < p.n; i++) await chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {});
+    // A model's triangles half uploaded when the cloud asked to slow down are kept and finished, not removed: a big
+    // model under the rate limit otherwise started from zero every time and never got stored.
+    const want = new Set(); for (const d of S.project.docs) if (d.kind === 'import') want.add(geoPrefix(d.id, storedJson(d).geo.key));
+    for (const p of curMeta?.pending || []) if (!used.has(p.prefix) && !want.has(p.prefix)) for (let i = 0; i < p.n; i++) { CLOUD.written.delete(`${p.prefix}~${i}`); await chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {}); }
     for (const d of S.project.docs) {
       const st = storedJson(d); const { json, hash } = st; const old = prev.get(d.id); const top = old?.revs?.[0];
       if (top && (top.hash === hash || (!top.geo && st.legacy && top.hash === st.legacy()))) { docs.push({ ...old, name: d.name, kind: d.kind }); continue; }
@@ -4436,7 +4439,7 @@ async function cloudSave() {
       const entry = { rev, chunks: n, hash, savedAt: Date.now(), size: json.length }; puts.push({ prefix: `${d.id}~${rev}`, n, json });
       if (st.geo) {
         const had = (old?.revs || []).find((r) => r.geo?.key === st.geo.key); const gn = had ? had.geo.chunks : Math.max(1, Math.ceil(st.geo.json.length / CHUNK));
-        entry.geo = { key: st.geo.key, chunks: gn }; entry.size += st.geo.json.length; if (!had) puts.push({ prefix: geoPrefix(d.id, st.geo.key), n: gn, json: st.geo.json });
+        entry.geo = { key: st.geo.key, chunks: gn }; entry.size += st.geo.json.length; if (!had) puts.push({ prefix: geoPrefix(d.id, st.geo.key), n: gn, json: st.geo.json, geo: true });
       }
       // Earlier revisions of a model are kept only while they share its triangles: another copy of them costs megabytes.
       const older = (old?.revs || []).filter((r) => !st.geo || r.geo?.key === st.geo.key); for (const r of old?.revs || []) if (!older.includes(r)) drop.push([d.id, r]);
@@ -4444,8 +4447,8 @@ async function cloudSave() {
       docs.push({ id: d.id, kind: d.kind, name: d.name, revs: revs.slice(0, KEEP_REVS) }); CLOUD.lastHash.set(d.id, hash);
     }
     if (puts.length && cur.exists) await dbCall(metaRef().set({ ...curMeta, pending: puts.map(({ prefix, n }) => ({ prefix, n })) }));
-    try { for (const p of puts) for (let i = 0; i < p.n; i++) await dbCall(chunkCol().doc(`${p.prefix}~${i}`).set({ s: p.json.slice(i * CHUNK, (i + 1) * CHUNK) })); }
-    catch (e) { for (const p of puts) for (let i = 0; i < p.n; i++) chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {}); throw e; }
+    try { for (const p of puts) for (let i = 0; i < p.n; i++) { const id = `${p.prefix}~${i}`; if (p.geo && CLOUD.written.has(id)) continue; await dbCall(chunkCol().doc(id).set({ s: p.json.slice(i * CHUNK, (i + 1) * CHUNK) })); if (p.geo) CLOUD.written.add(id); } }
+    catch (e) { const resume = e?.code === 'resource_exhausted' || e?.code === 'unavailable'; for (const p of puts) if (!(resume && p.geo)) for (let i = 0; i < p.n; i++) { CLOUD.written.delete(`${p.prefix}~${i}`); chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {}); } throw e; }
     for (const [id, old] of prev) if (!docs.some((d) => d.id === id)) { if (CLOUD.unreadable.has(id)) { docs.push(old); continue; } for (const r of old.revs || []) drop.push([id, r]); }
     // Nothing changed but the open document (a tab where the project is only looked at): no write, so that tab does
     // not make the one where it is edited stop on «changed in another window».
@@ -4457,7 +4460,7 @@ async function cloudSave() {
     const gone = new Set();
     for (const [id, r] of drop) {
       for (let i = 0; i < r.chunks; i++) await chunkCol().doc(`${id}~${r.rev}~${i}`).delete().catch(() => {});
-      const gp = r.geo && geoPrefix(id, r.geo.key); if (gp && !keep.has(gp) && !gone.has(gp)) { gone.add(gp); for (let i = 0; i < r.geo.chunks; i++) await chunkCol().doc(`${gp}~${i}`).delete().catch(() => {}); }
+      const gp = r.geo && geoPrefix(id, r.geo.key); if (gp && !keep.has(gp) && !gone.has(gp)) { gone.add(gp); for (let i = 0; i < r.geo.chunks; i++) { CLOUD.written.delete(`${gp}~${i}`); await chunkCol().doc(`${gp}~${i}`).delete().catch(() => {}); } }
     }
     setCloudState('saved');
   } catch (e) {
