@@ -2457,6 +2457,10 @@ function partClick(ev) {
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   if (S.measure) { const x = measurePick(ev); if (!x) return; const M = S.measure; if (M.picks.length >= 2) M.picks = []; M.picks.push(x); M.result = measureResult(M.picks[0], M.picks[1]); drawMeasure(); renderSide(); return; }
   if (S.pm?.regionsOf) { const r = regionAt(ev); if (r) { toggleRegion(r.id); return; } const sf = canSwitchSketch() && sketchAt(ev); if (sf && sf.id !== S.pm.regionsOf) switchFeatureSketch(sf.id); return; }
+  // An edge clicked with no command open is selected (Ctrl or Shift adds, as in SolidWorks) for a fillet or chamfer.
+  if (!S.pm && S.body) { const e = pickEdge(ev, edgeTopology(S.body, S.cyls), true); if (e && e.pd < 6) { const add = ev.ctrlKey || ev.shiftKey || ev.metaKey; const cur = add ? S.selEdges || [] : []; const i = cur.findIndex((x) => sameEdge(x, e.edge)); S.selEdges = i >= 0 ? cur.filter((_, k) => k !== i) : [...cur, e.edge];
+    S.selectedTree = null; S.pickedFace = null; showFaceSel(null); drawSelEdges(); renderTree(); setHint(S.selEdges.length ? `Выбрано рёбер: ${S.selEdges.length}. «Скругление» или «Фаска» возьмут их; Ctrl+щелчок добавит ещё` : ''); return; } }
+  if (!ev.ctrlKey && !ev.shiftKey && S.selEdges?.length) { S.selEdges = []; drawSelEdges(); }
   const p = partPickAt(ev, !S.pm);
   if (S.pm?.feature?.type === 'plane') { const f = S.pm.feature; const key = S.pm.slot || 'base'; if (p?.plane) { if (p.plane === 'f:' + f.id) return; f[key] = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; } else if (p?.face) f[key] = { face: planeFromFace(p.face, p.point) }; else return; if (f.mid && key === 'base' && !f.base2) S.pm.slot = 'base2'; renderSide(); rebuild(); return; }
   if (S.pm?.kind === 'pickPlane') { if (p?.plane) sketchOnPlane(planeByKey(p.plane)); else if (p?.face) sketchOnPlane(planeFromFace(p.face, p.point)); return; }
@@ -3889,6 +3893,13 @@ function edgeSegs(e) {
   for (let i = 0; i < 96; i++) { const p = (k) => c.clone().addScaledVector(u, e.r * Math.cos(k / 96 * 2 * Math.PI)).addScaledVector(w, e.r * Math.sin(k / 96 * 2 * Math.PI)); out.push([p(i), p(i + 1)]); }
   return out;
 }
+// Edges selected on the part outside any command, shown in the selection colour.
+const selEdgeGroup = new THREE.Group(); scene.add(selEdgeGroup);
+function drawSelEdges() {
+  selEdgeGroup.clear(); const list = S.mode === 'part' && !S.pm ? S.selEdges || [] : []; const segs = list.flatMap(edgeSegs);
+  if (segs.length) { const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(colors['geo-sel'], 3, { depthTest: false })); l.renderOrder = 20; selEdgeGroup.add(l); }
+  requestRender();
+}
 function drawEdgeSelection() {
   groups.measure.clear(); const pm = S.pm; if (!pm?.edgePick) { requestRender(); return; }
   const draw = (list, col) => { const segs = list.flatMap(edgeSegs); if (!segs.length) return; const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(col, 3, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l); };
@@ -3912,7 +3923,9 @@ function cmdPlane() {
 function cmdEdgeFeature(type) {
   if (S.editing) exitSketch(); if (S.measure) closeMeasure();
   if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
-  const f = type === 'fillet' ? { id: fid(), type, name: nextName('Скругление'), r: 2, edges: [] } : { id: fid(), type, name: nextName('Фаска'), d: 1, edges: [] };
+  // Edges picked before the command (SolidWorks: select, then Fillet) go straight into it.
+  const pre = (S.selEdges || []).map((e) => ({ ...e })); S.selEdges = []; drawSelEdges();
+  const f = type === 'fillet' ? { id: fid(), type, name: nextName('Скругление'), r: 2, edges: pre } : { id: fid(), type, name: nextName('Фаска'), d: 1, edges: pre };
   openEdgePM(f, true);
 }
 function openEdgePM(f, isNew) {
@@ -6893,7 +6906,7 @@ function switchDoc(id) {
 }
 function enterDoc() {
   ctxGroup.clear(); $('ctxBar').hidden = true;
-  const ent = activeEntry(); S.sel.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
+  const ent = activeEntry(); S.sel.clear(); S.selEdges = []; selEdgeGroup.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
   S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
   if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); return; }
@@ -7317,7 +7330,7 @@ window.addEventListener('keydown', (e) => {
     if (S.pm) return closePM();
     if (S.mode === 'drw') { S.drwTool = null; renderTools(); setHint(''); return; }
     if (S.mode === 'asm') { S.asmSel = null; S.mateSel = null; asmRefresh(); return; }
-    S.selectedTree = null; S.pickedFace = null; S.faceOrigin = null; showFaceSel(null); setHint(); buildPlanes(); renderTree(); requestRender(); return;
+    S.selectedTree = null; S.pickedFace = null; S.faceOrigin = null; S.selEdges = []; drawSelEdges(); showFaceSel(null); setHint(); buildPlanes(); renderTree(); requestRender(); return;
   }
   // Arrows turn the view as in SolidWorks: 15° a press, 90° with Shift; Alt+←/→ rolls it.
   if (e.key.startsWith('Arrow') && !(S.editing && S.sel.size && !e.altKey)) { e.preventDefault(); const a = (e.shiftKey ? 90 : 15) * Math.PI / 180; const off = camera.position.clone().sub(controls.target); const fwd = off.clone().negate().normalize(); const up = camera.up.clone().normalize(); const right = new THREE.Vector3().crossVectors(fwd, up).normalize();
