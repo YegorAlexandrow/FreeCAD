@@ -5563,14 +5563,14 @@ function patternMatrices(f, features) {
     const A = axisOf(f.dir); if (!A) throw new Error('Выберите направление');
     const u = A.d.clone().multiplyScalar(f.flip ? -1 : 1); const B = f.dir2 ? axisOf(f.dir2) : null; const w = B ? B.d.clone().multiplyScalar(f.flip2 ? -1 : 1) : null;
     for (let j = 0; j < (B ? Math.max(1, f.n2 | 0) : 1); j++) for (let i = 0; i < Math.max(1, f.n | 0); i++) {
-      if (!i && !j) continue; const t = u.clone().multiplyScalar(i * f.d); if (w) t.addScaledVector(w, j * f.d2); out.push(new THREE.Matrix4().makeTranslation(t.x, t.y, t.z));
+      if (!i && !j) continue; if (f.skip?.includes(j * Math.max(1, f.n | 0) + i + 1)) continue; const t = u.clone().multiplyScalar(i * f.d); if (w) t.addScaledVector(w, j * f.d2); out.push(new THREE.Matrix4().makeTranslation(t.x, t.y, t.z));
     }
   } else if (f.type === 'cpattern') {
     const A = axisOf(f.axis); if (!A) throw new Error('Выберите ось');
     const n = Math.max(1, f.n | 0); const total = Math.min(360, f.angle || 360);
     // «Равный шаг» off: the angle is the step between neighbouring copies (SolidWorks' default when it is unticked).
     const step = (f.angleIsStep ? total : total >= 360 - 1e-9 ? 360 / n : total / Math.max(1, n - 1)) * Math.PI / 180 * (f.flip ? -1 : 1);
-    for (let k = 1; k < n; k++) { const R = new THREE.Matrix4().makeRotationAxis(A.d, step * k); out.push(new THREE.Matrix4().makeTranslation(A.p.x, A.p.y, A.p.z).multiply(R).multiply(new THREE.Matrix4().makeTranslation(-A.p.x, -A.p.y, -A.p.z))); }
+    for (let k = 1; k < n; k++) { if (f.skip?.includes(k + 1)) continue; const R = new THREE.Matrix4().makeRotationAxis(A.d, step * k); out.push(new THREE.Matrix4().makeTranslation(A.p.x, A.p.y, A.p.z).multiply(R).multiply(new THREE.Matrix4().makeTranslation(-A.p.x, -A.p.y, -A.p.z))); }
   } else {
     const pl = mirrorPlane(f, features); const n = V3(pl.n).normalize(); const o = V3(pl.o); const d = n.dot(o);
     const M = new THREE.Matrix4().set(1 - 2 * n.x * n.x, -2 * n.x * n.y, -2 * n.x * n.z, 2 * d * n.x, -2 * n.y * n.x, 1 - 2 * n.y * n.y, -2 * n.y * n.z, 2 * d * n.y, -2 * n.z * n.x, -2 * n.z * n.y, 1 - 2 * n.z * n.z, 2 * d * n.z, 0, 0, 0, 1);
@@ -5782,6 +5782,11 @@ function renderPatternPM() {
         // The part's own reference planes (a middle plane, say) are offered next to the standard ones.
         S.doc.features.slice(0, idx).filter((x) => x.type === 'plane' && !x.suppressed).map((x) => h('button', { class: 'chip' + (f.plane.plane === x.id ? ' on' : ''), onclick: () => { f.plane = { plane: x.id }; renderSide(); schedulePreview(); } }, x.name)))));
   }
+  // «Пропустить экземпляры»: copies by their numbers (the seed is 1, then along direction 1, row by row), as in SolidWorks.
+  if (f.type === 'lpattern' || f.type === 'cpattern') { const inp = h('input', { type: 'text', value: (f.skip || []).join(', '), placeholder: 'например 3, 5', 'aria-label': 'Пропустить экземпляры' });
+    const apply = () => { const v = [...new Set(inp.value.split(/[^0-9]+/).map(Number).filter((k) => k >= 2))].sort((a, b) => a - b); if (v.length) f.skip = v; else delete f.skip; inp.value = v.join(', '); schedulePreview(); };
+    inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Пропустить экземпляры'), h('label', { class: 'field' }, h('span', {}, 'Номера'), inp), h('div', { class: 'note' }, 'Исходный экземпляр 1, дальше по направлению 1, ряд за рядом'))); }
   if (err) body.append(pmErr(err));
   side.append(body);
 }
