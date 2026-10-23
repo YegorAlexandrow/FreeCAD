@@ -6286,8 +6286,8 @@ function renderAsmTree() {
     const ent = docEntry(c.doc); const status = c.fixed ? '(ф)' : an?.free.has(c.id) ? '(−)' : '';
     const eye = h('button', { class: 'eye', title: c.hidden ? 'Показать' : 'Скрыть', 'aria-label': c.hidden ? 'Показать' : 'Скрыть', onclick: (e) => { e.stopPropagation(); toggleCompHidden(c); } }, c.hidden ? '◌' : '◉');
     // A component whose part document is gone from the project is marked, not shown as an ordinary one.
-    const lostDoc = !S.project.docs.some((d) => d.id === c.doc);
-    const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : '') + (c.hidden ? ' off' : '') + (lostDoc ? ' warn' : ''), tabindex: '0', role: 'treeitem', title: lostDoc ? 'Документа этой детали больше нет в проекте: компонент пустой. Удалите его или замените' : (c.hidden ? 'Скрыт. ' : '') + (c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён') },
+    const lostDoc = !S.project.docs.some((d) => d.id === c.doc); const noBody = !lostDoc && docInfo(c.doc)?.empty;
+    const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : '') + (c.hidden ? ' off' : '') + (lostDoc || noBody ? ' warn' : ''), tabindex: '0', role: 'treeitem', title: lostDoc ? 'Документа этой детали больше нет в проекте: компонент пустой. Удалите его или замените' : noBody ? 'У детали сейчас нет тела (ошибка в её дереве или всё откачено): компонент не виден. Откройте деталь' : (c.hidden ? 'Скрыт. ' : '') + (c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён') },
       svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name), eye);
     r.onclick = () => { S.asmSel = c.id; S.mateSel = null; asmRefresh(); };
     r.ondblclick = () => switchDoc(c.doc);
