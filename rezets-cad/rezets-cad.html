@@ -1608,6 +1608,8 @@ function computeBody(features) {
     if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.plane.face && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
+    // A circular pattern's axis taken from a hole or boss stays on that hole when a dimension moves it.
+    if (body && (f.type === 'cpattern' || f.type === 'lpattern') && !f.suppressed) for (const key of ['axis', 'dir', 'dir2']) { const e = f[key]?.edge; if (e?.t !== 'circle' || !e.src) continue; const c = edgeTopology(body, cyls).circles.filter((q) => q.src === e.src).sort((p, q) => p.c.distanceTo(V3(e.c)) - q.c.distanceTo(V3(e.c)))[0]; if (c && c.c.distanceTo(V3(e.c)) > 1e-9) f[key] = { ...f[key], edge: { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r } }; }
     key.push(JSON.stringify(f));
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
@@ -3825,7 +3827,7 @@ function pickEdge(ev, topo, withDist) {
   const take = (o, d) => { if (d < 9 && (!best || d < best.pd)) best = { ...o, pd: d }; };
   for (const c of topo.circles) {
     const u = new THREE.Vector3().crossVectors(c.n, Math.abs(c.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(c.n, u);
-    for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2; const s2 = toScreen(c.c.clone().addScaledVector(u, c.r * Math.cos(a)).addScaledVector(w, c.r * Math.sin(a))); take({ edge: { t: 'circle', c: c.c.toArray(), n: c.n.toArray(), r: c.r } }, Math.hypot(s2.x - mx, s2.y - my)); }
+    for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2; const s2 = toScreen(c.c.clone().addScaledVector(u, c.r * Math.cos(a)).addScaledVector(w, c.r * Math.sin(a))); take({ edge: { t: 'circle', c: c.c.toArray(), n: c.n.toArray(), r: c.r, ...(c.src ? { src: c.src } : {}) } }, Math.hypot(s2.x - mx, s2.y - my)); }
   }
   for (const [a, b] of topo.lines) take({ edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, toScreen(a), toScreen(b)));
   return withDist ? best : best?.edge || null;
