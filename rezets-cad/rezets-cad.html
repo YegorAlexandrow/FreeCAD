@@ -1520,11 +1520,17 @@ function reattachRefs() {
     for (const id of lost) { const p = f.sk.pts[id]; if (!p) continue; delete p.fixed; delete p.free; delete p.mref; delete p.lost; for (const e of Object.values(f.sk.ents)) if (e.ext && (e.p1 === id || e.p2 === id || e.c === id)) delete e.ext; }
     S.dangling.delete(f.id); commitSketch(); toast('На плоскости эскиза нет рёбер модели: висевшие точки стали обычными точками эскиза, задайте их размерами', 'warn'); return;
   }
+  // Only a corner near where the point hangs is taken: the nearest one at any distance tore sketches apart while
+  // reporting success. The rest stay lost, to be dragged onto the right corner one by one.
+  let lo = [Infinity, Infinity], hi = [-Infinity, -Infinity]; for (const q of cands) { lo = [Math.min(lo[0], q.x), Math.min(lo[1], q.y)]; hi = [Math.max(hi[0], q.x), Math.max(hi[1], q.y)]; }
+  const reach = Math.max(5, 0.15 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1])); const left = [];
   for (const id of lost) {
     const p = f.sk.pts[id]; if (!p) continue; let best = null; for (const q of cands) { const d = Math.hypot(q.x - p.x, q.y - p.y); if (!best || d < best.d) best = { d, q }; }
+    if (!best || best.d > reach) { left.push(id); continue; }
     p.x = best.q.x; p.y = best.q.y; p.mref = best.q.ref(); delete p.lost; if (best.q.r) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === id) e.r = best.q.r;
   }
-  S.dangling.delete(f.id); commitSketch(); toast(`Привязки к модели обновлены: ${lost.length}`, 'info');
+  if (left.length) S.dangling.set(f.id, left); else S.dangling.delete(f.id); commitSketch();
+  toast(left.length ? `Привязано ${lost.length - left.length} из ${lost.length}. Остальным рядом нет вершины модели: перетащите каждую красную точку на нужную вершину` : `Привязки к модели обновлены: ${lost.length}`, left.length ? 'warn' : 'info');
 }
 // Brings a model reference into the sketch as fixed (external) geometry and returns its key.
 function materialize(sk, key) {
