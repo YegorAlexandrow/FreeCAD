@@ -978,6 +978,7 @@ function discretize(sk) {
     }
     // Fillets between curves end on a curve, not at a shared point: their ends split what they lie on.
     if (e.snap && segs.length > n0) { segs[n0].snapA = true; segs[segs.length - 1].snapB = true; }
+    for (let i = n0; i < segs.length; i++) segs[i].e = e.id;
   }
   return segs;
 }
@@ -1016,7 +1017,7 @@ function buildRegions(sk) {
     for (let k = 0; k < ts.length - 1; k++) {
       const at = (t) => snapTo[i].get(t) || [s[0] + (s[2] - s[0]) * t, s[1] + (s[3] - s[1]) * t];
       const a = node(...at(ts[k])); const b = node(...at(ts[k + 1]));
-      if (a === b) continue; const ek = a < b ? a + ':' + b : b + ':' + a; if (edgeSet.has(ek)) continue; edgeSet.add(ek); edges.push([a, b]);
+      if (a === b) continue; const ek = a < b ? a + ':' + b : b + ':' + a; if (edgeSet.has(ek)) continue; edgeSet.add(ek); edges.push([a, b, s.e]);
     }
   });
   // Drop dangling edges.
@@ -1027,7 +1028,7 @@ function buildRegions(sk) {
     edges.forEach(([a, b], i) => { if (alive[i] && (deg[a] < 2 || deg[b] < 2)) { alive[i] = false; changed = true; } });
   }
   const he = [];
-  edges.forEach(([a, b], i) => { if (!alive[i]) return; const h1 = { from: a, to: b }, h2 = { from: b, to: a }; h1.twin = h2; h2.twin = h1; he.push(h1, h2); nodes[a].out.push(h1); nodes[b].out.push(h2); });
+  edges.forEach(([a, b], i) => { if (!alive[i]) return; const h1 = { from: a, to: b, e: edges[i][2] }, h2 = { from: b, to: a, e: edges[i][2] }; h1.twin = h2; h2.twin = h1; he.push(h1, h2); nodes[a].out.push(h1); nodes[b].out.push(h2); });
   for (const nd of nodes) { for (const x of nd.out) x.ang = Math.atan2(nodes[x.to].y - nd.y, nodes[x.to].x - nd.x); nd.out.sort((p, q2) => p.ang - q2.ang); }
   for (const x of he) { const out = nodes[x.to].out; const i = out.indexOf(x.twin); x.next = out[(i - 1 + out.length) % out.length]; }
   const faces = [];
@@ -1049,6 +1050,8 @@ function buildRegions(sk) {
   }
   for (const f of bounded) f.holes = outer.filter((o) => o.container === f).map((o) => o.poly.slice().reverse());
   bounded.forEach((f, i) => { f.id = i; f.sample = interiorPoint(f.poly, f.holes); });
+  // The sketch entities around a region (its holes too) name it independently of where it is and how regions are numbered.
+  for (const f of bounded) f.sig = [...new Set([f, ...outer.filter((o) => o.container === f)].flatMap((x) => x.hes.map((h) => h.e)))].sort().join(',');
   // Default selection: even-odd fill for nested profiles, every region when curves cross.
   for (const f of bounded) {
     if (hasCrossing) { f.defaultOn = true; continue; }
@@ -1736,14 +1739,26 @@ function sketchRegions(f) {
   return f._reg;
 }
 const inRegion = (r, p) => pointInPoly(p, r.poly) && !r.holes.some((hh) => pointInPoly(p, hh));
-function selectedRegionIds(f, reg) {
-  // Each picked region is also kept by a point inside it: a line added elsewhere in the sketch renumbers the
-  // regions, and the point still finds the one that was picked.
-  if (Array.isArray(f.regions) && f.regions.length && Array.isArray(f.regionPts) && f.regionPts.length === f.regions.length) {
-    const ids = new Set(); f.regions.forEach((i, k) => { const p = f.regionPts[k], at = reg.faces[i]; if (at && inRegion(at, p)) { ids.add(i); return; } const hit = reg.faces.find((x) => inRegion(x, p)); if (hit) ids.add(hit.id); else if (at) ids.add(i); });
+function selectedRegionIds(f, reg, out) {
+  // A picked region is found again by the sketch entities around it, so moving or resizing them keeps the pick (holes
+  // moved across a plate stay the holes). A point inside it, and then its number, are the fallbacks for older files
+  // and redrawn entities. A pick found only by a fallback is reported unsure, and the caller then leaves the stored
+  // pick alone: rebuilds while a point is being dragged see passing shapes, and must not write those into the feature.
+  const n = f.regions?.length; if (out) out.sure = true;
+  const sigs = n && Array.isArray(f.regionSigs) && f.regionSigs.length === n ? f.regionSigs : null;
+  const pts = n && Array.isArray(f.regionPts) && f.regionPts.length === n ? f.regionPts : null;
+  if (sigs || pts) {
+    const ids = new Set(); let sure = true;
+    f.regions.forEach((i, k) => {
+      const p = pts?.[k];
+      if (sigs) { const c = reg.faces.filter((x) => x.sig === sigs[k]); if (c.length) { ids.add((c.length > 1 && (c.find((x) => p && inRegion(x, p)) || c.find((x) => x.id === i)) || c[0]).id); return; } }
+      const at = reg.faces[i]; if (p && at && inRegion(at, p)) { ids.add(i); if (sigs) sure = false; return; }
+      sure = false; const hit = p && reg.faces.find((x) => inRegion(x, p)); if (hit) ids.add(hit.id); else if (at) ids.add(i);
+    });
+    if (out) out.sure = sure;
     if (ids.size) return ids;
   }
-  if (Array.isArray(f.regions) && f.regions.length) { const set = new Set(f.regions.filter((i) => i < reg.faces.length)); if (set.size) return set; }
+  if (n) { const set = new Set(f.regions.filter((i) => i < reg.faces.length)); if (out && set.size < n) out.sure = false; if (set.size) return set; }
   return new Set(reg.faces.filter((x) => x.defaultOn).map((x) => x.id));
 }
 function bodyMesh(body) { const m = new THREE.Mesh(body, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })); m.updateMatrixWorld(); return m; }
@@ -1754,8 +1769,8 @@ function isInside(body, p) {
 function buildTool(f, body, cyls = []) {
   const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
   const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров');
-  const selIds = selectedRegionIds(f, reg); const loops0 = profileLoops(reg, selIds); if (!loops0.length) throw new Error('Не выбрано ни одной области');
-  if (Array.isArray(f.regions) && f.regions.length) { const ids = [...selIds]; const pts = ids.map((i) => reg.faces[i].sample.map((v) => +v.toFixed(6))); if (JSON.stringify([ids, pts]) !== JSON.stringify([f.regions, f.regionPts])) { f.regions = ids; f.regionPts = pts; } }
+  const st = {}; const selIds = selectedRegionIds(f, reg, st); const loops0 = profileLoops(reg, selIds); if (!loops0.length) throw new Error('Не выбрано ни одной области');
+  if (Array.isArray(f.regions) && f.regions.length && st.sure) { const ids = [...selIds]; const pts = ids.map((i) => reg.faces[i].sample.map((v) => +v.toFixed(6))); const sigs = ids.map((i) => reg.faces[i].sig); if (JSON.stringify([ids, pts, sigs]) !== JSON.stringify([f.regions, f.regionPts, f.regionSigs])) { f.regions = ids; f.regionPts = pts; f.regionSigs = sigs; } }
   // Areas that meet only at a corner leave the part there zero thick (in the cut, pieces joined by a point; in a
   // boss, solids touching at an edge): SolidWorks refuses such a profile, and so does this.
   let loops = splitPinches(loops0);
@@ -3768,7 +3783,7 @@ function switchFeatureSketch(id) {
 }
 function toggleRegion(id) {
   const f = S.pm.feature; const sf = featById(S.pm.regionsOf); const reg = sketchRegions(sf); const set = selectedRegionIds(f, reg);
-  if (set.has(id)) set.delete(id); else set.add(id); f.regions = [...set];
+  if (set.has(id)) set.delete(id); else set.add(id); f.regions = [...set]; delete f.regionPts; delete f.regionSigs;
   if (!set.size) f.regions = []; renderSide(); schedulePreview(); drawRegions();
 }
 
