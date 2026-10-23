@@ -340,7 +340,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div id="mateBar" hidden></div>
     <div id="hoverTip" hidden></div>
     <div id="viewbar">
-      <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button>
+      <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button><button id="bDisplay" title="Тонированный, без невидимых линий или каркас">Отображение ▾</button>
     </div>
     <div id="sectionBar" hidden></div>
     <div id="ctxBar" hidden></div>
@@ -2133,6 +2133,18 @@ function buildPlanes() {
 }
 let bodyMeshObj = null, faceIndex = [];
 function updateBodyMesh() { updateBodyMesh0(); if (S.section || secGroup.children.length) applySection(); requestRender(); }
+// Display style, as SolidWorks has it: shaded with edges (the default), hidden lines removed (flat paper-white faces
+// that hide what is behind them), wireframe (edges only, the ones behind too). Picking works the same in all three.
+function applyDisplay() {
+  const m = S.display || 'shaded'; const mesh = bodyMeshObj; if (!mesh) return; const mat = mesh.material; mat.userData.orig ||= { color: mat.color.clone(), vc: mat.vertexColors };
+  mesh.visible = m !== 'wire';
+  if (m === 'hlr') { const paper = new THREE.Color(css('--vp-bot') || '#ffffff'); mat.color.copy(paper); mat.vertexColors = false; mat.emissive.copy(paper); mat.emissiveIntensity = 1; }
+  else { mat.color.copy(mat.userData.orig.color); mat.vertexColors = mat.userData.orig.vc; mat.emissive.set(0x000000); mat.emissiveIntensity = 1; }
+  mat.needsUpdate = true;
+  for (const o of groups.body.children) if (o.isLineSegments2 || o.material?.isLineMaterial) { o.material.depthTest = m !== 'wire'; o.material.needsUpdate = true; }
+  requestRender();
+}
+function displayMenu(btn) { const r = btn.getBoundingClientRect(); const cur = S.display || 'shaded'; openMenu(r.left, r.bottom + 4, [['shaded', 'Тонированный с рёбрами'], ['hlr', 'Без невидимых линий'], ['wire', 'Каркас']].map(([k, l]) => [(k === cur ? '✓ ' : '') + l, () => { S.display = k; applyDisplay(); }])); }
 function updateBodyMesh0() {
   if (S.measure) { S.measure.picks = []; S.measure.result = null; groups.measure.clear(); }
   groups.body.clear(); bodyMeshObj = null; faceIndex = []; originGroup.clear();
@@ -2141,7 +2153,7 @@ function updateBodyMesh0() {
   const base = partColor(S.doc) || ('#' + colors.body.getHexString()); const vc = bodyColors(S.body, S.doc, S.cyls, base); if (vc) shaded.setAttribute('color', new THREE.BufferAttribute(vc, 3));
   const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : base, vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
   bodyMeshObj = new THREE.Mesh(shaded, mat); groups.body.add(bodyMeshObj);
-  groups.body.add(segLines(edgeTopology(S.body, S.cyls).display, lineMat(colors.edge, 1.4)));
+  groups.body.add(segLines(edgeTopology(S.body, S.cyls).display, lineMat(colors.edge, 1.4))); applyDisplay();
   // Faces for picking: triangles grouped by plane, and every cylinder wall as one face. A wall
   // triangle has its three corners on the cylinder and spans along the axis; its own normal is not
   // trusted, since booleans leave slivers whose normals are noise.
@@ -8269,7 +8281,8 @@ $('fileIn').onchange = async (e) => {
 };
 $('modal').addEventListener('pointerdown', (e) => { if (e.target.id === 'modal') closeModal(); });
 $('sideToggle').onclick = () => side.classList.toggle('open');
-for (const b of document.querySelectorAll('#viewbar button')) b.onclick = () => viewCmd(b.dataset.view);
+for (const b of document.querySelectorAll('#viewbar button[data-view]')) b.onclick = () => viewCmd(b.dataset.view);
+$('bDisplay').onclick = (e) => displayMenu(e.currentTarget);
 // The buttons say their keys, and the one for the direction the view looks from now is lit.
 { const keys = { front: 'Ctrl+1', top: 'Ctrl+5', right: 'Ctrl+4', iso: 'Ctrl+7', normal: 'Ctrl+8', fit: 'F' }; for (const b of document.querySelectorAll('#viewbar button')) if (keys[b.dataset.view] && !b.title) b.title = keys[b.dataset.view]; }
 function markViewbar() {
