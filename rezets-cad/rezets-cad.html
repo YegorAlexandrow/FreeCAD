@@ -4732,8 +4732,12 @@ function bomRows() {
 }
 function cmdBom() {
   const rows = bomRows(); if (!rows.length) { toast('Сборка пустая', 'warn'); return; }
-  const csv = ['№;Наименование;Кол-во;Материал;Масса шт, г;Масса всего, г', ...rows.map((r) => [r.n, r.name, r.qty, r.mat, r.mass.toFixed(2), (r.mass * r.qty).toFixed(2)].join(';'))].join('\n');
-  const nc = allComps(S.doc).length; showModal('Спецификация', `${rows.length} ${plural(rows.length, 'позиция', 'позиции', 'позиций')}, ${nc} ${plural(nc, 'компонент', 'компонента', 'компонентов')}. Текст можно вставить в таблицу (разделитель «;»).`, csv, [['Копировать', copyText], ['Закрыть', closeModal]]);
+  // Decimal commas and a total line: Russian Excel reads «160.27» after «;» as text or a date.
+  const dc = (v) => v.toFixed(2).replace('.', ','); const total = rows.reduce((a, r) => a + r.mass * r.qty, 0); const qty = rows.reduce((a, r) => a + r.qty, 0);
+  const csv = ['№;Наименование;Кол-во;Материал;Масса шт, г;Масса всего, г', ...rows.map((r) => [r.n, r.name, r.qty, r.mat, dc(r.mass), dc(r.mass * r.qty)].join(';')), ['', 'Итого', qty, '', '', dc(total)].join(';')].join('\n');
+  const saveCsv = async () => { const name = (activeEntry()?.name || 'Сборка').replace(/[\\/:*?"<>|]+/g, '_') + ' спецификация.csv'; const blob = new Blob(['\ufeff' + csv], { type: 'text/csv' });
+    if (CLOUD.downloads) { try { await CLOUD.downloads.save({ filename: name, data: blob }); return; } catch (e) { if (e?.code === 'declined') return; } } const a = h('a', { href: URL.createObjectURL(blob), download: name }); document.body.append(a); a.click(); a.remove(); };
+  const nc = allComps(S.doc).length; showModal('Спецификация', `${rows.length} ${plural(rows.length, 'позиция', 'позиции', 'позиций')}, ${nc} ${plural(nc, 'компонент', 'компонента', 'компонентов')}. Текст можно вставить в таблицу (разделитель «;»).`, csv, [['Сохранить .csv', saveCsv], ['Копировать', copyText], ['Закрыть', closeModal]]);
 }
 
 // ============================================================================================
