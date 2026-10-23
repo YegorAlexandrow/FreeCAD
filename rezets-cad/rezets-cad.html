@@ -2063,7 +2063,7 @@ function fitDepth() {
   depthBox.getBoundingSphere(depthSph); const dz = depthSph.center.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3()));
   const m = depthSph.radius * 1.05 + 1; camera.near = dz - m; camera.far = dz + m; camera.updateProjectionMatrix();
 }
-function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); viewCube.draw(); drawTriad(); layoutOverlay(); }); }
+function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); viewCube.draw(); drawTriad(); markViewbar(); layoutOverlay(); }); }
 // Outlines of curved faces as seen from here (a cylinder's sides, a fillet's edge on the skyline), redrawn as the
 // view turns, as SolidWorks draws them: without them a shaft seen from the side was a flat grey band.
 const silGroup = new THREE.Group(); let silState = { geo: null, dir: null, obj: null };
@@ -2744,6 +2744,8 @@ function sketchAt(ev, open) {
 }
 // The hover highlight goes when the pointer leaves the view (it stayed lit while the pointer was on the tree).
 // A double click of the middle button (the wheel) fits the model, as in SolidWorks.
+// A double tap on a touch screen fits the model, like a double middle click.
+let tapAt = null; canvas.addEventListener('pointerup', (ev) => { if (ev.pointerType !== 'touch') return; const t = performance.now(); if (tapAt && t - tapAt.t < 320 && Math.hypot(ev.clientX - tapAt.x, ev.clientY - tapAt.y) < 24 && !S.editing) { fitAnimated(); tapAt = null; } else tapAt = { t, x: ev.clientX, y: ev.clientY }; });
 let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitAnimated(); midClickAt = 0; } else midClickAt = t; });
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
@@ -8155,6 +8157,13 @@ $('fileIn').onchange = async (e) => {
 $('modal').addEventListener('pointerdown', (e) => { if (e.target.id === 'modal') closeModal(); });
 $('sideToggle').onclick = () => side.classList.toggle('open');
 for (const b of document.querySelectorAll('#viewbar button')) b.onclick = () => viewCmd(b.dataset.view);
+// The buttons say their keys, and the one for the direction the view looks from now is lit.
+{ const keys = { front: 'Ctrl+1', top: 'Ctrl+5', right: 'Ctrl+4', iso: 'Ctrl+7', normal: 'Ctrl+8', fit: 'F' }; for (const b of document.querySelectorAll('#viewbar button')) if (keys[b.dataset.view] && !b.title) b.title = keys[b.dataset.view]; }
+function markViewbar() {
+  const d = camera.position.clone().sub(controls.target).normalize(); const near = (v) => d.dot(new THREE.Vector3(...v).normalize()) > 1 - 1e-6;
+  const cur = near(PLANES.front.n) ? 'front' : near(PLANES.top.n) ? 'top' : near(PLANES.right.n) ? 'right' : near([1, 1, 1]) ? 'iso' : null;
+  for (const b of document.querySelectorAll('#viewbar button[data-view]')) if (['front', 'top', 'right', 'iso'].includes(b.dataset.view)) { const on = String(b.dataset.view === cur); if (b.getAttribute('aria-pressed') !== on) b.setAttribute('aria-pressed', on); }
+}
 
 // ---------------- keyboard ----------------
 window.addEventListener('focusin', (e) => { const t = e.target; if (t.tagName === 'INPUT' && t.type === 'text') t.dataset.v0 = t.value; });
