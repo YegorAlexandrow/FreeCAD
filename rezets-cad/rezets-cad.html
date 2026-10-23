@@ -2783,13 +2783,13 @@ function drawClick(m) {
   if (t === 'point' && sn.kind === 'pt') { const q = sk.pts[sn.ref]; if (q && !q.fixed) { q.hole = true; q.free = q.free || !usedPt(sk, sn.ref); commitSketch(); } else setHint('Здесь уже есть точка'); return; }
   if (t === 'point') { const id = snapToPoint(sk, sn, pending); sk.pts[id].free = true; sk.pts[id].hole = true; addRelations(sk, pending); commitSketch(); return; }
   if (t === 'line') {
-    if (D.stage === 0) { D.start = snapToPoint(sk, sn, pending); D.first = D.start; D.newPts = [D.start]; D.pending = pending; addRelations(sk, pending); D.stage = 1; refreshSketch(true); return; }
+    if (D.stage === 0) { D.start = snapToPoint(sk, sn, pending); D.first = D.start; D.newPts = [D.start]; D.chain = [D.start]; D.pending = pending; addRelations(sk, pending); D.stage = 1; refreshSketch(true); return; }
     // A second click within a few pixels (a double click, a shaky hand) makes no sliver of a line.
     const a = gp(sk, D.start); const sa = sScreen(a.x, a.y), sb = sScreen(sn.u, sn.v); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6 || (sn.kind !== 'pt' && Math.hypot(sa.x - sb.x, sa.y - sb.y) < 4)) return;
     const end = snapToPoint(sk, sn, pending); const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: D.start, p2: end };
     if (D.hv && !sn.kind) pending.push({ t: D.hv, refs: [id] });
     addRelations(sk, pending);
-    const closed = end === D.first; D.start = end; D.newPts = [end]; D.sn = null;
+    const closed = end === D.first; D.start = end; D.newPts = [end]; D.sn = null; D.chain = [...(D.chain || []), end];
     // The chain ends where it closes on itself or joins other geometry; a lone point it passes through (a centre, a
     // construction point) is just a corner of it, and the chain goes on from there.
     const deg = Object.values(sk.ents).filter((x) => !x.constr && (x.p1 === end || x.p2 === end)).length;
@@ -7708,6 +7708,10 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y') && S.pm && S.pm.kind !== 'explode') { e.preventDefault(); toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); return; }
   if (e.key === 'F1' || (e.key === '?' && !e.ctrlKey && !e.metaKey)) { e.preventDefault(); showHelp(); return; }
   if (e.key === 'F2' && !S.pm && !S.editing) { e.preventDefault(); if (S.mode === 'asm') { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) renameFeature(c, () => asmRefresh()); } else if (S.selectedTree?.startsWith('feat:')) { const f = featById(S.selectedTree.slice(5)); if (f) renameFeature(f); } return; }
+  // Ctrl+Z in a line chain takes back its last segment and goes on drawing from the point before, as SolidWorks does.
+  if ((e.ctrlKey || e.metaKey) && k === 'z' && !e.shiftKey && S.editing && S.tool === 'line' && S.draw?.chain) { e.preventDefault(); const D = S.draw;
+    if (D.chain.length < 2) { endDrawing(); return; } undo(); const sk = editSk(); const prev = D.chain[D.chain.length - 2];
+    if (sk?.pts[prev]) { S.tool = 'line'; S.draw = { ...D, stage: 1, start: prev, newPts: [prev], chain: D.chain.slice(0, -1), sn: null }; renderTools(); updateSketchVisuals(); setHint(); } return; }
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   // Ctrl+S saves now (the browser would offer to save the page).
