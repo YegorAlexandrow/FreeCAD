@@ -1486,6 +1486,10 @@ function followSketchRefs(f, body, cyls) {
         if (score < Math.min(2, want.length)) continue;
         if (!best || score > best.score || (score === best.score && d < best.d)) best = { d, v, score };
       }
+      // A vertex where only some of the same faces meet is another corner: following it carried points and the whole
+      // profile hundreds of millimetres away (BASE, Эскиз8). Only a corner of all the same faces is followed; a near
+      // one with most of them is taken as the same corner moved a little. Otherwise the point stays, shown lost.
+      if (best && best.d >= 1e-6 && best.score < want.length && !(best.score >= want.length - 1 && best.d < 0.5)) best = null;
     }
     if (!best) continue;
     if (best.d < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
