@@ -174,6 +174,10 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .dimlbl.bad { color: var(--geo-bad); outline: 1px solid var(--geo-bad); }
 #overlay.tooling .glyph, #overlay.tooling .dimlbl, #overlay.dimtool .glyph { pointer-events: none; }
 #side .row.of-sel { box-shadow: inset 3px 0 0 var(--accent); }
+#mNote .help-grp { display: grid; gap: 3px; margin-bottom: 10px; }
+#mNote .help-row { display: grid; grid-template-columns: minmax(120px, 40%) 1fr; gap: 8px; align-items: baseline; }
+#mNote .help-row kbd { justify-self: start; }
+#mNote:has(.help-grp) { max-height: 60vh; overflow: auto; }
 #relbar.far { opacity: .3; pointer-events: none; }
 .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
 .kv span { color: var(--fg-2); }
@@ -6761,6 +6765,7 @@ $('bAdd').onclick = (e) => {
     ['Импорт STEP / STL…', () => $('stepIn').click()],
     null,
     ['Пример детали', () => addDoc('part', 'Кронштейн', sampleDoc())],
+    ['Клавиши (F1)', () => showHelp()],
     ...(innerWidth <= 760 ? [null, ['Открыть файл…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()]] : []),
   ]);
 };
@@ -6878,6 +6883,19 @@ function showModal(title, note, text, acts) {
   for (const [l, fn] of acts) ma.append(h('button', { class: l === 'Закрыть' ? 'ghost-btn' : 'big-btn', onclick: fn }, l)); $('modal').hidden = false;
 }
 const closeModal = () => { $('modal').hidden = true; };
+// F1 or «?»: every keyboard shortcut in one place, grouped by where it works.
+const HELP_KEYS = [
+  ['Везде', [['Ctrl+Z / Ctrl+Y', 'Отменить / вернуть'], ['Ctrl+S', 'Сохранить сейчас'], ['F', 'Вписать модель в окно'], ['Стрелки', 'Повернуть вид на 15°, с Shift на 90°'], ['Alt+← / →', 'Повернуть вид вокруг направления взгляда'], ['Enter', 'OK в открытой панели'], ['Esc', 'Отмена: инструмент, выделение, панель'], ['F2', 'Переименовать выделенный элемент или компонент'], ['F1 или ?', 'Эта справка']]],
+  ['Деталь', [['S', 'Эскиз'], ['E', 'Вытянутая бобышка'], ['X', 'Вытянутый вырез'], ['M', 'Рулетка'], ['Delete', 'Удалить выделенный элемент']]],
+  ['Эскиз', [['L / R / C / A / P', 'Линия / прямоугольник / окружность / дуга / точка'], ['T', 'Обрезка'], ['D', 'Размер'], ['G', 'Вспомогательная геометрия'], ['Delete', 'Удалить выделенное'], ['Ctrl+щелчок', 'Добавить к выделению']]],
+  ['Взаимосвязи (при выделенной геометрии)', Object.entries({ H: 'Горизонтально', V: 'Вертикально', C: 'Совпадение', P: 'Параллельно', N: 'Перпендикулярно', E: 'Равенство', T: 'Касательно', K: 'Концентрично', M: 'Середина', O: 'На линии / окружности', J: 'Коллинеарно', S: 'Симметрично', F: 'Зафиксировать' })],
+  ['Сборка', [['I', 'Вставить компонент'], ['M', 'Сопряжение'], ['Shift+перетаскивание', 'Повернуть компонент'], ['Delete', 'Удалить выделенный компонент или сопряжение']]],
+  ['Чертёж', [['D', 'Размер']]],
+];
+function showHelp() {
+  showModal('Клавиши', '', null, [['Закрыть', closeModal]]);
+  $('mNote').replaceChildren(...HELP_KEYS.map(([t, rows]) => h('div', { class: 'help-grp' }, h('div', { class: 'lbl' }, t), ...rows.map(([k, d]) => h('div', { class: 'help-row' }, h('kbd', { class: 'k' }, k), h('span', {}, d))))));
+}
 const copyText = async () => { const t = $('mText'); try { await navigator.clipboard.writeText(t.value); toast('Скопировано в буфер обмена', 'info'); } catch { t.focus(); t.select(); toast('Текст выделен: нажмите Ctrl+C', 'info'); } };
 $('bExport').onclick = () => exportProjectFile();
 // Separate solids of a part: triangles joined through shared vertices form one shell; a shell facing
@@ -7030,6 +7048,7 @@ window.addEventListener('keydown', (e) => {
   const k = e.code && e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
   // Undo would swap the document under an open operation panel (its OK then writes into the wrong model).
   if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y') && S.pm && S.pm.kind !== 'explode') { e.preventDefault(); toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); return; }
+  if (e.key === 'F1' || (e.key === '?' && !e.ctrlKey && !e.metaKey)) { e.preventDefault(); showHelp(); return; }
   if (e.key === 'F2' && !S.pm && !S.editing) { e.preventDefault(); if (S.mode === 'asm') { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) renameFeature(c, () => asmRefresh()); } else if (S.selectedTree?.startsWith('feat:')) { const f = featById(S.selectedTree.slice(5)); if (f) renameFeature(f); } return; }
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
