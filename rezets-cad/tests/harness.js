@@ -9,6 +9,8 @@ module.exports = async function open(opts = {}) {
     ? r.fulfill({ status: 200, contentType: 'application/wasm', body: fs.readFileSync(process.env.OCCT_WASM || ROOT + '/occt-import-js.wasm') })
     : r.fulfill({ status: 200, contentType: 'text/html', body: fs.readFileSync(process.env.TEST_HTML || ROOT + '/test.html', 'utf8') }));
   if (opts.clearStorage !== false) await ctx.addInitScript(() => { try { localStorage.clear(); } catch {} });
+  // The first-launch card stays out of the tests' screens unless a test asks for it.
+  if (!opts.welcome) await ctx.addInitScript(() => { try { localStorage.setItem('rezets-welcomed', '1'); } catch {} });
   if (opts.init) await ctx.addInitScript(opts.init);
   const p = await ctx.newPage(); const logs = [];
   // Documents are a dropdown list: open it and pick the first document whose name has this text.

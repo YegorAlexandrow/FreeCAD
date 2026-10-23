@@ -182,6 +182,8 @@ button { font: inherit; color: inherit; }
 #mateBar { position: absolute; display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); z-index: 5; }
 #mateBar button { border: none; background: none; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 14px; color: var(--fg); min-width: 28px; }
 #mateBar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+#welcome { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(420px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgb(0 0 0 / .16); padding: 10px 14px; font-size: 13px; color: var(--fg); z-index: 6; }
+#welcome .wl-h { display: flex; justify-content: space-between; align-items: center; } #welcome ol { margin: 6px 0 8px; padding-left: 20px; color: var(--fg-2); } #welcome li { margin: 2px 0; } #welcome .x { border: none; background: none; cursor: pointer; color: var(--fg-2); }
 #hoverTip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 2px 7px; font-size: 12px; color: var(--fg); box-shadow: 0 2px 8px rgb(0 0 0 / .12); z-index: 4; white-space: nowrap; }
 #mateBar .ok { color: var(--good); } #mateBar .no { color: var(--bad); }
 #relbar b { font-size: 13px; min-width: 12px; text-align: center; }
@@ -8058,6 +8060,15 @@ const HELP_KEYS = [
   ['Сборка', [['I', 'Вставить компонент'], ['M', 'Сопряжение'], ['Shift+перетаскивание', 'Повернуть компонент'], ['Delete', 'Удалить выделенный компонент или сопряжение']]],
   ['Чертёж', [['D', 'Размер']]],
 ];
+// First launch: a small card on how a part is made, out of the way of the model; it does not come back once closed.
+function showWelcome() {
+  try { if (localStorage.getItem('rezets-welcomed')) return; localStorage.setItem('rezets-welcomed', '1'); } catch { return; }
+  const close = () => card.remove();
+  const card = h('div', { id: 'welcome', role: 'region', 'aria-label': 'С чего начать' }, h('div', { class: 'wl-h' }, h('b', {}, 'С чего начать'), h('button', { class: 'x', title: 'Закрыть', 'aria-label': 'Закрыть', onclick: close }, '✕')),
+    h('ol', {}, h('li', {}, 'Щёлкните плоскость или грань и нажмите «Эскиз» (S)'), h('li', {}, 'Нарисуйте замкнутый контур и выйдите из эскиза'), h('li', {}, '«Вытянуть» (E) превратит контур в тело'), h('li', {}, 'Вращение левой кнопкой, сдвиг правой, масштаб колесом')),
+    h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { close(); addDoc('part', 'Деталь', newDoc()); } }, 'Новая деталь'), h('button', { class: 'chip', onclick: () => { close(); showHelp(); } }, 'Все клавиши (F1)')));
+  view.append(card);
+}
 function showHelp() {
   showModal('Клавиши', '', null, [['Закрыть', closeModal]]);
   $('mNote').replaceChildren(...HELP_KEYS.map(([t, rows]) => h('div', { class: 'help-grp' }, h('div', { class: 'lbl' }, t), ...rows.map(([k, d]) => h('div', { class: 'help-row' }, h('kbd', { class: 'k' }, k), h('span', {}, d))))));
@@ -8361,7 +8372,7 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
   if (!proj) { try { const lp = JSON.parse(localStorage.getItem('rezets-cad-project') || 'null'); if (lp?.docs?.length) proj = { ...lp, docs: lp.docs.map((d) => docFromStore(d)) }; } catch { /* unreadable */ } }
   if (!proj) { let old = null; try { old = JSON.parse(localStorage.getItem('rezets-cad-doc') || 'null'); } catch { old = null; }
     proj = newProject(old && Array.isArray(old.features) ? [{ kind: 'part', name: old.name || 'Деталь1', data: old }] : [{ kind: 'part', name: 'Кронштейн', data: sampleDoc() }]); }
-  openProject(proj); S.touched = false;
+  openProject(proj); S.touched = false; if (!hadLocal) showWelcome();
   // The cloud answers later (or never, outside claude.ai); the newer copy wins. Until it has answered, nothing
   // goes up to the cloud: an older browser copy must never be saved over newer work there.
   CLOUD.blocked = true;
