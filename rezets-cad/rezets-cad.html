@@ -2143,7 +2143,7 @@ function addRelations(sk, list, quiet = true) {
 const conName = (sk, c) => (c.t === 'diam' && sk.ents[c.refs[0]]?.t === 'ellipse' ? 'Малая ось' : c.t === 'horizontal' && sk.ents[c.refs[0]]?.t === 'ellipse' ? 'Ось горизонтально' : c.t === 'vertical' && sk.ents[c.refs[0]]?.t === 'ellipse' ? 'Ось вертикально' : CON_NAMES[c.t]);
 function conLabel(sk, cid) { const c = sk.cons[cid]; if (!c) return cid; return conName(sk, c) + (DIM_TYPES.has(c.t) ? ' ' + dimText(sk, c) : ''); }
 function reportAdd(r, c) {
-  const sk = editSk();
+  const sk = editSk(); if (r.status === 'ok') S.conflict = new Set();
   if (r.replaced?.length) toast(`Взаимосвязь «${CON_NAMES[c.t]}» добавлена. ${r.replaced.map((x) => '«' + x.name + '»' + (x.driven ? ': размер стал справочным' : ' удалена, она следует из новой')).join('; ')}`, 'info');
   if (r.status === 'redundant') toast(`Взаимосвязь «${CON_NAMES[c.t]}» уже следует из других${r.group.length ? ': ' + r.group.map((g) => conLabel(sk, g)).join(', ') : ''}, поэтому не добавлена`, 'info');
   if (r.status === 'driven') toast(`Размер переопределил бы эскиз и стал справочным${r.group.length ? ' (уже задано: ' + r.group.map((g) => conLabel(sk, g)).join(', ') + ')' : ''}.`, 'warn');
@@ -2517,7 +2517,7 @@ function sketchDown(ev) {
       // A point whose model corner is gone is repaired by dragging it onto another corner (SolidWorks' dangling repair).
       else if (pt?.lost) { S.drag = { key: p.key, start: m, snap: snapshotGeo(sk), lostPt: pt.id }; setHint('Перетащите точку на вершину модели, к которой её привязать'); }
       refreshSketch();
-    } else { if (!down.shift) S.sel.clear(); S.box = [m, m]; refreshSketch(); }
+    } else { if (!down.shift) { S.sel.clear(); S.conflict = new Set(); } S.box = [m, m]; refreshSketch(); }
     return;
   }
   if (S.tool === 'dim') { dimClick(m); return; }
@@ -2611,7 +2611,7 @@ function setTool(t) {
   // A in the middle of a line chain goes on with an arc tangent to the last line, as SolidWorks does.
   const chain = S.editing && S.tool === 'line' && t === 'arc' && S.draw?.stage === 1 && S.draw.start ? S.draw : null;
   const tanLine = chain && Object.values(editSk().ents).find((e) => e.t === 'line' && e.p2 === chain.start);
-  S.tool = t; S.toolFillets = []; S.filletFirst = null; S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; S.dimPre = preDim.length > 0; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
+  S.tool = t; S.toolFillets = []; S.filletFirst = null; S.conflict = new Set(); S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; S.dimPre = preDim.length > 0; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
   if (tanLine) S.draw = { stage: 'tan', start: chain.start, first: chain.first, tan: tanLine.id, newPts: [chain.start], nid0: chain.nid0 };
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
