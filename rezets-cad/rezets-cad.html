@@ -2686,6 +2686,8 @@ function drawMove(m) {
   const exclude = new Set(D.newPts || []);
   const sn = snap(m, { excludePts: exclude });
   D.cursor = { x: m.sx, y: m.sy }; D.glyph = sn.glyph || null; D.guides = sn.guides; D.preview = []; D.sn = sn;
+  // The model edge or corner the cursor snaps to is lit, so it is clear what the new point will hold on to.
+  S.hover = typeof sn.ref === 'string' && sn.ref.startsWith('r:') ? sn.ref : null;
   const t = S.tool;
   if (t === 'line' && D.stage === 1) {
     const a = gp(sk, D.start); let u = sn.u, v = sn.v;
