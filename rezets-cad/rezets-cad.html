@@ -7209,6 +7209,16 @@ function setTab(t) { S.tab = t; $('tabFeat').setAttribute('aria-selected', t ===
 $('tabFeat').onclick = () => setTab('feat'); $('tabSketch').onclick = () => setTab('sketch');
 
 const side = $('side');
+// The trees walk with the arrows (one Tab stop for the whole tree): up and down between rows, right and left open and
+// close a component, Enter opens a row as a double click does, Space selects it.
+side.addEventListener('keydown', (e) => {
+  const row = e.target.closest?.('.tree .row'); if (!row || e.target !== row) return; const rows = [...row.closest('.tree').querySelectorAll('.row')].filter((r) => r.offsetParent); const i = rows.indexOf(row);
+  const go = (r) => { if (!r) return; e.preventDefault(); e.stopPropagation(); r.focus(); r.scrollIntoView({ block: 'nearest' }); };
+  if (e.key === 'ArrowDown') go(rows[i + 1]); else if (e.key === 'ArrowUp') go(rows[i - 1]); else if (e.key === 'Home') go(rows[0]); else if (e.key === 'End') go(rows.at(-1));
+  else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { const tw = row.querySelector('.tw'); if (tw && tw.textContent && (tw.textContent === '▸') === (e.key === 'ArrowRight')) { e.preventDefault(); e.stopPropagation(); const k = rows.indexOf(row); tw.click(); requestAnimationFrame(() => [...side.querySelectorAll('.tree .row')][k]?.focus()); } }
+  else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); }
+  else if (e.key === ' ') { e.preventDefault(); e.stopPropagation(); const k = rows.indexOf(row); row.click(); requestAnimationFrame(() => [...side.querySelectorAll('.tree .row')][k]?.focus()); }
+});
 function renderSide() {
   if (S.mode === 'drw') { renderDrawingPanel(); return; }
   if (S.mode === 'asm') { if (S.measure) renderMeasure(); else if (S.pm) renderAsmPM(); else renderAsmTree(); return; }
