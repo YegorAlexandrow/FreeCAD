@@ -1543,7 +1543,7 @@ const PLANES = {
 };
 const S = {
   doc: null, editing: null, tool: 'select', sel: new Set(), hover: null, pm: null, draw: null, tab: 'feat',
-  body: null, errors: {}, dangling: new Map(), offFace: new Set(), undo: [], redo: [], analysis: null, conflict: new Set(), selectedTree: null, cache: new Map(),
+  body: null, errors: {}, warns: {}, dangling: new Map(), offFace: new Set(), undo: [], redo: [], analysis: null, conflict: new Set(), selectedTree: null, cache: new Map(),
 };
 const featById = (id) => (S.doc.features || []).find((f) => f.id === id);
 const nextName = (prefix) => { let i = 1; while (S.doc.features.some((f) => f.name === prefix + i)) i++; return prefix + i; };
@@ -1614,7 +1614,7 @@ function computeBody(features) {
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
     const k = key.join('\n');
-    if (S.cache.has(k)) { const c = S.cache.get(k); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; continue; }
+    if (S.cache.has(k)) { const c = S.cache.get(k); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
     let err = null;
     try {
       // A STEP model from the project as a body to build on: sketch on its faces, cut, drill, add to it.
@@ -1625,7 +1625,7 @@ function computeBody(features) {
       if (f.type === 'fillet' || f.type === 'chamfer') { cyls = [...cyls]; body = applyEdgeFeature(f, body, cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
-      if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.warns[f.id] = r.warn || null; S.cache.set(k, { body, err: null, cyls, warn: r.warn }); continue; }
       const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
       else body = body ? boolean(body, tool, ADDITION) : tool;
@@ -3444,7 +3444,7 @@ function okPM() {
 // грань» after the face was picked, nothing when the new value broke the feature). Only that line is redrawn, so
 // the field being typed in keeps its focus.
 function refreshPmError() {
-  const f = S.pm?.feature; const box = side.querySelector('.pm'); if (!f || !box) return; const err = S.errors[f.id] || null; const old = box.querySelector('.pm-errbox');
+  const f = S.pm?.feature; const box = side.querySelector('.pm'); if (!f || !box) return; const err = S.errors[f.id] || S.warns[f.id] || null; const old = box.querySelector('.pm-errbox');
   if ((old?.textContent || null) === err) return; if (old) old.remove(); if (err) box.append(pmErr(err));
 }
 let previewTimer = null; function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(() => { rebuild(); drawRegions(); refreshPmError(); }, 120); }
@@ -4997,14 +4997,16 @@ function applyPattern(f, body, cyls, features) {
   // would otherwise cut empty space and then be covered by the boss copy.
   const seeds = (f.feats || []).map((id) => features.find((x) => x.id === id)).filter((x) => x && !x.suppressed).sort((a, b) => features.indexOf(a) - features.indexOf(b));
   if (!seeds.length) throw new Error('Выберите элементы для копирования');
-  let out = body;
+  let out = body; const missed = new Set();
   for (const sd of seeds) {
     if (sd.type !== 'extrude' && sd.type !== 'revolve' && sd.type !== 'hole') throw new Error(`«${sd.name}»: копировать можно вытягивания, вращения и отверстия`);
     const own = []; const tools = sd.type === 'hole' ? holeTool(sd, out, own) : [buildTool(sd, out, own)]; const op = sd.type === 'hole' || sd.mode === 'cut' ? SUBTRACTION : ADDITION;
-    for (const M of mats) { for (const tool of tools) out = boolean(out, placeTool(tool, M), op); for (const c of own) added.push(placeCyl(c, M)); }
+    mats.forEach((M, i) => { const v0 = op === SUBTRACTION ? geoVolume(out) : 0; for (const tool of tools) out = boolean(out, placeTool(tool, M), op); for (const c of own) added.push(placeCyl(c, M)); if (op === SUBTRACTION && Math.abs(geoVolume(out) - v0) < 1e-6 * Math.max(1, v0)) missed.add(i); });
   }
   if (!out.getAttribute('position').count) throw new Error('Результат пустой');
-  return { body: out, cyls: added };
+  // Copies of a cut that miss the part do nothing: said, not left for the user to count.
+  const warn = missed.size ? `${missed.size} из ${mats.length} ${plural(mats.length, 'копии', 'копий', 'копий')} не задевают деталь` : null;
+  return { body: out, cyls: added, warn };
 }
 // Whether a body equals its image under M: same planar faces with the same areas, same cylinders.
 // Triangulations after booleans are not symmetric, so vertices cannot be compared directly.
