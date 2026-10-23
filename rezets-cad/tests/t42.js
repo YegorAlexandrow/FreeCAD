@@ -19,7 +19,8 @@ const open = require('./harness.js');
   await p.click('button.tool:has-text("Сплайн")'); for (const [u, v] of [[60, 0], [80, 10], [90, -10], [70, -20]]) await clickUV(u, v); await clickUV(60, 0);
   L('spline', JSON.stringify(await st()));
   // open spline, finished with Enter
-  await p.click('button.tool:has-text("Сплайн")'); for (const [u, v] of [[0, 40], [20, 50], [40, 40]]) await clickUV(u, v); await p.keyboard.press('Enter'); await p.waitForTimeout(200);
+  // The Spline tool is still on after the closed one (its button pressed again would put it down).
+  if ((await p.getAttribute('button.tool:has-text("Сплайн")', 'aria-pressed')) !== 'true') await p.click('button.tool:has-text("Сплайн")'); for (const [u, v] of [[0, 40], [20, 50], [40, 40]]) await clickUV(u, v); await p.keyboard.press('Enter'); await p.waitForTimeout(200);
   L('open spline', JSON.stringify((await st()).ents));
   await p.keyboard.press('f'); await p.waitForTimeout(300); await p.screenshot({ path: 's42_sketch.png' });
   await p.click('#corner .ok'); await p.waitForTimeout(500);

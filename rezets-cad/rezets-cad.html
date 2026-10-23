@@ -2656,7 +2656,12 @@ function sketchUp(ev, d) {
     if (d.moved) {
       const x0 = Math.min(a.u, b.u), x1 = Math.max(a.u, b.u), y0 = Math.min(a.v, b.v), y1 = Math.max(a.v, b.v); const inB = (p) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
       for (const [id, p] of Object.entries(sk.pts)) if (inB(p)) S.sel.add('p:' + id);
-      for (const e of Object.values(sk.ents)) { const ok = isCurve(e) ? entPts(e).every((q) => inB(gp(sk, q))) && (e.t !== 'ellipse' || curvePts(sk, e, 4).every(inB)) : e.t === 'line' ? inB(gp(sk, e.p1)) && inB(gp(sk, e.p2)) : (() => { const c = gp(sk, e.c); return c.x - e.r >= x0 && c.x + e.r <= x1 && c.y - e.r >= y0 && c.y + e.r <= y1; })(); if (ok) S.sel.add('e:' + e.id); }
+      // Left to right takes what lies wholly inside the box, right to left also what it only crosses (SolidWorks'
+      // window and crossing selection); an arc counts by its own run, not its whole circle.
+      const crossing = b.sx < a.sx; const samples = (e) => { if (e.t === 'line') { const p = gp(sk, e.p1), q = gp(sk, e.p2); return Array.from({ length: 33 }, (_, i) => ({ x: p.x + (q.x - p.x) * i / 32, y: p.y + (q.y - p.y) * i / 32 })); }
+        if (isCurve(e) || e.t === 'ellipse') return curvePts(sk, e, 8); const c = gp(sk, e.c); let a0 = 0, sw = 2 * Math.PI; if (e.t === 'arc') { const p1 = gp(sk, e.p1), p2 = gp(sk, e.p2); a0 = Math.atan2(p1.y - c.y, p1.x - c.x); sw = Math.atan2(p2.y - c.y, p2.x - c.x) - a0; while (sw <= 0) sw += 2 * Math.PI; }
+        return Array.from({ length: 49 }, (_, i) => ({ x: c.x + e.r * Math.cos(a0 + sw * i / 48), y: c.y + e.r * Math.sin(a0 + sw * i / 48) })); };
+      for (const e of Object.values(sk.ents)) { const pts = samples(e); if (crossing ? pts.some(inB) : pts.every(inB)) S.sel.add('e:' + e.id); }
     }
     refreshSketch();
   }
