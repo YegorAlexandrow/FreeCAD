@@ -5552,7 +5552,7 @@ function asmRefresh(reanalyze) {
     const src = asm.comps[i] || c; const entD = docEntry(c.doc)?.data; const compCol = src.color || partColor(entD) || COMP_COLORS[i % COMP_COLORS.length];
     let geoC = shadedGeo(inf.geo); const vc = bodyColors(inf.geo, entD, inf.cyls, compCol); if (vc) { geoC = geoC.clone(); geoC.setAttribute('color', new THREE.BufferAttribute(vc, 3)); }
     const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : new THREE.Color(compCol), vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
-    const mesh = new THREE.Mesh(geoC, mat); mesh.userData.comp = c.virtual ? null : c.id; g.add(mesh);
+    const mesh = new THREE.Mesh(geoC, mat); mesh.userData.comp = c.virtual ? null : c.id; if (c.virtual) mesh.userData.virt = c.name; g.add(mesh);
     g.add(segLines(inf.edges, lineMat(colors.edge, 1.3)));
     asmGroup.add(g);
   });
@@ -5590,8 +5590,10 @@ function asmEdgePick(ev) {
   return null;
 }
 function asmPick(ev) {
-  const rc = rayFromEvent(ev); const meshes = []; asmGroup.traverse((o) => { if (o.isMesh && o.userData.comp) meshes.push(o); });
+  const rc = rayFromEvent(ev); const meshes = []; asmGroup.traverse((o) => { if (o.isMesh && (o.userData.comp || o.userData.virt)) meshes.push(o); });
   asmGroup.updateMatrixWorld(true); const hit = keptHit(rc.intersectObjects(meshes)); if (!hit) return null;
+  // A pattern copy stops the click (it used to pass through and pick the part behind it); the copy itself follows its seed.
+  if (!hit.object.userData.comp) { setHint(`«${hit.object.userData.virt}»: копия массива, она повторяет исходный компонент. Выберите исходный`); return null; }
   const c = S.doc.comps.find((x) => x.id === hit.object.userData.comp); const inf = docInfo(c.doc);
   const e = inf.triEnt[hit.faceIndex]; const ent = e >= 0 ? inf.ents[e] : null;
   return { comp: c.id, point: hit.point.clone(), ent: ent && { kind: ent.kind, p: ent.p.toArray(), d: (ent.n || ent.d).toArray(), r: ent.r, e } };
@@ -6030,7 +6032,7 @@ function renderAsmPM() {
   if (pm.kind === 'cpat') { renderCompPatternPM(); return; }
   if (pm.kind === 'explode') { renderExplodePM(); return; }
   if (pm.kind === 'interf') {
-    const cname = (id) => S.doc.comps.find((c) => c.id === id)?.name || '?';
+    const cname = (id) => allComps(S.doc).find((c) => c.id === id)?.name || '?';
     const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.interf), h('span', {}, 'Проверка пересечений'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
     const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Пересечения: ${pm.res.length}`));
     if (pm.busy) grp.append(h('div', { class: 'note' }, `Считаю: пара ${pm.busy.done} из ${pm.busy.of}`));
@@ -6993,7 +6995,7 @@ window.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
   const k = e.code && e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
   // Undo would swap the document under an open operation panel (its OK then writes into the wrong model).
-  if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y') && S.pm) { e.preventDefault(); toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); return; }
+  if ((e.ctrlKey || e.metaKey) && (k === 'z' || k === 'y') && S.pm && S.pm.kind !== 'explode') { e.preventDefault(); toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   // Ctrl+S saves now (the browser would offer to save the page).
