@@ -1520,6 +1520,15 @@ function followSketchRefs(f, body, cyls) {
       // profile hundreds of millimetres away (BASE, Эскиз8). Only a corner of all the same faces is followed; a near
       // one with most of them is taken as the same corner moved a little. Otherwise the point stays, shown lost.
       if (best && best.d >= 1e-6 && best.score < want.length && !(best.score >= want.length - 1 && best.d < 0.5)) best = null;
+      // An edge cut shorter at a slant ends at a corner of another face: the end slides along its own line to there,
+      // so a converted outline follows the shorter edge instead of being lost.
+      if (!best) for (const e of Object.values(f.sk.ents)) {
+        if (e.t !== 'line' || (e.p1 !== p.id && e.p2 !== p.id)) continue; const p2 = f.sk.pts[e.p1 === p.id ? e.p2 : e.p1]; if (!p2?.fixed) continue; const w2 = world(p2); const dir = w.clone().sub(w2).normalize();
+        for (const [a, b2] of T.lines) {
+          if (!on(a) || !on(b2) || Math.abs(Math.abs(b2.clone().sub(a).normalize().dot(dir)) - 1) > 1e-6) continue;
+          for (const v of [a, b2]) { const t = v.clone().sub(w2); if (t.clone().addScaledVector(dir, -t.dot(dir)).length() > 1e-3 || t.dot(dir) < 1e-3) continue; const has = vertNormals(body, v); const score = want.filter((n) => has.some((m) => m.dot(n) > 0.999)).length; if (score < want.length - 1) continue; const d = v.distanceTo(w); if (!best || d < best.d) best = { d, v, score }; }
+        }
+      }
     }
     if (!best) continue;
     if (best.d < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
