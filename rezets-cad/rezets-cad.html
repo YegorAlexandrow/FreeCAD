@@ -7630,6 +7630,9 @@ window.addEventListener('keydown', (e) => {
     if (S.editing && S.skOp) { cancelSkOp(); return; }
     if (S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
     // One Esc leaves a drawing tool for selection, whatever it was in the middle of.
+    // Esc in a sketch opened for an operation (a hole, an extrusion from a face) with nothing drawn yet cancels that
+    // operation: the empty sketch goes and nothing is waiting for it.
+    if (S.editing && S.afterSketch && !S.draw && !S.sel.size && (S.tool === 'select' || S.tool === 'point') && !Object.values(editSk().ents).some((x) => !x.ext) && !Object.values(editSk().pts).some((q) => q.hole)) { S.afterSketch = null; exitSketch(); toast('Операция отменена', 'info'); return; }
     if (S.editing) { if (S.draw || S.dimPick) { S.dimPick = null; S.dimPreview = null; endDrawing(); } if (S.tool !== 'select') setTool('select'); else { S.sel.clear(); S.conflict = new Set(); } refreshSketch(); return; }
     if (S.measure) return closeMeasure();
     if (S.pm) return closePM();
