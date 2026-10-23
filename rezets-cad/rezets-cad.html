@@ -6799,7 +6799,9 @@ function autoExplode() {
   for (const c of asm.comps) { if (c.fixed) continue; const v = ctrs.get(c.id)?.clone().sub(C); if (!v) continue; if (v.lengthSq() < 1e-6) v.set(0, 1, 0); const d = Math.max(size * 0.35, v.length() * 0.8); asm.explode.steps.push({ id: 'x' + asm.nid++, comps: [c.id], dir: v.normalize().toArray(), d, auto: true }); }
   asmRefresh(); pushUndo();
 }
-function explodeClick(ev) { const p = asmPick(ev); if (!p) return; const cur = S.pm.cur; const i = cur.comps.indexOf(p.comp); if (i >= 0) cur.comps.splice(i, 1); else cur.comps.push(p.comp); asmRefresh(); }
+function explodeClick(ev) { const p = asmPick(ev); if (!p) return; const cur = S.pm.cur;
+  // «По грани или оси»: the click gives the direction, a face its normal and a cylinder its axis, turned as the part is.
+  if (S.pm.pickDir) { const c = S.doc.comps.find((x) => x.id === p.comp); if (!p.ent || !c) return; const d = V3(p.ent.d).transformDirection(new THREE.Matrix4().fromArray(c.T)); cur.dir = d.toArray().map((v) => (Math.abs(v) < 1e-9 ? 0 : +v.toFixed(9))); S.pm.pickDir = false; renderSide(); asmRefresh(); return; } const i = cur.comps.indexOf(p.comp); if (i >= 0) cur.comps.splice(i, 1); else cur.comps.push(p.comp); asmRefresh(); }
 function addExplodeStep() {
   const cur = S.pm.cur; const asm = S.doc; if (!cur.comps.length) { toast('Щёлкните компоненты, которые нужно сдвинуть', 'warn'); return; }
   asm.explode.steps.push({ id: 'x' + asm.nid++, comps: cur.comps.slice(), dir: cur.dir.slice(), d: cur.d }); S.pm.cur = { comps: [], dir: cur.dir, d: cur.d }; asmRefresh(); pushUndo();
@@ -6812,6 +6814,8 @@ function renderExplodePM() {
     ex.steps.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', title: 'Показать разнос по шагам', onclick: () => playExplode(true) }, '▶ Разнести'), h('button', { class: 'chip', title: 'Показать сборку по шагам', onclick: () => playExplode(false) }, '◀ Собрать')) : null));
   const g = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Новый шаг'), h('button', { class: 'rel pickbox on' }, h('b', {}, '▣'), cur.comps.length ? cur.comps.map(cname).join(', ') : 'щёлкните компоненты'),
     h('div', { class: 'chips' }, [['X', [1, 0, 0]], ['−X', [-1, 0, 0]], ['Y', [0, 1, 0]], ['−Y', [0, -1, 0]], ['Z', [0, 0, 1]], ['−Z', [0, 0, -1]]].map(([l, d]) => h('button', { class: 'chip', style: d.join() === cur.dir.join() ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { cur.dir = d; renderSide(); asmRefresh(); } }, l))),
+    h('div', { class: 'chips' }, h('button', { class: 'chip', style: S.pm.pickDir ? 'border-color:var(--accent);color:var(--accent)' : '', title: 'Направление по нормали грани или оси цилиндра', onclick: () => { S.pm.pickDir = !S.pm.pickDir; renderSide(); } }, '↗ По грани или оси'), h('button', { class: 'chip', title: 'Обратное направление', onclick: () => { cur.dir = cur.dir.map((v) => -v || 0); renderSide(); asmRefresh(); } }, '⇄')),
+    S.pm.pickDir ? h('div', { class: 'note' }, 'Щёлкните грань (её нормаль) или цилиндр (его ось)') : null,
     numField('Расстояние', 'exDist', cur.d, (v) => { cur.d = v; asmRefresh(); }), h('button', { class: 'ghost-btn', onclick: addExplodeStep }, 'Добавить шаг'));
   box.append(g);
   if (ex.steps.length) { const l = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Шаги: ${ex.steps.length}`));
