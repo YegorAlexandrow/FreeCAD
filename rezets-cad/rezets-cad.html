@@ -5395,7 +5395,7 @@ function renderPatternPM() {
   // the full list stays folded below for when the face is hard to reach.
   seeds.append(h('button', { class: 'rel pickbox' + (pm.pickFor === 'feats' ? ' on' : ''), onclick: () => { pm.pickFor = 'feats'; renderSide(); } }, h('b', {}, '↗'), f.feats.length ? `Выбрано: ${f.feats.length}` : 'Щёлкните грань операции'));
   for (const id of f.feats) { const c = featById(id); if (c) seeds.append(h('div', { class: 'rel' }, h('span', {}, c.name), h('button', { class: 'x', title: 'Убрать', onclick: () => { f.feats = f.feats.filter((x) => x !== id); renderSide(); schedulePreview(); } }, '✕'))); }
-  if (pm.pickFor === 'feats') seeds.append(h('div', { class: 'note' }, 'Щёлкните грань в окне или операцию в дереве: она добавится или уберётся'));
+  if (pm.pickFor === 'feats') seeds.append(h('div', { class: 'note' }, 'Щёлкните грань в окне или отметьте операцию в «Списке операций» ниже: она добавится или уберётся'));
   const all = h('details', {}, h('summary', { class: 'note', style: 'cursor:pointer' }, 'Список операций'));
   for (const c of cands) all.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.feats.includes(c.id), onchange: (e) => { f.feats = e.target.checked ? [...f.feats, c.id] : f.feats.filter((x) => x !== c.id); renderSide(); schedulePreview(); } }), c.name));
   seeds.append(all);
