@@ -1851,6 +1851,8 @@ function rebuild() {
   // Editing a feature rolls the model back to it, as SolidWorks does: faces of later features can't be picked as
   // its end or start, and its preview isn't hidden under what comes after it.
   if (preview) { const i = list.findIndex((f) => f.id === preview.id); list = i >= 0 ? [...list.slice(0, i), preview] : [...list, preview]; }
+  // So does editing a sketch: the bodies built from it would hide what is being drawn and change under every drag.
+  else if (S.editing) { const i = list.findIndex((f) => f.id === S.editing); if (i >= 0) list = list.slice(0, i + 1); }
   const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
   updateBodyMesh(); buildPlanes(); renderTree(); updateSketchVisuals(); requestRender();
 }
