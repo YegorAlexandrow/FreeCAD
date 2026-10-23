@@ -5042,7 +5042,11 @@ function holeTool(f, body, cyls) {
   const u = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(u, n);
   const tools = [];
   for (const p of P) {
-    const M = new THREE.Matrix4().makeBasis(u, n, w).setPosition(p); const g = base.clone(); g.applyMatrix4(M); if (M.determinant() < 0) { const pos = g.getAttribute('position'); for (let i = 0; i < pos.count; i += 3) { const x = pos.getX(i + 1), y = pos.getY(i + 1), z = pos.getZ(i + 1); pos.setXYZ(i + 1, pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2)); pos.setXYZ(i + 2, x, y, z); } }
+    const place = (geo, M) => { const g = geo.clone(); g.applyMatrix4(M); if (M.determinant() < 0) { const pos = g.getAttribute('position'); for (let i = 0; i < pos.count; i += 3) { const x = pos.getX(i + 1), y = pos.getY(i + 1), z = pos.getZ(i + 1); pos.setXYZ(i + 1, pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2)); pos.setXYZ(i + 2, x, y, z); } } return g; };
+    const g = place(base, new THREE.Matrix4().makeBasis(u, n, w).setPosition(p));
+    // «Насквозь» from a sketch inside the part (a plane through its middle) goes through both ways, as SolidWorks does.
+    if (f.end === 'through' && !sf.plane.face && sf.plane.label !== 'Грань') { body.computeBoundingBox(); const bb = body.boundingBox; let back = -Infinity; for (const x of [bb.min.x, bb.max.x]) for (const y of [bb.min.y, bb.max.y]) for (const z of [bb.min.z, bb.max.z]) back = Math.max(back, new THREE.Vector3(x, y, z).sub(p).dot(n) * -1);
+      if (back > 1e-6) { const r = f.dia / 2; const cyl = revolveGeometry([{ pts: [[0, 0], [-r, 0], [-r, back + 1], [0, back + 1]], holes: [] }], [0, 0], [0, 1], 360); const g2 = place(cyl, new THREE.Matrix4().makeBasis(u, n.clone().negate(), w.clone().negate()).setPosition(p)); g2.computeVertexNormals(); tools.push(g2); } }
     g.computeVertexNormals(); tools.push(g);
     cyls.push({ p: p.clone(), dir: n.clone(), r: f.dia / 2 }); if (f.kind === 'cbore') cyls.push({ p: p.clone(), dir: n.clone(), r: f.cbD / 2 });
   }
