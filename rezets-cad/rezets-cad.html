@@ -179,6 +179,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #mNote .help-row kbd { justify-self: start; }
 #mNote:has(.help-grp) { max-height: 60vh; overflow: auto; }
 #bUndo.dim, #bRedo.dim { opacity: .35; }
+#side .row.warn .nm { color: var(--warn); }
 #relbar.far { opacity: .3; pointer-events: none; }
 .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
 .kv span { color: var(--fg-2); }
@@ -1652,7 +1653,7 @@ function computeBody(features) {
     lastSolid = f.id;
     const k = key.join('\n');
     if (S.cache.has(k)) { const c = S.cache.get(k); body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
-    let err = null;
+    let err = null; let warn = null;
     try {
       // A STEP model from the project as a body to build on: sketch on its faces, cut, drill, add to it.
       if (f.type === 'stepbody') {
@@ -1664,12 +1665,12 @@ function computeBody(features) {
       if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.warns[f.id] = r.warn || null; S.cache.set(k, { body, err: null, cyls, warn: r.warn }); continue; }
       const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
-      if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
+      if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); const v0 = geoVolume(body); body = boolean(body, tool, SUBTRACTION); warn = Math.abs(geoVolume(body) - v0) < 1e-6 * Math.max(1, v0) ? 'Вырез не задевает деталь: проверьте направление и глубину' : null; }
       else body = body ? boolean(body, tool, ADDITION) : tool;
       if (!body.getAttribute('position').count) err = 'Результат пустой';
     } catch (e) { err = e.message || String(e); if (e.partial) body = e.partial; }
-    if (err) errors[f.id] = err;
-    S.cache.set(k, { body, err, cyls });
+    if (err) errors[f.id] = err; S.warns[f.id] = warn;
+    S.cache.set(k, { body, err, cyls, warn });
   }
   if (S.cache.size > 80) S.cache.delete(S.cache.keys().next().value);
   return { body, errors, cyls };
@@ -3434,6 +3435,8 @@ function pickSketchForFeature() {
 }
 function cmdFeature(type, mode) {
   if (S.measure) closeMeasure();
+  // A planar face picked first: Extrude opens a sketch on it and comes back when it closes (SolidWorks does the same).
+  if (!S.editing && !S.pm && S.selectedTree === 'face' && S.pickedFace && (type === 'extrude' || type === 'revolve')) { S.afterSketch = { type, mode }; cmdSketch(); return; }
   const sf = pickSketchForFeature();
   if (!sf) {
     // Every sketch can feed more than one feature: with no unused one, the user picks one, in the tree or in the window.
@@ -6566,7 +6569,7 @@ function renderTree() {
       : f.type === 'sketch'
       ? [['Редактировать эскиз', () => editFeature(f)], ['Сменить плоскость…', () => { if (S.pm) closePM(); openPM({ kind: 'pickPlane', replan: f.id }); }], [sketchVisible(f) ? 'Скрыть' : 'Показать', () => { f.show = !sketchVisible(f); rebuild(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]]
       : [['Редактировать элемент', () => editFeature(f)], ...(f.sketch ? [['Редактировать эскиз', () => editFeature(featById(f.sketch))]] : []), [f.suppressed ? 'Высветить' : 'Погасить', () => { f.suppressed = !f.suppressed; rebuild(); pushUndo(); }], ['Переименовать', () => renameFeature(f)], null, ['Откатить сюда', () => setRollback(i + 1)], ['Удалить', () => deleteFeature(f)]];
-    return row('feat:' + f.id, icon, f.name, { cls: (child ? ' child' : '') + (off ? ' off' : '') + (err ? ' err' : ''), meta, title: err ? f.name + ': ' + err : f.name, onOpen: () => editFeature(f), menu });
+    const wn = !err && S.warns?.[f.id]; return row('feat:' + f.id, icon, f.name, { cls: (child ? ' child' : '') + (off ? ' off' : '') + (err ? ' err' : '') + (wn ? ' warn' : ''), meta, title: err ? f.name + ': ' + err : wn ? f.name + ': ' + wn : f.name, onOpen: () => editFeature(f), menu });
   };
   const rbBar = () => { const bar = h('div', { class: 'rollbar', title: 'Перетащите, чтобы откатить модель', role: 'separator', tabindex: '0' }); bar.addEventListener('pointerdown', startRollDrag); bar.addEventListener('keydown', (e) => { if (e.key === 'ArrowUp') setRollback(Math.max(0, rb - 1)); if (e.key === 'ArrowDown') setRollback(Math.min(S.doc.features.length, rb + 1)); }); return bar; };
   S.doc.features.forEach((f, i) => {
