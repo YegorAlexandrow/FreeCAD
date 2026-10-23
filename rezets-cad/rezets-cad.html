@@ -1995,6 +1995,7 @@ controls.enableRotate = false;
 }
 // Turns the view by a drag of dx, dy pixels about the screen axes, around pivot (or the orbit target).
 function orbitView(dx, dy, pivot) {
+  S.fitted = false;
   const k = 2 * Math.PI * controls.rotateSpeed / canvas.clientHeight; const off = camera.position.clone().sub(controls.target);
   const up = camera.up.clone().normalize(); const right = new THREE.Vector3().crossVectors(off.clone().negate(), up).normalize();
   const q = new THREE.Quaternion().setFromAxisAngle(up, -dx * k).multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * k));
@@ -2079,9 +2080,12 @@ function updateSilhouette() {
 function resize() {
   const w = view.clientWidth, hgt = view.clientHeight; renderer.setSize(w, hgt, false);
   const half = 160; const asp = w / Math.max(hgt, 1); camera.left = -half * asp; camera.right = half * asp; camera.top = half; camera.bottom = -half; camera.updateProjectionMatrix();
-  for (const m of lineMats) m.resolution.set(w, hgt); requestRender();
+  for (const m of lineMats) m.resolution.set(w, hgt);
+  // A model just fitted stays fitted when the window changes size; one zoomed or turned by hand stays as it was.
+  if (S.fitted && S.mode && S.mode !== 'drw') fitView(); requestRender();
 }
 new ResizeObserver(resize).observe(view);
+controls.addEventListener('start', () => { S.fitted = false; });
 const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); viewCube.retheme(); refreshAll(); });
 new MutationObserver(() => { readColors(); viewCube.retheme(); refreshAll(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
@@ -2242,7 +2246,7 @@ function setView(dirVec, upVec, fit = true) {
     const q = fromQ.clone().slerp(toQ, e); const t = fromT.clone().lerp(to.target, e);
     controls.target.copy(t); camera.quaternion.copy(q); camera.up.set(0, 1, 0).applyQuaternion(q); camera.position.copy(t).add(new THREE.Vector3(0, 0, dist).applyQuaternion(q));
     camera.zoom = fromZ * Math.pow(to.zoom / fromZ, e); camera.updateProjectionMatrix(); camera.lookAt(t); controls.update(); requestRender();
-    if (k < 1) anim = requestAnimationFrame(step);
+    if (k < 1) anim = requestAnimationFrame(step); else if (fit) S.fitted = true;
   };
   step();
 }
@@ -2259,12 +2263,15 @@ function fitFrame(q) {
   const vb = new THREE.Box3(); const v = new THREE.Vector3(); for (const p of pts) vb.expandByPoint(v.copy(p).applyMatrix4(inv));
   const c = vb.getCenter(new THREE.Vector3()); c.z = 0; const sz = vb.getSize(new THREE.Vector3()); const pad = (d) => d / 2 * 1.12 + Math.min(1, d * 0.05 + 1e-3);
   const half = 160; const asp = (camera.right - camera.left) / (camera.top - camera.bottom);
-  return { target: c.applyMatrix4(m), zoom: Math.max(0.05, Math.min(half * asp / pad(sz.x), half / pad(sz.y))) };
+  // The view bar covers a band at the top: the model fits below it, centred in what is left.
+  const H = Math.max(view.clientHeight, 1); const band = Math.min(48, H * 0.2); const fr = (H - band) / H;
+  const zoom = Math.max(0.05, Math.min(half * asp / pad(sz.x), half * fr / pad(sz.y))); const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+  return { target: c.applyMatrix4(m).addScaledVector(up, band / 2 / H * (2 * half / zoom)), zoom };
 }
 // Fit from the keyboard, the view bar or a middle double click glides there like the standard views do.
 const fitAnimated = () => setView(camera.position.clone().sub(controls.target), camera.up.clone());
 function fitView() {
-  const f = fitFrame(camera.quaternion); const off = camera.position.clone().sub(controls.target); controls.target.copy(f.target); camera.position.copy(f.target).add(off);
+  S.fitted = true; const f = fitFrame(camera.quaternion); const off = camera.position.clone().sub(controls.target); controls.target.copy(f.target); camera.position.copy(f.target).add(off);
   camera.zoom = f.zoom; camera.updateProjectionMatrix(); controls.update(); requestRender();
 }
 // All planes on or off at once (each reference plane also keeps its own Show/Hide).
