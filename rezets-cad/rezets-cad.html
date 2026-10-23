@@ -1692,6 +1692,7 @@ function computeBody(features) {
     let err = null; let warn = null;
     try {
       if (f.varErr) throw new Error(f.varErr);
+      if (f.type === 'mirror' && f.lostFeats && !f.feats?.length) throw new Error('Отражаемые элементы удалены. Выберите элементы или «Всё тело»');
       // A STEP model from the project as a body to build on: sketch on its faces, cut, drill, add to it.
       if (f.type === 'stepbody') {
         const ent = docEntry(f.doc); if (!ent || ent.kind !== 'import') throw new Error('Импортированной модели (STEP или STL) больше нет в проекте');
@@ -5167,7 +5168,7 @@ function patternMatrices(f, features) {
   }
   return out;
 }
-function mirrorPlane(f, features) { const b = f.plane || { std: 'right' }; if (b.std) return PLANES[b.std]; if (b.face) return b.face; const g = features.find((x) => x.id === b.plane); return g ? refPlane(g, features) : PLANES.right; }
+function mirrorPlane(f, features) { const b = f.plane || { std: 'right' }; if (b.std) return PLANES[b.std]; if (b.face) return b.face; const g = features.find((x) => x.id === b.plane); if (!g) throw new Error('Плоскости отражения больше нет. Выберите другую'); return refPlane(g, features); }
 // Places a tool; a reflection also reverses the triangles so the solid stays outward facing.
 function placeTool(g, M) {
   const t = (g.index ? g.toNonIndexed() : g.clone()); t.applyMatrix4(M);
@@ -5310,7 +5311,7 @@ function renderPatternPM() {
   const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id);
   const cands = S.doc.features.slice(0, idx).filter((x) => (x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole') && !x.suppressed);
   const seeds = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Копировать элементы'));
-  if (f.type === 'mirror') seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !f.feats.length, onchange: (e) => { if (e.target.checked) f.feats = []; renderSide(); schedulePreview(); } }), 'Всё тело'));
+  if (f.type === 'mirror') seeds.append(h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !f.feats.length, onchange: (e) => { if (e.target.checked) { f.feats = []; delete f.lostFeats; } renderSide(); schedulePreview(); } }), 'Всё тело'));
   // Features are picked like in SolidWorks: a click on a face in the window or on the row in the tree;
   // the full list stays folded below for when the face is hard to reach.
   seeds.append(h('button', { class: 'rel pickbox' + (pm.pickFor === 'feats' ? ' on' : ''), onclick: () => { pm.pickFor = 'feats'; renderSide(); } }, h('b', {}, '↗'), f.feats.length ? `Выбрано: ${f.feats.length}` : 'Щёлкните грань операции'));
@@ -6755,8 +6756,9 @@ function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? nu
 function editFeature(f) { if (!f) return; if (f.type === 'stepbody') { const imps = S.project.docs.filter((d) => d.kind === 'import'); const hasOwn = imps.some((d) => d.id === f.doc); if (!imps.length || (hasOwn && imps.length < 2)) { toast(imps.length ? 'Других импортированных моделей в проекте нет' : 'В проекте нет импортированных моделей: импортируйте STEP или STL', 'info'); return; } const r = side.getBoundingClientRect(); openMenu(r.left + 40, r.top + 120, imps.map((d) => [(d.id === f.doc ? '✓ ' : '') + d.name, () => { f.doc = d.id; rebuild(); pushUndo(); renderSide(); }])); return; } if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
-  if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; } }
-  for (const g of S.doc.features) if (Array.isArray(g.feats)) g.feats = g.feats.filter((x) => x !== f.id);
+  if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; if (g.type === 'mirror' && g.plane?.plane === f.id) g.plane = { face: pl }; } }
+  // A mirror left without its features would turn into a mirror of the whole body: it is flagged instead.
+  for (const g of S.doc.features) if (Array.isArray(g.feats)) { const n = g.feats.length; g.feats = g.feats.filter((x) => x !== f.id); if (n && !g.feats.length && g.type === 'mirror') g.lostFeats = true; }
   const dependents = S.doc.features.filter((g) => g.sketch === f.id);
   // The rollback bar stays under the same feature: every removed one above it moves it up by one.
   const rb = S.doc.rollback; const above = rb == null ? 0 : S.doc.features.slice(0, rb).filter((g) => g === f || dependents.includes(g)).length;
