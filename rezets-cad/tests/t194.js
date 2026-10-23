@@ -15,6 +15,6 @@ const open = require('./harness.js');
   await go(20, -25, false); const outside = await p.evaluate(() => window.__rezets.S.toolOpt.offsetFlip);
   await go(20, -25, true);
   const lines = await p.evaluate(() => { const sk = window.__rezets.featById('f1').sk; return Object.values(sk.ents).filter((e) => e.t === 'line').length; });
-  console.log(JSON.stringify({ ids, inside, outside, lines, op: await p.evaluate(() => !!window.__rezets.S.skOp) }));
-  console.log('expect ids the 4 rectangle lines (not m); inside and outside differ; lines 9 (5 + 4 copies); op false');
+  console.log(JSON.stringify({ hint, ids, inside, outside, lines, op: await p.evaluate(() => !!window.__rezets.S.skOp) }));
+  console.log('expect hint «Смещение: ведите курсор…», ids the 4 rectangle lines (not m); inside and outside differ; lines 9 (5 + 4 copies); op false');
   console.log(logs.join('\n')); await b.close(); })();

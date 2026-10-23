@@ -2971,14 +2971,14 @@ function cmdSkPattern() {
   const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)] && !sk.ents[k.slice(2)].ext).map((k) => k.slice(2));
   if (!ids.length) { toast('Выделите линии, дуги или окружности, затем нажмите «Массив»', 'info'); return; }
   const cp = [...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2))[0];
-  S.skOp = { kind: 'pattern', ids, opt: { kind: 'lin', n: 3, dx: 10, dy: 0, ang: 360, c: cp || 'O' } }; renderSide(); previewPattern();
+  S.skOp = { kind: 'pattern', ids, opt: { kind: 'lin', n: 3, dx: 10, dy: 0, ang: 360, c: cp || 'O' } }; renderSide(); previewPattern(); setHint();
 }
 function previewPattern() {
   const op = S.skOp; if (op?.kind !== 'pattern') return; const sk = editSk(); const pt = { ...op.opt, n: Math.max(2, Math.round(op.opt.n)) }; const segs = [];
   for (let i = 1; i < pt.n; i++) { const T = patXform(sk, pt, i); for (const id of op.ids) { const e = sk.ents[id]; if (!e) continue; const P = e.t === 'line' ? [gp(sk, e.p1), gp(sk, e.p2)] : e.t === 'circle' ? (() => { const c = gp(sk, e.c); return Array.from({ length: 49 }, (_, i) => ({ x: c.x + e.r * Math.cos(i / 48 * 2 * Math.PI), y: c.y + e.r * Math.sin(i / 48 * 2 * Math.PI) })); })() : e.t === 'arc' ? (() => { const c = gp(sk, e.c), a = gp(sk, e.p1), b = gp(sk, e.p2); const a0 = Math.atan2(a.y - c.y, a.x - c.x); let sw = Math.atan2(b.y - c.y, b.x - c.x) - a0; while (sw <= 0) sw += 2 * Math.PI; return Array.from({ length: 33 }, (_, i) => ({ x: c.x + e.r * Math.cos(a0 + sw * i / 32), y: c.y + e.r * Math.sin(a0 + sw * i / 32) })); })() : curvePts(sk, e, 48); const Q = P.filter(Boolean).map(T); for (let k = 0; k + 1 < Q.length; k++) segs.push([Q[k].x, Q[k].y, Q[k + 1].x, Q[k + 1].y]); } }
   S.draw = { stage: 0, preview: segs }; updateSketchVisuals();
 }
-function okPattern() { const op = S.skOp; S.skOp = null; S.draw = null; const r = makePattern(editSk(), op.ids, op.opt); if (typeof r === 'string') toast(r, 'warn'); S.sel.clear(); commitSketch(); }
+function okPattern() { const op = S.skOp; S.skOp = null; S.draw = null; const r = makePattern(editSk(), op.ids, op.opt); if (typeof r === 'string') toast(r, 'warn'); S.sel.clear(); commitSketch(); setHint(); }
 // Panel for a pattern being made (op) or already made (pt, picked through one of its curves).
 function patternPanel(o, onChange, onOk) {
   const num = (label, key, unit, int) => { const inp = h('input', { type: 'text', value: fmt(o[key], 4), inputmode: 'decimal' }); const apply = () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) { inp.value = fmt(o[key], 4); return; } if (int) v = Math.max(2, Math.round(v)); if (S.skOp && o[key] === v && !onChange.always) return; onChange({ [key]: v }); };
@@ -3409,7 +3409,7 @@ function cmdMirror() {
 function cmdOffset() {
   const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => k.slice(2));
   // Nothing picked first: the curves are clicked now, each click takes its whole chain (SolidWorks' «Выбрать цепочку»).
-  S.skOp = { kind: 'offset', ids }; renderSide(); previewOffset(); if (!ids.length) setHint('Смещение: щёлкните линию, дугу или окружность');
+  S.skOp = { kind: 'offset', ids }; renderSide(); previewOffset(); setHint();
   setTimeout(() => { const i = $('opOffset'); if (i) { i.focus(); i.select(); } }, 0);
 }
 // The curves joined end to end with this one, through points where exactly two of them meet.
@@ -3422,7 +3422,7 @@ function chainOf(sk, id) {
 }
 function offsetPick(m) {
   const sk = editSk(); const op = S.skOp; const p = pick(m); const id = p?.key.startsWith('e:') ? p.key.slice(2) : null;
-  if (id && sk.ents[id] && !sk.ents[id].ext) { const ch = chainOf(sk, id); op.ids = op.ids.includes(id) ? op.ids.filter((x) => !ch.includes(x)) : [...new Set([...op.ids, ...ch])]; S.sel = new Set(op.ids.map((x) => 'e:' + x)); renderSide(); previewOffset(); setHint(op.ids.length ? 'Ведите курсор в сторону смещения и щёлкните пустое место или Enter' : undefined); return; }
+  if (id && sk.ents[id] && !sk.ents[id].ext) { const ch = chainOf(sk, id); op.ids = op.ids.includes(id) ? op.ids.filter((x) => !ch.includes(x)) : [...new Set([...op.ids, ...ch])]; S.sel = new Set(op.ids.map((x) => 'e:' + x)); renderSide(); previewOffset(); setHint(); return; }
   if (op.ids.length) okOffset();
 }
 // The side follows the cursor: the offset copy nearer to it is the one shown.
@@ -3437,8 +3437,8 @@ function previewOffset() {
     const tmp = { pts: { c, a: { x: c.x + (a.x - c.x) / A * (A + o), y: c.y + (a.y - c.y) / A * (A + o) } } }; const P = curvePts(tmp, { t: 'ellipse', c: 'c', p1: 'a', r: Math.max(1e-3, e.r + o) }); for (let i = 0; i + 1 < P.length; i++) segs.push([P[i].x, P[i].y, P[i + 1].x, P[i + 1].y]); }
   S.draw = { stage: 0, preview: segs }; updateSketchVisuals();
 }
-function okOffset() { const op = S.skOp; if (!op.ids.length) { cancelSkOp(); return; } S.skOp = null; S.draw = null; const err = applyOffset(editSk(), op.ids, S.toolOpt.offsetD, S.toolOpt.offsetFlip); if (err) toast(err, 'warn'); S.sel.clear(); commitSketch(); }
-function cancelSkOp() { S.skOp = null; S.draw = null; refreshSketch(); }
+function okOffset() { const op = S.skOp; if (!op.ids.length) { cancelSkOp(); return; } S.skOp = null; S.draw = null; const err = applyOffset(editSk(), op.ids, S.toolOpt.offsetD, S.toolOpt.offsetFlip); if (err) toast(err, 'warn'); S.sel.clear(); commitSketch(); setHint(); }
+function cancelSkOp() { S.skOp = null; S.draw = null; refreshSketch(); setHint(); }
 // Panel section for the active sketch tool's options.
 function toolOptionsPanel() {
   const o = S.toolOpt; const field = (label, id, val, set, unit = 'мм', int = false) => {
@@ -6931,7 +6931,8 @@ function renderCorner() {
   else if (S.measure) c.append(h('button', { class: 'cancel', title: 'Закрыть рулетку', onclick: closeMeasure }, svg(ICON.x)));
 }
 function setHint(text) {
-  const t = text ?? (S.editing ? ({
+  const t = text ?? (S.editing && S.skOp ? (S.skOp.kind === 'offset' ? (S.skOp.ids.length ? 'Смещение: ведите курсор в нужную сторону, щёлкните пустое место или Enter. Щелчок по линии добавляет или убирает цепочку' : 'Смещение: щёлкните линию, дугу или окружность') : 'Массив: задайте параметры на панели, затем OK или Enter. Esc отменяет')
+    : S.editing ? ({
     select: 'Выбор: щелчок выделяет, перетаскивание двигает недоопределённую геометрию, рамка выделяет область',
     line: S.draw?.stage === 1 ? 'Щёлкайте следующие точки. Щелчок по существующей точке или Esc завершает цепочку' : 'Линия: щёлкните начальную точку',
     rect: S.draw?.stage === 1 ? 'Щёлкните противоположный угол' : 'Прямоугольник: щёлкните первый угол',
