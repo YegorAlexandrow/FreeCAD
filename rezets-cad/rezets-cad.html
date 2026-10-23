@@ -1398,7 +1398,9 @@ function modelRefs(f) {
   const val = {
     lines: T.lines.filter(([a, b]) => on(a) && on(b)).map(([a, b]) => [...uv(a), ...uv(b)]),
     circles: T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6).map((c) => { const [x, y] = uv(c.c); return { x, y, r: c.r }; }),
-    verts: T.verts.filter(on).map(uv),
+    // The ends of straight edges count too: where a side runs into a fillet's arc there is no corner, but the sketch
+    // needs the point (as following the model already treats it).
+    verts: (() => { const out = T.verts.filter(on).map(uv); for (const [a, b] of T.lines) for (const q of [a, b]) if (on(q)) { const w = uv(q); if (!out.some((v) => Math.hypot(v[0] - w[0], v[1] - w[1]) < 1e-6)) out.push(w); } return out; })(),
   };
   // Curves of earlier sketches on this plane or a parallel one, seen along its normal: they are snapped to and
   // converted like model edges (SolidWorks lets a sketch use another sketch's geometry) and follow that sketch.
