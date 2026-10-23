@@ -5415,16 +5415,16 @@ function asmEdgePick(ev) {
   const pxPerMm = view.clientHeight * camera.zoom / (camera.top - camera.bottom);
   for (const c of S.doc.comps) {
     const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
-    for (const v of T.verts) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 9, wq); }
+    for (const v of T.verts) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my), 5, wq); }
     for (const ci of T.circles) {
       const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
       // Circles far from the cursor are skipped before sampling; each circle gives one candidate.
       const sc = toScreen(ci.c.clone().applyMatrix4(M)); if (Math.hypot(sc.x - mx, sc.y - my) > ci.r * pxPerMm + 8) continue;
       let best = null; for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; const wq = ci.c.clone().addScaledVector(u, ci.r * Math.cos(a)).addScaledVector(w, ci.r * Math.sin(a)).applyMatrix4(M); const s2 = toScreen(wq); const dd = Math.hypot(s2.x - mx, s2.y - my); if (!best || dd < best.dd) best = { dd, wq }; }
-      take({ comp: c.id, kind: 'axis', p: ci.c.toArray(), d: ci.n.toArray(), r: ci.r, edge: { t: 'circle', c: ci.c.toArray(), n: ci.n.toArray(), r: ci.r } }, best.dd, 6, best.wq);
+      take({ comp: c.id, kind: 'axis', p: ci.c.toArray(), d: ci.n.toArray(), r: ci.r, edge: { t: 'circle', c: ci.c.toArray(), n: ci.n.toArray(), r: ci.r } }, best.dd, 4, best.wq);
     }
     for (const [a, b] of T.lines) { const A = a.clone().applyMatrix4(M), B = b.clone().applyMatrix4(M); const sa = toScreen(A), sb = toScreen(B); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1)));
-      take({ comp: c.id, kind: 'axis', p: a.toArray(), d: b.clone().sub(a).normalize().toArray(), edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), 6, A.clone().lerp(B, t)); }
+      take({ comp: c.id, kind: 'axis', p: a.toArray(), d: b.clone().sub(a).normalize().toArray(), edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), 4, A.clone().lerp(B, t)); }
   }
   // Nearest one that is not hidden behind a surface.
   const meshes = []; asmGroup.traverse((o) => { if (o.isMesh && o.userData.comp) meshes.push(o); }); asmGroup.updateMatrixWorld(true);
@@ -5532,7 +5532,8 @@ function previewMate() {
   if (pm.picks.length < 2) { asmRefresh(); return; }
   const [a, b] = pm.picks; const opts = mateOptions(a, b); if (!opts.includes(pm.type)) pm.type = opts[0];
   const asm = S.doc; const A = worldEnt(a, poseOf(asm.comps.find((c) => c.id === a.comp))), B = worldEnt(b, poseOf(asm.comps.find((c) => c.id === b.comp)));
-  if (pm.flip == null) pm.flip = a.kind === 'plane' && b.kind === 'plane' ? false : A.d.dot(B.d) > 0;
+  // The alignment closest to how the parts stand now, as in SolidWorks (always «face to face» turned parts over).
+  if (pm.flip == null) pm.flip = A.d.dot(B.d) > 0;
   const mr = ['path', 'slot', 'cam'].includes(pm.type) ? mechRefs(pm.type, a, b) : null;
   const m = { id: 'm' + asm.nid, type: pm.type, a: mr ? mr[0] : a, b: mr ? mr[1] : b, flip: pm.flip };
   // Distance keeps the side the parts are on now.
@@ -5542,6 +5543,8 @@ function previewMate() {
   // As in SolidWorks, when the faces cannot meet the way they face now (another mate holds the part's
   // orientation), the other alignment is tried before calling it a conflict.
   if (pm.result.status === 'conflict' && !pm.flipTouched && ['coincident', 'parallel', 'concentric', 'distance'].includes(m.type)) { restorePoses(asm, pm.before); const m2 = { ...m, flip: !m.flip }; const r2 = tryAddMate(asm, m2); if (r2.status === 'ok') { pm.flip = m2.flip; Object.assign(m, m2); pm.result = r2; } else restorePoses(asm, pm.before); }
+  // A distance or angle takes the keyboard as soon as it appears: typing 20 and Enter gives 20, not 146.6620.
+  if ((pm.type === 'distance' || pm.type === 'angle') && pm.valFocus !== pm.type + pm.picks.length) { pm.valFocus = pm.type + pm.picks.length; setTimeout(() => { const i = $('mateVal'); if (i && S.pm === pm) { i.focus(); i.select(); } }, 0); }
   if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; pm.suggest = null; if (pm.result.status === 'conflict') { const ex = explainConflict(asm, m, pm.result.group); if (ex?.text) { pm.result.why = ex.text; pm.suggest = ex.suggest; } else pm.result.why = ex; } }
   asmRefresh(true);
 }
@@ -5554,7 +5557,8 @@ function okMate() {
   const r = tryAddMate(asm, m); if (r.status !== 'ok') { toast(mateMessage(r), 'err'); return; }
   if (pm.edit) { asm.mates.splice(asm.mates.indexOf(m), 1); asm.mates.splice(pm.editAt, 0, m); pm.done = true; S.pm = null; asmRefresh(true); pushUndo(); renderCorner(); toast(`Изменено: ${m.name}`, 'info'); return; }
   S.pm = { kind: 'mate', picks: [], mate: null, before: snapPoses(asm) }; asmRefresh(true); pushUndo(); renderCorner();
-  toast(`Добавлено: ${m.name}. Выберите следующую пару или нажмите Esc`, 'info');
+  // The new mate shows in the tree; the status line says what next. A toast here covered the corner of the view.
+  setHint(`Добавлено: ${m.name}. Выберите следующую пару или нажмите Esc`);
 }
 // An existing mate is taken out while it is edited and put back on cancel.
 function editMate(m) {
@@ -5979,8 +5983,11 @@ function asmUp(ev, d) {
     const ep = asmEdgePick(ev); const p = ep ? null : asmPick(ev); if (!ep && !p?.ent) return; const pm = S.pm; const ref = ep || { comp: p.comp, ...p.ent };
     // Where on the face the click landed (part coordinates): two coaxial rings are one axis, the click tells which one was meant.
     if (p?.point) { const c = S.doc.comps.find((x) => x.id === p.comp); if (c) ref.at = p.point.clone().applyMatrix4(new THREE.Matrix4().fromArray(c.T).invert()).toArray().map((v) => +v.toFixed(5)); }
-    if (pm.picks.length >= 2) { pm.picks = []; pm.flip = null; pm.v = null; }
-    if (pm.picks.length === 1 && pm.picks[0].comp === ref.comp) { toast('Выберите объект на другом компоненте', 'warn'); return; }
+    // A click on what is already picked takes it off; a click on another object of a picked component replaces that
+    // pick; with both picked, a third click replaces the second (the first, usually right, is kept).
+    const same = (q) => q.comp === ref.comp && q.kind === ref.kind && (q.e != null ? q.e === ref.e : JSON.stringify(q.p) === JSON.stringify(ref.p));
+    const hit = pm.picks.findIndex(same); if (hit >= 0) { pm.picks.splice(hit, 1); pm.flip = null; pm.v = null; previewMate(); renderSide(); return; }
+    const onComp = pm.picks.findIndex((q) => q.comp === ref.comp); if (onComp >= 0) pm.picks.splice(onComp, 1); else if (pm.picks.length >= 2) pm.picks.pop();
     pm.picks.push(ref); pm.flip = null; pm.flipTouched = false; pm.v = null; previewMate(); return;
   }
   if (d && !d.moved && !S.pm) { const p = asmPick(ev); S.asmSel = p?.comp || null; if (S.asmSel) S.mateSel = null; asmRefresh(); }
