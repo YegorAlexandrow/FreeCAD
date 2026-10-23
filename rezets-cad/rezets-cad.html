@@ -1941,7 +1941,7 @@ function rebuild() {
   // So does editing a sketch: the bodies built from it would hide what is being drawn and change under every drag.
   else if (S.editing) { const i = list.findIndex((f) => f.id === S.editing); if (i >= 0) list = list.slice(0, i + 1); }
   const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
-  updateBodyMesh(); buildPlanes(); renderTree(); renderRepairBar(); updateSketchVisuals();
+  updateBodyMesh(); buildPlanes(); renderTree(); renderRepairBar(); updateSketchVisuals(); if (S.ctx?.others?.some((o) => o.same)) drawContext();
   // What the open operation adds or cuts is tinted, so the preview stands out from the part (SolidWorks shows it yellow).
   if (preview && S.body && !S.errors[preview.id] && !['sketch', 'plane'].includes(preview.type)) { const i = list.indexOf(preview); const base = i > 0 ? computeBody(list.slice(0, i)).body : null; showPreviewFaces(base); } else if (preview) originGroup.clear();
   requestRender();
@@ -6503,7 +6503,7 @@ function editInContext(compId) {
   const Tc = displayT(asm, c); const inv = Tc.clone().invert(); const others = [];
   allComps(asm).forEach((o) => {
     if (o.id === c.id) return; const inf = docInfo(o.doc); if (!inf || inf.empty) return;
-    others.push({ geo: inf.geo, edges: inf.edges, M: inv.clone().multiply(displayT(asm, o)) });
+    others.push({ geo: inf.geo, edges: inf.edges, M: inv.clone().multiply(displayT(asm, o)), same: o.doc === c.doc });
   });
   const cam = camState(inv.toArray());
   S.ctx = { asm: S.project.active, asmName: activeEntry().name, comp: c.id, compName: c.name, doc: c.doc, M: Tc.toArray(), others };
@@ -6514,6 +6514,8 @@ function drawContext() {
   const mat = new THREE.MeshStandardMaterial({ color: colors.body, transparent: true, opacity: 0.22, depthWrite: false, metalness: 0, roughness: 0.8, side: THREE.DoubleSide });
   for (const o of S.ctx.others) {
     const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.copy(o.M); g.renderOrder = -1;
+    // Another instance of the part being edited follows the edit, as the part is now (its edges come with the next rebuild).
+    if (o.same) { if (!S.body) continue; g.add(new THREE.Mesh(shadedGeo(S.body), mat)); ctxGroup.add(g); continue; }
     g.add(new THREE.Mesh(shadedGeo(o.geo), mat)); g.add(segLines(o.edges, lineMat(colors.edge, 1, { opacity: 0.3 }))); ctxGroup.add(g);
   }
   bar.replaceChildren(h('span', {}, 'Редактирование ', h('b', {}, S.ctx.compName), ' в сборке ', h('b', {}, S.ctx.asmName)), h('button', { onclick: () => switchDoc(S.ctx.asm) }, 'Вернуться в сборку'));
