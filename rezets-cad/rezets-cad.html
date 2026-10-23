@@ -7083,7 +7083,10 @@ function renderPM() {
       f.from === 'offset' ? numField('Смещение', 'pmFromOff', f.fromOffset || 0, (v) => { f.fromOffset = v; schedulePreview(); }) : null,
       f.from === 'face' ? h('button', { class: 'rel pickbox' + (pm.pickFrom ? ' on' : ''), onclick: () => { pm.pickFrom = true; pm.pickTarget = false; renderSide(); } }, h('b', {}, '▱'), f.fromTarget ? (f.fromTarget.label || 'Грань') : 'щёлкните грань или плоскость') : null));
     body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Направление 1'),
-      seg([['blind', 'На глубину'], ['mid', 'Симметр.'], ['next', 'До след.'], ['through', 'Насквозь'], ['face', 'До грани']], f.end, (v) => { f.end = v; pm.touchedEnd = true; pm.pickTarget = v === 'face' && !f.target; refresh(); }),
+      seg([['blind', 'На глубину'], ['mid', 'Симметр.'], ['next', 'До след.'], ['through', 'Насквозь'], ['face', 'До грани']], f.end, (v) => { f.end = v; pm.touchedEnd = true; pm.pickTarget = v === 'face' && !f.target;
+        // «До следующей» with nothing ahead turns to the side where the part is.
+        if (v === 'next') { const at = pm.isNew ? rollbackIndex() : S.doc.features.indexOf(f); const ok = () => !computeBody([...S.doc.features.slice(0, at).filter((g) => g !== f), f]).errors[f.id]; if (!ok()) { f.dir = -(f.dir || 1); if (!ok()) f.dir = -f.dir; } }
+        refresh(); }),
       f.end === 'face' ? h('button', { class: 'rel pickbox' + (pm.pickTarget ? ' on' : ''), onclick: () => { pm.pickTarget = true; renderSide(); } }, h('b', {}, '▱'), f.target ? (f.target.label || 'Грань') : 'щёлкните грань или плоскость') : null,
       f.end === 'face' ? numField('Не доходя', 'pmOffset', f.offset || 0, (v) => { f.offset = v; schedulePreview(); }) : null,
       f.end === 'blind' || f.end === 'mid' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
