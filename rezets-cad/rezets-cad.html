@@ -212,8 +212,8 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 #drawing .sheet svg { display: block; }
 #viewbar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 #sectionBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; box-shadow: 0 2px 8px rgb(0 0 0 / .1); font-size: 12px; max-width: calc(100% - 24px); }
-#ctxBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 6px 8px 6px 12px; box-shadow: 0 2px 8px rgb(0 0 0 / .15); font-size: 12px; color: var(--fg-2); max-width: calc(100% - 24px); }
-#ctxBar b { color: var(--fg); font-weight: 600; } #ctxBar button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 5px; padding: 3px 10px; cursor: pointer; font: inherit; }
+#ctxBar, #repairBar { position: absolute; left: 50%; top: 52px; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 6px 8px 6px 12px; box-shadow: 0 2px 8px rgb(0 0 0 / .15); font-size: 12px; color: var(--fg-2); max-width: calc(100% - 24px); }
+#ctxBar b { color: var(--fg); font-weight: 600; } #ctxBar button, #repairBar button { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 5px; padding: 3px 10px; cursor: pointer; font: inherit; }
 #sectionBar input[type=range] { width: 160px; } #sectionBar .num { width: 64px; font-family: var(--font-num); }
 #sectionBar button { border: 1px solid var(--line); background: var(--bg); color: var(--fg-2); border-radius: 5px; padding: 2px 8px; cursor: pointer; } #sectionBar button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 #viewbar button:hover { background: var(--panel-2); color: var(--fg); }
@@ -308,6 +308,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     </div>
     <div id="sectionBar" hidden></div>
     <div id="ctxBar" hidden></div>
+    <div id="repairBar" hidden></div>
     <div id="drawing" hidden></div>
     <div id="corner"></div>
     <div id="toasts"></div>
@@ -1739,6 +1740,24 @@ function sketchRegions(f) {
   return f._reg;
 }
 const inRegion = (r, p) => pointInPoly(p, r.poly) && !r.holes.some((hh) => pointInPoly(p, hh));
+// One-off repair of the BASE part in the owner's cloud project: a drag of its holes before v105 handed the stand-off
+// and pin bosses (Бобышка5, Бобышка14) over to the plate, and the owner fixes it with one button rather than by
+// re-picking. The regions are found by the circles around them, so it does not depend on how they are numbered.
+const BASE_FIX = [['f18', ['45,50', '44,51', '43,52', '42,53']], ['f70', ['42', '43', '44', '45']]];
+function baseFixIds() {
+  if (S.mode !== 'part' || S.editing || S.doc?.name !== 'BASE') return null; const sf = featById('f1'); if (!sf) return null;
+  const reg = sketchRegions(sf); const out = [];
+  for (const [id, sigs] of BASE_FIX) { const f = featById(id); if (!f || f.type !== 'extrude' || f.sketch !== 'f1') return null; const ids = sigs.map((g) => reg.faces.find((x) => x.sig === g)?.id); if (ids.some((i) => i == null)) return null; out.push([f, ids]); }
+  const key = (a) => JSON.stringify([...a].sort((x, y) => x - y));
+  return out.some(([f, ids]) => key(selectedRegionIds(f, reg)) !== key(ids)) ? out : null;
+}
+function renderRepairBar() {
+  const bar = $('repairBar'); if (!bar) return; const fix = baseFixIds(); bar.hidden = !fix || !$('ctxBar').hidden; bar.textContent = ''; if (bar.hidden) return;
+  bar.append(h('span', {}, 'Бобышка5 и Бобышка14 перешли на плиту после переноса отверстий'), h('button', { onclick: () => {
+    for (const [f, ids] of baseFixIds() || []) { f.regions = ids; delete f.regionPts; delete f.regionSigs; }
+    rebuild(); refreshAll(); pushUndo(); toast('BASE починен: стойки и штыри снова на своих кольцах', 'info');
+  } }, 'Починить BASE'));
+}
 function selectedRegionIds(f, reg, out) {
   // A picked region is found again by the sketch entities around it, so moving or resizing them keeps the pick (holes
   // moved across a plate stay the holes). A point inside it, and then its number, are the fallbacks for older files
@@ -1878,7 +1897,7 @@ function rebuild() {
   // So does editing a sketch: the bodies built from it would hide what is being drawn and change under every drag.
   else if (S.editing) { const i = list.findIndex((f) => f.id === S.editing); if (i >= 0) list = list.slice(0, i + 1); }
   const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
-  updateBodyMesh(); buildPlanes(); renderTree(); updateSketchVisuals();
+  updateBodyMesh(); buildPlanes(); renderTree(); renderRepairBar(); updateSketchVisuals();
   // What the open operation adds or cuts is tinted, so the preview stands out from the part (SolidWorks shows it yellow).
   if (preview && S.body && !S.errors[preview.id] && !['sketch', 'plane'].includes(preview.type)) { const i = list.indexOf(preview); const base = i > 0 ? computeBody(list.slice(0, i)).body : null; showPreviewFaces(base); } else if (preview) originGroup.clear();
   requestRender();
@@ -7438,12 +7457,12 @@ function enterDoc() {
   S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
   // The section belongs to the document it was made in: another part opens whole, and coming back finds the cut as it was.
   S.section = (ent.kind !== 'drw' && ent._view?.section) || null; if (ent.kind === 'drw') { renderSectionBar(); applySection(); }
-  if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); return; }
+  if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); renderRepairBar(); return; }
   if (S.ctx && S.ctx.doc !== ent.id) S.ctx = null; drawContext();
   if (ent.kind === 'part') { for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk); asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); if (!lastSaved) pushUndo(); }
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
-  renderDocTabs(); fitView(); renderSectionBar(); applySection();
+  renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar();
   const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
 }
 function openProject(p) { S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
