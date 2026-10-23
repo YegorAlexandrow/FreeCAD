@@ -2640,7 +2640,9 @@ function dragTo(m) {
   const sk = editSk(); const D = S.drag; restoreGeo(sk, D.snap); const du = m.u - D.start.u, dv = m.v - D.start.v;
   const moveIds = new Set(); let radiusOf = null;
   if (D.key.startsWith('p:')) { const id = D.key.slice(2); if (!isRefPt(id)) moveIds.add(id); }
-  else if (D.key.startsWith('e:')) { const e = sk.ents[D.key.slice(2)]; if (!e) return; if (e.t === 'line') { moveIds.add(e.p1); moveIds.add(e.p2); } else if (e.t === 'spline') e.pts.forEach((q) => moveIds.add(q)); else if (e.t === 'ellipse') { moveIds.add(e.c); moveIds.add(e.p1); } else if (!e.ext) { radiusOf = e; } }
+  else if (D.key.startsWith('e:')) { const e = sk.ents[D.key.slice(2)]; if (!e) return; if (e.t === 'line') { moveIds.add(e.p1); moveIds.add(e.p2); } else if (e.t === 'spline') e.pts.forEach((q) => moveIds.add(q)); else if (e.t === 'ellipse') { moveIds.add(e.c); moveIds.add(e.p1); } else if (!e.ext) {
+    // A circle whose size is set (a diameter dimension) is moved by its rim instead of being resized.
+    const a = S.analysis; const ri = a?.sys.idx['r' + e.id]; if (ri === undefined || a.free.has(ri)) radiusOf = e; else entPts(e).forEach((q) => moveIds.add(q)); } }
   // A copy or mirror image is moved through its source: the source takes the motion carried back through the
   // copy's placement (found numerically, so patterns, rotations and mirrors all work the same).
   const sys0 = buildSystem(sk); const direct = [], lifted = new Map();
