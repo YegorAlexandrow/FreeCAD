@@ -4934,7 +4934,9 @@ function massProps(g, M) {
   }
   return { vol, area, com: vol ? com.divideScalar(vol) : com };
 }
-const fmtMass = (g) => (g >= 1000 ? fmt(g / 1000, 3) + ' кг' : fmt(g, 2) + ' г');
+// Quantities of any size keep their significant digits: 0.000976 mm³ is not «0», 125000000000 mm³ gets its thousands grouped.
+const fmtQty = (v) => { const a = Math.abs(v); if (!(a > 0)) return '0'; if (a >= 1e4) return Math.round(v).toLocaleString('ru-RU'); if (a >= 1) return fmt(v, 2); return String(+v.toPrecision(3)); };
+const fmtMass = (g) => (g >= 1000 ? fmtQty(g / 1000) + ' кг' : g >= 1 ? fmtQty(g) + ' г' : g >= 1e-3 ? fmtQty(g * 1e3) + ' мг' : fmtQty(g * 1e6) + ' мкг');
 function cmdMass() {
   if (S.editing) exitSketch(); if (S.measure) closeMeasure();
   if (S.mode === 'asm') { if (!S.doc.comps.length) { toast('Сборка пустая', 'warn'); return; } openPM({ kind: 'mass' }); drawMassMarker(); return; }
@@ -4969,8 +4971,8 @@ function renderMassPM() {
   const sel = h('select', { id: 'pmMat' }, Object.entries(MATERIALS).map(([k, [name, rho]]) => h('option', { value: k, selected: k === mat }, `${name} (${fmt(rho, 2)} г/см³)`)));
   sel.onchange = () => { data.material = sel.value; if (S.mode === 'part') pushUndo(); else saveProjectSoon(); renderSide(); };
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Материал'), h('label', { class: 'field' }, h('span', {}, 'Материал'), sel)),
-    h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Свойства'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(m))), h('div', { class: 'kv' }, h('span', {}, 'Объём'), h('b', {}, fmt(mp.vol, 2) + ' мм³')),
-      h('div', { class: 'kv' }, h('span', {}, 'Площадь поверхности'), h('b', {}, fmt(mp.area, 2) + ' мм²')), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(mp.com)))));
+    h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Свойства'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(m))), h('div', { class: 'kv' }, h('span', {}, 'Объём'), h('b', {}, fmtQty(mp.vol) + ' мм³')),
+      h('div', { class: 'kv' }, h('span', {}, 'Площадь поверхности'), h('b', {}, fmtQty(mp.area) + ' мм²')), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(mp.com)))));
   side.append(box);
 }
 // Bill of materials: one row per part, with quantity and mass.
