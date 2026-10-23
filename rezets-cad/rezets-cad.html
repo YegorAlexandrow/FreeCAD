@@ -2342,20 +2342,23 @@ function openDimEditor(c) {
   const btn = h('button', { onclick: () => apply() }, 'OK');
   const el = h('div', { class: 'dimedit', style: `left:${s.x}px;top:${s.y}px` }, inp, drv, btn);
   const apply = () => {
-    const fresh = S.dimEdit?.fresh; const v = evalExpr(inp.value); const driven = drv.querySelector('input').checked; S.dimEdit = null; closeDimEditor();
+    const fresh = S.dimEdit?.fresh; const v = evalExpr(inp.value); const driven = drv.querySelector('input').checked;
+    // A value that can't be used keeps the field open with what was typed, to be corrected (it closed and lost it).
+    if (driven === !!c.driven && !c.driven && (!Number.isFinite(v) || (v <= 0 && c.t !== 'angle'))) { toast(hasIdent(inp.value) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число, например 25 или 50/2', 'warn'); inp.focus(); inp.select(); return; }
+    S.dimEdit = null; closeDimEditor();
     if (driven !== !!c.driven) {
       if (driven) { c.driven = true; commitSketch(); return; }
       delete sk.cons[c.id]; const nc = { ...c, driven: false, v: Number.isFinite(v) ? v : measure(sk, c) }; delete nc.s;
       const r = tryAddConstraint(sk, nc); if (r.status !== 'ok') { sk.cons[c.id] = c; reportAdd(r, nc); } commitSketch(); return;
     }
     if (!Number.isFinite(v) || v <= 0 && c.t !== 'angle') { toast('Введите положительное число, например 25 или 50/2', 'warn'); refreshSketch(); return; }
-    if (c.driven) { refreshSketch(); return; }
+    if (c.driven) { if (Math.abs(v - c.v) > 1e-9) toast('Размер справочный, он только показывает значение. Снимите отметку «Справочный», чтобы задавать его', 'info'); refreshSketch(); return; }
     const old = c.v, oldExpr = c.expr; const before = snapshotGeo(sk); c.v = v; if (hasIdent(inp.value)) c.expr = inp.value.trim(); else delete c.expr;
     if (!solveSketch(sk) || flippedLine(sk, before)) { const fl = flippedLine(sk, before); c.v = old; if (oldExpr) c.expr = oldExpr; else delete c.expr; restoreGeo(sk, before); toast(fl ? `При ${fmt(v)} линия вывернулась бы наизнанку (скругление или размер больше, чем помещается). Размер оставлен ${fmt(old)}` : `Значение ${fmt(v)} недостижимо при текущих взаимосвязях. Размер оставлен ${fmt(old)}.`, 'err'); refreshSketch(); return; }
     commitSketch(false, fresh);
   };
   inp.addEventListener('blur', () => setTimeout(() => { if (S.dimEdit?.el === el && !el.contains(document.activeElement)) apply(); }, 0));
-  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); apply(); } if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); S.dimEdit = null; closeDimEditor(); refreshSketch(); } });
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === 'Tab') { ev.preventDefault(); apply(); } if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); S.dimEdit = null; closeDimEditor(); refreshSketch(); } });
   closeDimEditor(); S.dimEdit = { el, cid: c.id, apply: () => apply(), fresh: !!openDimEditor.fresh }; openDimEditor.fresh = false; $('editLayer').append(el); requestRender();
   // Focus after the click that placed the dimension has finished moving focus around.
   setTimeout(() => { if (inp.isConnected) { inp.focus(); inp.select(); } }, 0);
@@ -2567,6 +2570,7 @@ function dragTo(m) {
 // ---------------- drawing tools ----------------
 function setTool(t) {
   if (!S.editing && t !== 'select') return;
+  if (t !== 'select' && t !== 'dim' && t !== 'sfillet' && S.sel.size) { S.sel.clear(); }
   S.tool = t; S.toolFillets = []; S.draw = null; S.skOp = null; S.dimPick = null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
@@ -3107,6 +3111,12 @@ function trimPreview(sk, e, m) {
   const end = e.t === 'line' ? 1 : arcSpan(sk, e).sw; return curveSegs(sk, e, pc.lo ? pc.lo.t : 0, pc.hi ? pc.hi.t : end);
 }
 function trimAt(sk, e, m) {
+  // Dimensions that lose what they measured go with it, said rather than silently.
+  const dims0 = Object.values(sk.cons).filter((c) => DIM_TYPES.has(c.t)).length; const r = trimAt0(sk, e, m);
+  const lost = dims0 - Object.values(sk.cons).filter((c) => DIM_TYPES.has(c.t)).length; if (lost > 0) toast(`Обрезка убрала ${lost} ${plural(lost, 'размер', 'размера', 'размеров')}, измерявших отрезанное`, 'info');
+  return r;
+}
+function trimAt0(sk, e, m) {
   if (isCurve(e)) { toast('Сплайн и эллипс пока не обрезаются', 'info'); return; }
   const tc = curveParam(sk, e, m.u, m.v); const pc = trimPiece(sk, e, tc); const pending = [];
   if (pc.all) { delete sk.ents[e.id]; cleanupSketch(sk); return; }
@@ -3395,7 +3405,7 @@ function startSketch(plane, existing) {
     const at = rollbackIndex(); S.doc.features.splice(at, 0, f); if (S.doc.rollback != null) S.doc.rollback++;
   }
   S.editing = f.id; S.editBackup = JSON.stringify(f.sk); S.refs = modelRefs(f); S.sel.clear(); S.conflict = new Set(); S.selectedTree = null; showFaceHover(null);
-  setTab('sketch'); setTool(existing ? 'select' : 'line');
+  setTab('sketch'); setTool('select');
   if (cleanZeroLines(f.sk)) pushUndo(); solveSketch(f.sk); analyze(); rebuild(); renderSide(); renderCorner(); pushUndo();
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
@@ -3411,6 +3421,7 @@ function exitSketch() {
   if (S.resumePM) { const pm = S.resumePM; S.resumePM = null; if (featById(f.id)) { openPM(pm); return; } }
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
   if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана. Проверьте, что концы линий соединены`, 'warn'); }
+  if (featById(f.id)) { S.selectedTree = 'feat:' + f.id; renderTree(); }
   const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. Нажмите «Вытянуть» или «Повернуть».`);
 }
 const plural = (n, a, b, c) => { const m = n % 10, m2 = n % 100; return m === 1 && m2 !== 11 ? a : m >= 2 && m <= 4 && (m2 < 10 || m2 >= 20) ? b : c; };
@@ -3433,7 +3444,7 @@ function cmdFeature(type, mode) {
   S.pickSketch = null;
   const reg = sketchRegions(sf); if (!reg.faces.length) { toast(`В «${sf.name}» нет замкнутых контуров. Проверьте, что концы линий соединены.`, 'warn'); return; }
   const f = type === 'extrude'
-    ? { id: fid(), type: 'extrude', name: nextName(mode === 'cut' ? 'Вырез' : 'Бобышка'), sketch: sf.id, mode, end: mode === 'cut' ? 'through' : 'blind', depth: 20, dir: 1, regions: null }
+    ? { id: fid(), type: 'extrude', name: nextName(mode === 'cut' ? 'Вырез' : 'Бобышка'), sketch: sf.id, mode, end: mode === 'cut' ? 'through' : 'blind', depth: 10, dir: 1, regions: null }
     : { id: fid(), type: 'revolve', name: nextName(mode === 'cut' ? 'ВырезПоворотом' : 'Поворот'), sketch: sf.id, mode, angle: 360, dir: 1, axis: defaultAxis(sf), regions: null };
   if (type === 'extrude' && mode === 'cut') f.dir = guessCutDir(sf, reg, f);
   if (type === 'extrude' && mode === 'add' && S.body) f.dir = guessAddDir(sf, reg, f);
@@ -7355,7 +7366,7 @@ window.addEventListener('keydown', (e) => {
   if (k === 'f') return fitView();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
   if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase()); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
-  if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); }
+  if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); if (k === 'e' || k === 'x') { if (S.draw) endDrawing(); return cmdFeature('extrude', k === 'e' ? 'add' : 'cut'); } }
   // An open operation panel is not dropped by a command key: what was typed into it would be lost.
   else if (S.pm && ['m', 's', 'e', 'x'].includes(k)) { toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); }
   else { if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); if (k === 's') return cmdSketch(); if (k === 'e') return cmdFeature('extrude', 'add'); if (k === 'x') return cmdFeature('extrude', 'cut'); }
