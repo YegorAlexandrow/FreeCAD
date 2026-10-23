@@ -6802,7 +6802,14 @@ function renderExplodePM() {
     numField('Расстояние', 'exDist', cur.d, (v) => { cur.d = v; }), h('button', { class: 'ghost-btn', onclick: addExplodeStep }, 'Добавить шаг'));
   box.append(g);
   if (ex.steps.length) { const l = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Шаги: ${ex.steps.length}`));
-    ex.steps.forEach((st, i) => l.append(h('div', { class: 'rel' }, h('b', {}, String(i + 1)), `${st.comps.map(cname).join(', ')} · ${fmt(st.d)} мм`, h('button', { class: 'x', title: 'Удалить шаг', onclick: () => { ex.steps.splice(i, 1); asmRefresh(); pushUndo(); renderSide(); } }, '✕'))));
+    // Each step keeps its distance editable and can move up or down the order.
+    ex.steps.forEach((st, i) => { const inp = h('input', { type: 'text', class: 'inline-val', value: fmt(st.d), 'aria-label': 'Расстояние шага', title: 'Расстояние, мм' });
+      const apply = () => { const v = evalExpr(inp.value); if (Number.isFinite(v) && v >= 0) { st.d = v; asmRefresh(); pushUndo(); } else inp.value = fmt(st.d); };
+      inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+      const move = (k) => { const j = i + k; if (j < 0 || j >= ex.steps.length) return; [ex.steps[i], ex.steps[j]] = [ex.steps[j], ex.steps[i]]; asmRefresh(); pushUndo(); renderSide(); };
+      l.append(h('div', { class: 'rel' }, h('b', {}, String(i + 1)), h('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis' }, st.comps.map(cname).join(', ')), inp, h('span', {}, 'мм'),
+        h('button', { class: 'x', title: 'Выше', 'aria-label': 'Выше', disabled: i === 0, onclick: () => move(-1) }, '↑'), h('button', { class: 'x', title: 'Ниже', 'aria-label': 'Ниже', disabled: i === ex.steps.length - 1, onclick: () => move(1) }, '↓'),
+        h('button', { class: 'x', title: 'Удалить шаг', onclick: () => { ex.steps.splice(i, 1); asmRefresh(); pushUndo(); renderSide(); } }, '✕'))); });
     box.append(l); }
   side.append(box);
 }
