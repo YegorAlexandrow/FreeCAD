@@ -2766,12 +2766,17 @@ function drawClick(m) {
   }
   if (t === 'ellipse') {
     if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
-    if (D.stage === 1) { const c = gp(sk, D.c); if (Math.hypot(sn.u - c.x, sn.v - c.y) < 1e-6) return; D.a = nid(sk); sk.pts[D.a] = { id: D.a, x: sn.u, y: sn.v }; D.newPts = [D.c, D.a]; D.stage = 2; refreshSketch(true); return; }
-    const id = nid(sk); sk.ents[id] = { id, t: 'ellipse', c: D.c, p1: D.a, r: D.r || 1 }; S.draw = null; commitSketch(); return;
+    if (D.stage === 1) { const c = gp(sk, D.c); if (Math.hypot(sn.u - c.x, sn.v - c.y) < 1e-6) return; D.a = nid(sk); sk.pts[D.a] = { id: D.a, x: sn.u, y: sn.v };
+      if (sn.kind === 'pt' || sn.kind === 'ref') { const q = snapToPoint(sk, sn, pending); D.apend = [...pending, { t: 'coincident', refs: [D.a, q] }]; }
+      D.newPts = [D.c, D.a]; D.stage = 2; refreshSketch(true); return; }
+    const id = nid(sk); sk.ents[id] = { id, t: 'ellipse', c: D.c, p1: D.a, r: D.r || 1 }; if (D.apend) addRelations(sk, D.apend); S.draw = null; commitSketch(); return;
   }
   if (t === 'polygon') {
     if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
-    const c = gp(sk, D.c); if (Math.hypot(sn.u - c.x, sn.v - c.y) < 1e-6) return; makePolygon(sk, D.c, sn.u, sn.v, S.toolOpt.polySides); S.draw = null; commitSketch(); return;
+    const c = gp(sk, D.c); if (Math.hypot(sn.u - c.x, sn.v - c.y) < 1e-6) return; const P = makePolygon(sk, D.c, sn.u, sn.v, S.toolOpt.polySides);
+    // A vertex put on an existing point stays on it, like the end of a line.
+    if (sn.kind === 'pt' || sn.kind === 'ref') { const q = snapToPoint(sk, sn, pending); addRelations(sk, [...pending, { t: 'coincident', refs: [P[0], q] }]); }
+    S.draw = null; commitSketch(); return;
   }
   if (t === 'circle') {
     if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
@@ -3532,6 +3537,7 @@ function makePolygon(sk, cId, vx, vy, n) {
   const P = []; for (let i = 0; i < n; i++) { const id = nid(sk); const a = a0 + TAU * i / n; sk.pts[id] = { id, x: C.x + r * Math.cos(a), y: C.y + r * Math.sin(a) }; P.push(id); }
   const L = P.map((p, i) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: p, p2: P[(i + 1) % n] }; return id; });
   addRelations(sk, [...P.map((p) => ({ t: 'oncircle', refs: [p, circ] })), ...L.slice(1).map((l) => ({ t: 'equal', refs: [L[0], l] }))]);
+  return P;
 }
 
 // ============================================================================================
