@@ -1535,7 +1535,7 @@ function followPlane(pl, body, steps) {
   }
   let best = null;
   for (const g of groups.values()) {
-    let k = steps.length - 1; if (k < 0) break; while (k > 0 && onSurface(steps[k - 1].body, g.p, n)) k--;
+    let k = steps.length - 1; if (k < 0) break; while (k > 0 && steps[k - 1].body && onSurface(steps[k - 1].body, g.p, n)) k--;
     if (steps[k].id === fc.by && (!best || Math.abs(g.d - fc.d) < Math.abs(best.d - fc.d))) best = g;
   }
   if (!best || Math.abs(best.d - fc.d) < 1e-9) return pl;
@@ -1567,14 +1567,10 @@ function computeBody(features) {
       if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'shell') { const r = applyShell(f, body, cyls); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
-      const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own); const prev = body;
+      const own = []; const tool = buildTool(f, body, own); cyls = cyls.concat(own);
       if (f.mode === 'cut') { if (!body) throw new Error('Нечего вырезать: сначала создайте тело'); body = boolean(body, tool, SUBTRACTION); }
       else body = body ? boolean(body, tool, ADDITION) : tool;
       if (!body.getAttribute('position').count) err = 'Результат пустой';
-      // A cut that leaves pieces touching only along an edge (a checkerboard cut through) makes zero-thickness
-      // geometry: a slicer cannot print it and the faces there come out as fans of slivers. Like SolidWorks, the cut
-      // is refused and the model stays as it was. (Bosses are left alone: real parts touch themselves on purpose.)
-      else if (f.mode === 'cut' && prev && sharedEdges(body) > sharedEdges(prev)) { body = prev; cyls = cyls.slice(0, cyls.length - own.length); err = 'Получается геометрия нулевой толщины: части детали касаются только ребром или углом. Измените контур или выберите другие области'; }
     } catch (e) { err = e.message || String(e); if (e.partial) body = e.partial; }
     if (err) errors[f.id] = err;
     S.cache.set(k, { body, err, cyls });
