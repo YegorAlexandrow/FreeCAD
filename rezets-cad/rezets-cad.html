@@ -1387,9 +1387,8 @@ let refCache = { key: null };
 function modelRefs(f) {
   const idx = S.doc.features.indexOf(f); const before = S.doc.features.slice(0, Math.max(0, idx));
   const k = JSON.stringify(before) + JSON.stringify(f.plane); if (refCache.key === k) return refCache.val;
-  const empty = { lines: [], circles: [], verts: [] }; const cb = computeBody(before);
-  if (!cb.body) { refCache = { key: k, val: empty }; return empty; }
-  const T = edgeTopology(cb.body, cb.cyls);
+  const cb = computeBody(before);
+  const T = cb.body ? edgeTopology(cb.body, cb.cyls) : { lines: [], circles: [], verts: [] };
   const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
   const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3; const uv = (v) => { const d = v.clone().sub(o); return [d.dot(X), d.dot(Y)]; };
   const val = {
@@ -1397,8 +1396,24 @@ function modelRefs(f) {
     circles: T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6).map((c) => { const [x, y] = uv(c.c); return { x, y, r: c.r }; }),
     verts: T.verts.filter(on).map(uv),
   };
+  // Curves of earlier sketches on this plane or a parallel one, seen along its normal: they are snapped to and
+  // converted like model edges (SolidWorks lets a sketch use another sketch's geometry) and follow that sketch.
+  const nModelC = val.circles.length; const skPt = new Map(); const skCirc = []; const key6 = (a) => a.map((q) => q.toFixed(5)).join(',');
+  for (const g of before) {
+    if (g.type !== 'sketch' || g.suppressed || !g.sk || !g.plane || Math.abs(Math.abs(V3(g.plane.n).dot(N)) - 1) > 1e-6) continue;
+    const P = (id) => { const q = gp(g.sk, id); return q ? uv(toWorld(g.plane, q.x, q.y)) : null; };
+    const vert = (id) => { const a = P(id); if (!a || isRefPt(id)) return a; const kk = key6(a); if (!skPt.has(kk)) { skPt.set(kk, { sk: g.id, pt: id }); val.verts.push(a); } return a; };
+    for (const e of Object.values(g.sk.ents)) {
+      if (e.ext || e.constr) continue;
+      if (e.t === 'line') { const a = vert(e.p1), b = vert(e.p2); if (a && b) val.lines.push([...a, ...b]); }
+      else if (e.t === 'circle' || e.t === 'arc') { const c = P(e.c); if (!c) continue; if (e.t === 'arc') { vert(e.p1); vert(e.p2); } val.circles.push({ x: c[0], y: c[1], r: e.r }); skCirc.push({ sk: g.id, pt: e.c, ent: e.id }); }
+    }
+  }
   Object.defineProperty(val, 'body', { value: cb.body, enumerable: false });
-  val.mref = (kind, i) => kind === 'p' ? vertRef(cb.body, o.clone().addScaledVector(X, i[0]).addScaledVector(Y, i[1])) : circleRef(T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6)[i]);
+  val.mref = (kind, i) => {
+    if (kind === 'p') { const sp = skPt.get(key6(i)); if (sp) return { ...sp, w: toWorld(f.plane, i[0], i[1]).toArray().map((x) => +x.toFixed(6)) }; return cb.body ? vertRef(cb.body, o.clone().addScaledVector(X, i[0]).addScaledVector(Y, i[1])) : null; }
+    if (i >= nModelC) { const sc = skCirc[i - nModelC]; return sc ? { ...sc, circle: true, r: val.circles[i].r } : null; }
+    return circleRef(T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6)[i]); };
   refCache = { key: k, val }; return val;
 }
 // A point taken from the model remembers what it was taken from, so that it moves with the model when an
@@ -1422,8 +1437,23 @@ function onSomeFace(body, pl) {
   for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i); b.fromBufferAttribute(pos, i + 1); c.fromBufferAttribute(pos, i + 2); const n = b.clone().sub(a).cross(c.clone().sub(a)); const L = n.length(); if (L < 1e-9) continue; if (Math.abs(n.dot(N)) / L > 1 - 1e-6 && Math.abs(N.dot(a) - d0) < 1e-4) return true; }
   return false;
 }
+// Points taken from another sketch go where that sketch's point is now (seen along this sketch's normal); a point
+// whose source is gone stays and is reported hanging.
+function followOtherSketches(f, features) {
+  const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.mref?.sk); if (!pts.length) return; let moved = false; const lost = [];
+  const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y);
+  for (const p of pts) {
+    const g = features.find((x) => x.id === p.mref.sk); const q = g && !g.suppressed && g.sk?.pts[p.mref.pt];
+    if (!q) { if (usedPt(f.sk, p.id)) lost.push(p.id); continue; }
+    const w = toWorld(g.plane, q.x, q.y).sub(o); const x = +w.dot(X).toFixed(6), y = +w.dot(Y).toFixed(6);
+    if (Math.abs(x - p.x) > 1e-9 || Math.abs(y - p.y) > 1e-9) { p.x = x; p.y = y; moved = true; }
+    if (p.mref.ent) { const ge = g.sk.ents[p.mref.ent]; if (ge?.r != null) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && Math.abs(e.r - ge.r) > 1e-9) { e.r = ge.r; moved = true; } }
+  }
+  if (moved) solveSketch(f.sk);
+  if (lost.length) S.dangling.set(f.id, [...new Set([...(S.dangling.get(f.id) || []), ...lost])]);
+}
 function followSketchRefs(f, body, cyls) {
-  S.dangling.delete(f.id); const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.free); if (!pts.length) return;
+  S.dangling.delete(f.id); const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.free && !p.mref?.sk); if (!pts.length) return;
   const T = edgeTopology(body, cyls); const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
   const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3; const world = (p) => o.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y);
   // Corners where a straight edge meets a curved face are not vertices of the topology, only ends of its lines.
@@ -1573,7 +1603,9 @@ function computeBody(features) {
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
-    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); if (f.plane?.label === 'Грань' && !f.plane.face && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
+    if (f.type === 'sketch' && !f.suppressed && !body) S.dangling.delete(f.id);
+    if (f.type === 'sketch' && !f.suppressed && !body) followOtherSketches(f, features);
+    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.plane.face && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
     key.push(JSON.stringify(f));
@@ -1769,7 +1801,19 @@ controls.enableRotate = false;
   });
 }
 let renderQueued = false;
-function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; renderer.render(scene, camera); layoutOverlay(); }); }
+function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); renderer.render(scene, camera); layoutOverlay(); }); }
+// Outlines of curved faces as seen from here (a cylinder's sides, a fillet's edge on the skyline), redrawn as the
+// view turns, as SolidWorks draws them: without them a shaft seen from the side was a flat grey band.
+const silGroup = new THREE.Group(); let silState = { geo: null, dir: null, obj: null };
+function updateSilhouette() {
+  const geo = (S.mode === 'part' || S.mode === 'import') && groups.body.visible ? S.body : null;
+  if (!geo || geo.getAttribute('position').count > 300000) { if (silState.obj) { silGroup.clear(); silState = { geo: null, dir: null, obj: null }; } return; }
+  if (!silGroup.parent) scene.add(silGroup);
+  const d = camera.getWorldDirection(new THREE.Vector3()); if (silState.geo === geo && silState.dir && silState.dir.dot(d) > 1 - 1e-7) return;
+  const arr = []; for (const x of meshAdjacency(geo)) { const s1 = x.n1.dot(d), s2 = x.n2.dot(d); if (s1 * s2 < 0) arr.push(x.a.x, x.a.y, x.a.z, x.b.x, x.b.y, x.b.z); }
+  silGroup.clear(); silState = { geo, dir: d, obj: null }; if (!arr.length) return;
+  const l = segLines(arr, lineMat(colors.edge, 1.4)); const cp = groups.body.children.find((o) => o.material?.clippingPlanes)?.material.clippingPlanes; if (cp) l.material.clippingPlanes = cp; silGroup.add(l); silState.obj = l;
+}
 function resize() {
   const w = view.clientWidth, hgt = view.clientHeight; renderer.setSize(w, hgt, false);
   const half = 160; const asp = w / Math.max(hgt, 1); camera.left = -half * asp; camera.right = half * asp; camera.top = half; camera.bottom = -half; camera.updateProjectionMatrix();
@@ -7215,5 +7259,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, depthHandle, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, depthHandle, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
