@@ -1687,6 +1687,7 @@ function buildTool(f, body, cyls = []) {
   g.applyMatrix4(M); g.computeVertexNormals(); return g;
 }
 function rebuild() {
+  if (S.selFace) showFaceSel(null);
   if (S.mode === 'asm') return;
   if (S.mode === 'import') { const ent = activeEntry(); S.body = importGeometry(ent); S.cyls = importCyls(ent); S.errors = {}; updateBodyMesh(); renderSide(); updateSketchVisuals(); requestRender(); return; }
   const feats = S.doc.features.slice(0, rollbackIndex());
@@ -1851,14 +1852,20 @@ function showFeatureFaces(fid) {
   requestRender();
 }
 function faceForTriangle(t) { return faceIndex.find((f) => f.tris.includes(t)); }
-function showFaceHover(face) {
-  groups.hover.clear(); if (!face || !S.body) { requestRender(); return; }
+// The face picked on the part stays shown in the selection colour (only the tree row and the hint said it before).
+const selFaceGroup = new THREE.Group(); scene.add(selFaceGroup);
+function showFaceSel(face) {
+  selFaceGroup.clear(); S.selFace = face || null; if (!face || !S.body) { requestRender(); return; }
+  showFaceHover(face, selFaceGroup, colors['geo-sel'], 0.45);
+}
+function showFaceHover(face, into = groups.hover, color = colors['geo-hover'], opacity = 0.35) {
+  into.clear(); if (!face || !S.body) { requestRender(); return; }
   const pos = S.body.getAttribute('position'); const arr = [];
   const cp = face.cyl && V3(face.cyl.p), cd = face.cyl && V3(face.cyl.dir);
   const off = (v) => (face.cyl ? v.clone().sub(cp).projectOnPlane(cd).normalize().multiplyScalar(face.cyl.sign || 1) : face.n);
   for (const t of face.tris) for (let k = 0; k < 3; k++) { const v = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k); v.addScaledVector(off(v), 0.02); arr.push(v.x, v.y, v.z); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
-  groups.hover.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors['geo-hover'], transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide }))); requestRender();
+  into.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide }))); requestRender();
 }
 function planeFromFace(face, hitPoint) {
   const n = face.n.clone(); let x = new THREE.Vector3(1, 0, 0).projectOnPlane(n);
@@ -2311,6 +2318,8 @@ function sketchAt(ev) {
       for (let i = 1; i < pts.length; i++) { const a = pts[i - 1], b = pts[i]; const dx = b.x - a.x, dy = b.y - a.y; const t = Math.max(0, Math.min(1, ((mx - a.x) * dx + (my - a.y) * dy) / (dx * dx + dy * dy || 1))); const d = Math.hypot(a.x + t * dx - mx, a.y + t * dy - my); if (d < 10 && (!best || d < best.d)) best = { d, f }; } } }
   return best?.f || null;
 }
+// The hover highlight goes when the pointer leaves the view (it stayed lit while the pointer was on the tree).
+canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
   if (S.pickSketch) { const sf = sketchAt(ev); if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); } return; }
   if (S.pm?.pattern) { patternPick(ev, true); return; }
@@ -2326,10 +2335,12 @@ function partClick(ev) {
   if (p?.plane) { S.selectedTree = p.plane.startsWith('f:') ? 'feat:' + p.plane.slice(2) : 'plane:' + p.plane; S.pickedFace = null; }
   else if (p?.face) {
     const by = featById(faceCreator(p.face)); S.faceOrigin = by?.id || null; originGroup.clear();
+    showFaceSel(p.face);
     if (p.face.cyl) { S.selectedTree = null; S.pickedFace = null; setHint(`Цилиндрическая грань ⌀${fmt(2 * p.face.cyl.r)}${by ? `, создана операцией «${by.name}»` : ''}`); }
     else { S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); setHint(`Грань${by ? ` создана операцией «${by.name}»` : ''}. «Эскиз» (S) начнёт эскиз на ней`); }
   }
-  else { S.selectedTree = null; S.pickedFace = null; S.faceOrigin = null; }
+  else { S.selectedTree = null; S.pickedFace = null; S.faceOrigin = null; setHint(); }
+  if (!p?.face) showFaceSel(null);
   buildPlanes(); renderTree(); requestRender();
 }
 
@@ -2711,13 +2722,15 @@ function cmdSkPattern() {
 }
 function previewPattern() {
   const op = S.skOp; if (op?.kind !== 'pattern') return; const sk = editSk(); const pt = { ...op.opt, n: Math.max(2, Math.round(op.opt.n)) }; const segs = [];
-  for (let i = 1; i < pt.n; i++) { const T = patXform(sk, pt, i); for (const id of op.ids) { const e = sk.ents[id]; if (!e) continue; const P = e.t === 'line' ? [gp(sk, e.p1), gp(sk, e.p2)] : curvePts(sk, e, 48); const Q = P.map(T); for (let k = 0; k + 1 < Q.length; k++) segs.push([Q[k].x, Q[k].y, Q[k + 1].x, Q[k + 1].y]); } }
+  for (let i = 1; i < pt.n; i++) { const T = patXform(sk, pt, i); for (const id of op.ids) { const e = sk.ents[id]; if (!e) continue; const P = e.t === 'line' ? [gp(sk, e.p1), gp(sk, e.p2)] : e.t === 'circle' ? (() => { const c = gp(sk, e.c); return Array.from({ length: 49 }, (_, i) => ({ x: c.x + e.r * Math.cos(i / 48 * 2 * Math.PI), y: c.y + e.r * Math.sin(i / 48 * 2 * Math.PI) })); })() : e.t === 'arc' ? (() => { const c = gp(sk, e.c), a = gp(sk, e.p1), b = gp(sk, e.p2); const a0 = Math.atan2(a.y - c.y, a.x - c.x); let sw = Math.atan2(b.y - c.y, b.x - c.x) - a0; while (sw <= 0) sw += 2 * Math.PI; return Array.from({ length: 33 }, (_, i) => ({ x: c.x + e.r * Math.cos(a0 + sw * i / 32), y: c.y + e.r * Math.sin(a0 + sw * i / 32) })); })() : curvePts(sk, e, 48); const Q = P.filter(Boolean).map(T); for (let k = 0; k + 1 < Q.length; k++) segs.push([Q[k].x, Q[k].y, Q[k + 1].x, Q[k + 1].y]); } }
   S.draw = { stage: 0, preview: segs }; updateSketchVisuals();
 }
 function okPattern() { const op = S.skOp; S.skOp = null; S.draw = null; const r = makePattern(editSk(), op.ids, op.opt); if (typeof r === 'string') toast(r, 'warn'); S.sel.clear(); commitSketch(); }
 // Panel for a pattern being made (op) or already made (pt, picked through one of its curves).
 function patternPanel(o, onChange, onOk) {
-  const num = (label, key, unit, int) => { const inp = h('input', { type: 'text', value: fmt(o[key], 4), inputmode: 'decimal' }); const apply = () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) { inp.value = fmt(o[key], 4); return; } if (int) v = Math.max(2, Math.round(v)); onChange({ [key]: v }); };
+  const num = (label, key, unit, int) => { const inp = h('input', { type: 'text', value: fmt(o[key], 4), inputmode: 'decimal' }); const apply = () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) { inp.value = fmt(o[key], 4); return; } if (int) v = Math.max(2, Math.round(v)); if (S.skOp && o[key] === v && !onChange.always) return; onChange({ [key]: v }); };
+    // While making a pattern the value already went in as it was typed: the change on leaving the field must not
+    // redraw the panel, or the OK button the pointer is on is replaced and the first click on it is lost.
     inp.addEventListener('change', apply);
     // While a pattern is being made the preview follows the typing; Enter takes the value and makes it.
     if (S.skOp) inp.addEventListener('input', () => { let v = evalExpr(inp.value); if (!Number.isFinite(v)) return; if (int) v = Math.max(2, Math.round(v)); o[key] = v; previewPattern(); });
@@ -3287,6 +3300,7 @@ function okPM() {
     const f = pm.feature; if (Array.isArray(f.regions) && !f.regions.length) { toast('Выберите хотя бы одну область эскиза', 'warn'); return; }
     if (pm.edgePick && !f.edges.length) { toast('Щёлкните хотя бы одно ребро', 'warn'); return; }
     if (pm.pattern && f.type !== 'mirror' && !f.feats.length) { toast('Отметьте элементы, которые нужно копировать', 'warn'); return; }
+    if (f.planeGuessed) { toast('Щёлкните плоскость или грань, относительно которой отразить', 'warn'); return; }
     if (pm.isNew) { const at = rollbackIndex(); S.doc.features.splice(at, 0, f); if (S.doc.rollback != null) S.doc.rollback++; }
     else { const i = S.doc.features.findIndex((x) => x.id === f.id); S.doc.features[i] = f; }
     S.pm = null; groups.regions.clear(); groups.measure.clear(); rebuild();
@@ -3299,7 +3313,14 @@ function okPM() {
   }
   closePM();
 }
-let previewTimer = null; function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(() => { rebuild(); drawRegions(); }, 120); }
+// The panel's error line follows the preview (it kept the message from when the panel was drawn: «Выберите
+// грань» after the face was picked, nothing when the new value broke the feature). Only that line is redrawn, so
+// the field being typed in keeps its focus.
+function refreshPmError() {
+  const f = S.pm?.feature; const box = side.querySelector('.pm'); if (!f || !box) return; const err = S.errors[f.id] || null; const old = box.querySelector('.pm-errbox');
+  if ((old?.textContent || null) === err) return; if (old) old.remove(); if (err) box.append(pmErr(err));
+}
+let previewTimer = null; function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(() => { rebuild(); drawRegions(); refreshPmError(); }, 120); }
 function drawRegions() {
   groups.regions.clear(); if (!S.pm?.regionsOf) { requestRender(); return; }
   const sf = featById(S.pm.regionsOf); const reg = sketchRegions(sf); const ids = selectedRegionIds(S.pm.feature, reg); const M = planeMatrix(sf.plane);
@@ -3627,7 +3648,7 @@ function sameEdge(x, y) {
   const a = V3(x.a), b = V3(x.b), c = V3(y.a), d = V3(y.b); return (a.distanceTo(c) < 1e-3 && b.distanceTo(d) < 1e-3) || (a.distanceTo(d) < 1e-3 && b.distanceTo(c) < 1e-3);
 }
 // Edge under the cursor on the body the feature starts from.
-function pickEdge(ev, topo) {
+function pickEdge(ev, topo, withDist) {
   const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; let best = null;
   const take = (o, d) => { if (d < 9 && (!best || d < best.pd)) best = { ...o, pd: d }; };
   for (const c of topo.circles) {
@@ -3635,7 +3656,7 @@ function pickEdge(ev, topo) {
     for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2; const s2 = toScreen(c.c.clone().addScaledVector(u, c.r * Math.cos(a)).addScaledVector(w, c.r * Math.sin(a))); take({ edge: { t: 'circle', c: c.c.toArray(), n: c.n.toArray(), r: c.r } }, Math.hypot(s2.x - mx, s2.y - my)); }
   }
   for (const [a, b] of topo.lines) take({ edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, toScreen(a), toScreen(b)));
-  return best?.edge || null;
+  return withDist ? best : best?.edge || null;
 }
 function edgeSegs(e) {
   if (e.t === 'line') return [[V3(e.a), V3(e.b)]];
@@ -4569,7 +4590,7 @@ function cmdHole() {
 function holePointsCount(sf) { try { return holePoints(sf).length; } catch { return 0; } }
 // A feature waiting for a pick ("Выберите грань…") is not in error: that line reads as the next step.
 const isAsk = (err) => /^(Выберите|Щёлкните|Укажите)/.test(err || '');
-const pmErr = (err) => h('div', { class: 'grp' }, h('div', { class: 'note', style: isAsk(err) ? 'color:var(--accent)' : 'color:var(--bad)' }, err));
+const pmErr = (err) => h('div', { class: 'grp pm-errbox' }, h('div', { class: 'note', style: isAsk(err) ? 'color:var(--accent)' : 'color:var(--bad)' }, err));
 function renderHolePM() {
   const pm = S.pm; const f = pm.feature; const err = S.errors[f.id]; const sf = featById(f.sketch);
   const refresh = () => { renderSide(); schedulePreview(); };
@@ -4710,6 +4731,8 @@ function placeTool(g, M) {
 const placeCyl = (c, M) => ({ p: c.p.clone().applyMatrix4(M), dir: c.dir.clone().transformDirection(M), r: c.r });
 function applyPattern(f, body, cyls, features) {
   if (!body) throw new Error('Сначала создайте тело');
+  // A new mirror whose plane is not picked yet shows the part as it is, without an error.
+  if (f.planeGuessed) return { body, cyls: [] };
   const mats = patternMatrices(f, features); const added = [];
   if (f.type === 'mirror' && !(f.feats || []).length) {
     const M = mats[0]; const pl = mirrorPlane(f, features); const n = V3(pl.n).normalize(); const d0 = n.dot(V3(pl.o));
@@ -4764,11 +4787,13 @@ function cmdPattern(type) {
   const f = type === 'lpattern' ? { id: fid(), type, name: nextName('ЛинейныйМассив'), feats: seed ? [seed.id] : [], dir: { axis: 'x' }, n: 3, d: 20, flip: false, dir2: null, n2: 2, d2: 20, flip2: false }
     : type === 'cpattern' ? { id: fid(), type, name: nextName('КруговойМассив'), feats: seed ? [seed.id] : [], axis: { axis: 'y' }, n: 4, angle: 360, flip: false }
       : { id: fid(), type, name: nextName('Зеркало'), feats: seed ? [seed.id] : [], plane: S.selectedTree === 'face' && S.pickedFace ? { face: clone(S.pickedFace) } : S.selectedTree?.startsWith('plane:') ? { std: S.selectedTree.slice(6) } : sel?.type === 'plane' ? { plane: sel.id } : lastPlane ? { plane: lastPlane.id } : { std: 'right' } };
+  if (type === 'mirror' && !(S.selectedTree === 'face' && S.pickedFace) && !S.selectedTree?.startsWith('plane:') && sel?.type !== 'plane') Object.defineProperty(f, 'planeGuessed', { value: true, configurable: true, enumerable: false });
   openPatternPM(f, true);
 }
 function openPatternPM(f, isNew) {
   const idx = isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id); const base = computeBody(S.doc.features.slice(0, idx));
-  openPM({ kind: 'feature', feature: f, isNew, pattern: true, topo: base.body ? edgeTopology(base.body, base.cyls) : { lines: [], circles: [] }, pickFor: isNew ? 'feats' : f.type === 'mirror' ? 'plane' : f.type === 'lpattern' ? 'dir' : 'axis' });
+  // A new mirror starts by asking for its plane (as in SolidWorks) unless one was picked before the command.
+  openPM({ kind: 'feature', feature: f, isNew, pattern: true, topo: base.body ? edgeTopology(base.body, base.cyls) : { lines: [], circles: [] }, pickFor: isNew ? (f.type === 'mirror' && f.planeGuessed ? 'plane' : 'feats') : f.type === 'mirror' ? 'plane' : f.type === 'lpattern' ? 'dir' : 'axis' });
   drawPatternRefs();
 }
 function axisLabel(spec) { if (!spec) return '—'; if (spec.axis) return AXIS_NAMES[spec.axis]; return spec.edge.t === 'line' ? 'Прямое ребро' : 'Ось окружности ⌀' + fmt(2 * spec.edge.r); }
@@ -4784,9 +4809,13 @@ function drawPatternRefs() {
 function patternPick(ev, click) {
   const pm = S.pm; const f = pm.feature;
   if (pm.pickFor === 'feats') {
-    const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); const hp = f.type === 'mirror' ? p?.plane || null : null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); } return; }
+    // A click right on a straight edge (a circle's for a circular pattern) sets the direction, as the first field
+    // of SolidWorks' pattern does; before, it added the whole base body to the copies.
+    if (click && f.type !== 'mirror') { const hitE = pickEdge(ev, pm.topo, true); const e = hitE?.edge; if (e && hitE.pd < 5 && (f.type === 'cpattern' || e.t === 'line')) { const key = f.type === 'cpattern' ? 'axis' : 'dir'; f[key] = { edge: e }; if (key === 'dir') autoFlipDir(f, 'dir'); pm.hoverEdge = null; renderSide(); drawPatternRefs(); schedulePreview(); return; } }
+    // Cylindrical faces count too: a through hole has no other face to click.
+    const p = partPickAt(ev, true); if (!click) { showFaceHover(p?.face || null); const hp = f.type === 'mirror' ? p?.plane || null : null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); } return; }
     // Planes are not features: in a mirror, a click on one is the mirror plane.
-    if (p?.plane && f.type === 'mirror') { f.plane = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; renderSide(); schedulePreview(); return; }
+    if (p?.plane && f.type === 'mirror') { f.plane = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; delete f.planeGuessed; renderSide(); schedulePreview(); return; }
     if (!p?.face) return;
     const idx = pm.isNew ? rollbackIndex() : S.doc.features.findIndex((x) => x.id === f.id); const steps = solidSteps().filter((st) => S.doc.features.indexOf(st.f) < idx);
     // The window shows the preview with the copies; a face of a copy is not on the part before the pattern.
@@ -4796,7 +4825,8 @@ function patternPick(ev, click) {
   if (pm.pickFor === 'plane') {
     const p = partPickAt(ev); if (!click) { showFaceHover(p?.face || null); const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); } return; }
     if (p?.plane) f.plane = p.plane.startsWith('f:') ? { plane: p.plane.slice(2) } : { std: p.plane }; else if (p?.face) f.plane = { face: planeFromFace(p.face, p.point) }; else return;
-    renderSide(); schedulePreview(); return;
+    // With the plane given, the next clicks pick what to mirror.
+    delete f.planeGuessed; if (pm.isNew) pm.pickFor = 'feats'; renderSide(); schedulePreview(); return;
   }
   let e = pickEdge(ev, pm.topo); if (e && pm.pickFor === 'dir' || pm.pickFor === 'dir2') { if (e && e.t !== 'line') e = null; }
   if (!click) { if (JSON.stringify(e) !== JSON.stringify(pm.hoverEdge)) { pm.hoverEdge = e; drawPatternRefs(); } return; }
@@ -4815,7 +4845,7 @@ function autoFlipDir(f, key) {
   const plus = inside(1), minus = inside(-1); if (plus !== minus) f[fk] = minus > plus;
 }
 function togglePatternSeed(id) {
-  const f = S.pm.feature; const c = featById(id); if (!c || !['extrude', 'revolve', 'hole'].includes(c.type)) { if (c) toast(`«${c.name}» нельзя скопировать массивом`, 'info'); return; }
+  const f = S.pm.feature; const c = featById(id); if (!c || !['extrude', 'revolve', 'hole'].includes(c.type)) { if (c) toast(`«${c.name}» нельзя ${f.type === 'mirror' ? 'отразить' : 'скопировать массивом'}: копируются вытяжки, вращения и отверстия`, 'info'); return; }
   f.feats = f.feats.includes(id) ? f.feats.filter((x) => x !== id) : [...f.feats, id]; renderSide(); schedulePreview();
 }
 function renderPatternPM() {
@@ -4855,7 +4885,7 @@ function renderPatternPM() {
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; schedulePreview(); } }), 'Обратное направление')));
   } else {
     const b = f.plane; const name = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
-    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'plane' ? ' on' : ''), onclick: () => { pm.pickFor = 'plane'; renderSide(); } }, h('b', {}, '▱'), name), pm.pickFor === 'plane' ? h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне') : h('div', { class: 'note' }, 'Щёлкните поле выше, чтобы выбрать её в окне, или справочную плоскость в окне'),
+    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Плоскость отражения'), h('button', { class: 'rel pickbox' + (pm.pickFor === 'plane' ? ' on' : ''), onclick: () => { pm.pickFor = 'plane'; renderSide(); } }, h('b', {}, '▱'), f.planeGuessed ? 'не выбрана' : name), pm.pickFor === 'plane' ? h('div', { class: 'note' }, 'Щёлкните плоскость или плоскую грань в окне') : h('div', { class: 'note' }, 'Щёлкните поле выше, чтобы выбрать её в окне, или справочную плоскость в окне'),
       h('div', { class: 'chips' }, Object.entries(PLANES).map(([k, p]) => h('button', { class: 'chip', onclick: () => { f.plane = { std: k }; renderSide(); schedulePreview(); } }, p.label)),
         // The part's own reference planes (a middle plane, say) are offered next to the standard ones.
         S.doc.features.slice(0, idx).filter((x) => x.type === 'plane' && !x.suppressed).map((x) => h('button', { class: 'chip' + (f.plane.plane === x.id ? ' on' : ''), onclick: () => { f.plane = { plane: x.id }; renderSide(); schedulePreview(); } }, x.name)))));
@@ -6474,7 +6504,7 @@ function switchDoc(id) {
 }
 function enterDoc() {
   ctxGroup.clear(); $('ctxBar').hidden = true;
-  const ent = activeEntry(); S.sel.clear(); S.selectedTree = null; S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
+  const ent = activeEntry(); S.sel.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
   S.mode = ent.kind; S.doc = ent.data; S.drwTool = null; if (ent.kind !== 'drw') drwLeave();
   if (ent.kind === 'drw') { drwEnter(); if (!lastSaved) pushUndo(); renderDocTabs(); return; }
@@ -6805,11 +6835,14 @@ $('sideToggle').onclick = () => side.classList.toggle('open');
 for (const b of document.querySelectorAll('#viewbar button')) b.onclick = () => viewCmd(b.dataset.view);
 
 // ---------------- keyboard ----------------
+window.addEventListener('focusin', (e) => { const t = e.target; if (t.tagName === 'INPUT' && t.type === 'text') t.dataset.v0 = t.value; });
 window.addEventListener('keydown', (e) => {
   // Keys go to text fields; a checkbox or a button that kept the focus after a click does not
   // swallow them. Esc in a text field leaves the field first.
   const tag = e.target.tagName; const typing = tag === 'TEXTAREA' || tag === 'SELECT' || (tag === 'INPUT' && !['checkbox', 'radio', 'button', 'range'].includes(e.target.type));
-  if (typing) { if (e.key === 'Escape' && !e.defaultPrevented) e.target.blur(); return; }
+  // Esc in a panel field drops what was typed there (it used to apply it on leaving the field) and, as in SolidWorks,
+  // cancels the operation; elsewhere it only leaves the field.
+  if (typing) { if (e.key === 'Escape' && !e.defaultPrevented) { const t = e.target; if (t.dataset.v0 != null) t.value = t.dataset.v0; t.blur(); if (S.pm && S.mode === 'part' && t.closest('#side .pm')) closePM(); } return; }
   // Enter and Space belong to the focused button or checkbox (pressing it), not to the shortcuts behind it.
   if ((tag === 'BUTTON' || (tag === 'INPUT' && ['checkbox', 'radio', 'button'].includes(e.target.type))) && (e.key === 'Enter' || e.key === ' ')) return;
   if (tag === 'INPUT' || tag === 'BUTTON') e.target.blur();
@@ -6836,8 +6869,13 @@ window.addEventListener('keydown', (e) => {
     if (S.pm) return closePM();
     if (S.mode === 'drw') { S.drwTool = null; renderTools(); setHint(''); return; }
     if (S.mode === 'asm') { S.asmSel = null; S.mateSel = null; asmRefresh(); return; }
-    S.selectedTree = null; buildPlanes(); renderTree(); requestRender(); return;
+    S.selectedTree = null; S.pickedFace = null; S.faceOrigin = null; showFaceSel(null); setHint(); buildPlanes(); renderTree(); requestRender(); return;
   }
+  // Arrows turn the view as in SolidWorks: 15° a press, 90° with Shift; Alt+←/→ rolls it.
+  if (e.key.startsWith('Arrow') && !(S.editing && S.sel.size && !e.altKey)) { e.preventDefault(); const a = (e.shiftKey ? 90 : 15) * Math.PI / 180; const off = camera.position.clone().sub(controls.target); const fwd = off.clone().negate().normalize(); const up = camera.up.clone().normalize(); const right = new THREE.Vector3().crossVectors(fwd, up).normalize();
+    const q = new THREE.Quaternion(); if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { q.setFromAxisAngle(fwd, e.key === 'ArrowLeft' ? -a : a); camera.up.applyQuaternion(q); }
+    else { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') q.setFromAxisAngle(up, e.key === 'ArrowLeft' ? -a : a); else q.setFromAxisAngle(right, e.key === 'ArrowUp' ? -a : a); off.applyQuaternion(q); camera.up.applyQuaternion(q); camera.position.copy(controls.target).add(off); }
+    camera.lookAt(controls.target); controls.update(); requestRender(); return; }
   if (e.key === 'Enter' && S.pm) { okPM(); return; }
   if (e.key === 'Enter' && S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
   if (S.mode === 'asm') {
@@ -6904,5 +6942,6 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 })();
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
+window.__rezetsSP = () => schedulePreview();
 window.__rezets = { S, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
