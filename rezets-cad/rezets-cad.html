@@ -6791,8 +6791,9 @@ function renderTools() {
     );
   } else {
     const ed = !!S.editing;
-    // A drawing tool taken outside a sketch first opens one (on the picked face or plane, or after picking it), as SolidWorks does.
-    const drawTool = (t) => () => { if (S.editing) setTool(t); else { S.sketchTool = t; cmdSketch(); } };
+    // A drawing tool taken outside a sketch first opens one (on the picked face or plane, or after picking it), as SolidWorks does;
+    // its button pressed again puts the tool down.
+    const drawTool = (t) => () => { if (S.editing) setTool(S.tool === t ? 'select' : t); else { S.sketchTool = t; cmdSketch(); } };
     toolsEl.append(
       toolBtn(ed ? 'Выйти' : 'Эскиз', ed ? ICON.exit : ICON.sketch, () => (ed ? exitSketch() : cmdSketch()), { title: ed ? 'Закрыть эскиз и перестроить модель' : 'Новый эскиз' }),
       h('div', { class: 'sep' }),
