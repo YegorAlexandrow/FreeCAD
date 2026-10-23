@@ -5887,7 +5887,7 @@ async function importStepFile(file) {
     }
     const data = { name: file.name.replace(/\.(step|stp)$/i, ''), pos: Float32Array.from(pos), nrm: Float32Array.from(nrm), faces, zup: false };
     setImportUp(data, true); analyzeImport(data);
-    addDoc('import', data.name, data); backToAssembly();
+    addImport(data);
     toast(`Импортировано: ${faces.length} граней, ${data.cyls.length} цилиндрических. Объём ${fmt(geoVolume(importGeometry(activeEntry())), 1)} мм³`, 'info');
   } catch (e) { toast(`STEP не прочитан: ${e.message || e}`, 'err'); }
   busy?.remove?.();
@@ -5952,6 +5952,13 @@ function stlFaces(tri) {
 }
 // A file imported from the assembly's Insert panel comes straight back into that assembly as a component.
 function backToAssembly() { const back = S.insertBack; S.insertBack = null; if (!back || !docEntry(back)) return; const id = activeEntry().id; switchDoc(back); asmInsert(id); }
+// The same model added again (same name and the same triangles) opens the one already there instead of a silent
+// duplicate; a copy is one click away.
+function addImport(data) {
+  const twin = S.project.docs.find((d) => d.kind === 'import' && d.name.replace(/ \(\d+\)$/, '') === data.name && d.data.pos?.length === data.pos.length && d.data.pos.every((v, i) => i % 97 || v === data.pos[i]));
+  if (twin) { if (twin.id !== S.project.active) switchDoc(twin.id); toast(`Модель «${data.name}» уже есть в проекте, она открыта`, 'info', [{ label: 'Добавить копию', act: () => { addDoc('import', data.name, data); backToAssembly(); } }]); return; }
+  addDoc('import', data.name, data); backToAssembly();
+}
 async function importStlFile(file) {
   const busy = toast(`Читаю «${file.name}»…`, 'info'); await new Promise((r) => setTimeout(r, 30));
   try {
@@ -5961,7 +5968,7 @@ async function importStlFile(file) {
     const data = { name: file.name.replace(/\.stl$/i, ''), pos, nrm, faces, zup: false }; setImportUp(data, true); analyzeImport(data);
     // An STL's normals are only the facets' own, needed for sorting the faces: not kept, half the size to store.
     data.nrm = null; busy?.remove?.();
-    addDoc('import', data.name, data); backToAssembly();
+    addImport(data);
     // An STL with holes in its surface is said so at once: booleans and export will trip on it later otherwise.
     { const bad = badEdges(importGeometry(activeEntry())); if (bad) toast(`В «${data.name}» поверхность не замкнута: ${bad} ${plural(bad, 'открытое ребро', 'открытых ребра', 'открытых рёбер')}. Объём и вырезы по нему могут быть неверны`, 'warn'); }
     toast(`STL импортирован: ${tri.length / 9} треугольников, ${faces.length} граней, ${data.cyls.length} цилиндрических. Чтобы править, вставьте его в деталь кнопкой «STEP / STL»`, 'info');
