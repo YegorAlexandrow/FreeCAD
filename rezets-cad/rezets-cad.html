@@ -2745,10 +2745,13 @@ function drawClick(m) {
   const sk = editSk(); if (!S.draw || !S.draw.sn) drawMove(m);
   const D = S.draw; const sn = D.sn; const t = S.tool; const pending = [];
   if (!D.stage && !D.pts?.length) S.lastDrawn = { f: S.editing, nid0: D.nid0 ?? sk.nid };
-  if (t === 'point') { const id = snapToPoint(sk, sn.kind === 'pt' ? { ...sn, kind: null } : sn, pending); sk.pts[id].free = true; sk.pts[id].hole = true; addRelations(sk, pending); commitSketch(); return; }
+  // A point put on an existing point would be a second one on top of it: that point is taken as it is.
+  if (t === 'point' && sn.kind === 'pt') { const q = sk.pts[sn.ref]; if (q && !q.fixed) { q.hole = true; q.free = q.free || !usedPt(sk, sn.ref); commitSketch(); } else setHint('Здесь уже есть точка'); return; }
+  if (t === 'point') { const id = snapToPoint(sk, sn, pending); sk.pts[id].free = true; sk.pts[id].hole = true; addRelations(sk, pending); commitSketch(); return; }
   if (t === 'line') {
     if (D.stage === 0) { D.start = snapToPoint(sk, sn, pending); D.first = D.start; D.newPts = [D.start]; D.pending = pending; addRelations(sk, pending); D.stage = 1; refreshSketch(true); return; }
-    const a = gp(sk, D.start); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6) return;
+    // A second click within a few pixels (a double click, a shaky hand) makes no sliver of a line.
+    const a = gp(sk, D.start); const sa = sScreen(a.x, a.y), sb = sScreen(sn.u, sn.v); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6 || (sn.kind !== 'pt' && Math.hypot(sa.x - sb.x, sa.y - sb.y) < 4)) return;
     const end = snapToPoint(sk, sn, pending); const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: D.start, p2: end };
     if (D.hv && !sn.kind) pending.push({ t: D.hv, refs: [id] });
     addRelations(sk, pending);
@@ -7094,16 +7097,18 @@ function renderSketchPanel() {
   if (nd) pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'note' }, `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели ${nd === 1 ? 'висит' : 'висят'} там, где модель была раньше (красным)`), h('button', { class: 'big-btn', onclick: reattachRefs }, 'Привязать к модели')));
   pmEl.append(h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: S.showRel !== false, onchange: (e) => { S.showRel = e.target.checked; layoutOverlay(); } }), 'Показывать значки взаимосвязей'),
     h('button', { class: 'big-btn', onclick: exitSketch }, 'Выйти из эскиза'),
-    h('button', { class: 'ghost-btn', onclick: () => { const fb = editF(); fb.sk = JSON.parse(S.editBackup); S.editing = fb.id; exitSketch(); toast('Изменения эскиза отменены', 'info'); } }, 'Отменить изменения')));
+    h('button', { class: 'ghost-btn', onclick: discardSketch }, 'Отменить изменения')));
   side.append(pmEl);
 }
+function discardSketch() { const fb = editF(); fb.sk = JSON.parse(S.editBackup); S.editing = fb.id; exitSketch(); toast('Изменения эскиза отменены', 'info'); }
 function renderCorner() {
   const c = $('corner'); c.textContent = '';
   if (S.pm?.kind === 'mate' || S.pm?.kind === 'cpat') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm?.kind === 'vars' || S.pm?.kind === 'explode') c.append(h('button', { class: 'ok', title: 'Готово', onclick: () => closePM() }, svg(ICON.exit)));
   else if (S.pm?.kind === 'insert' || S.pm?.kind === 'interf' || S.pm?.kind === 'mass') c.append(h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)));
   else if (S.pm && S.pm.kind === 'feature') c.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: okPM }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Отмена (Esc)', onclick: () => closePM() }, svg(ICON.x)));
-  else if (S.editing) c.append(h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)));
+  // As in SolidWorks, the sketch corner has both: keep the changes, or throw them away.
+  else if (S.editing) c.append(h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)), h('button', { class: 'cancel', title: 'Выйти без сохранения изменений', onclick: discardSketch }, svg(ICON.x)));
   else if (S.measure) c.append(h('button', { class: 'cancel', title: 'Закрыть рулетку', onclick: closeMeasure }, svg(ICON.x)));
 }
 function setHint(text) {
