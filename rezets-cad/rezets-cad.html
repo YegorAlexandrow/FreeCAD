@@ -4044,14 +4044,21 @@ function sameEdge(x, y) {
 }
 // Edge under the cursor on the body the feature starts from.
 function pickEdge(ev, topo, withDist) {
-  const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; let best = null;
-  const take = (o, d) => { if (d < 9 && (!best || d < best.pd)) best = { ...o, pd: d }; };
+  const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; const cands = [];
+  const take = (o, d, wq) => { if (d < 9) cands.push({ ...o, pd: d, wq }); };
   for (const c of topo.circles) {
     const u = new THREE.Vector3().crossVectors(c.n, Math.abs(c.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(c.n, u);
-    for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2; const s2 = toScreen(c.c.clone().addScaledVector(u, c.r * Math.cos(a)).addScaledVector(w, c.r * Math.sin(a))); take({ edge: { t: 'circle', c: c.c.toArray(), n: c.n.toArray(), r: c.r, ...(c.src ? { src: c.src } : {}) } }, Math.hypot(s2.x - mx, s2.y - my)); }
+    let best = null; for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2; const q = c.c.clone().addScaledVector(u, c.r * Math.cos(a)).addScaledVector(w, c.r * Math.sin(a)); const s2 = toScreen(q); const d = Math.hypot(s2.x - mx, s2.y - my); if (!best || d < best.d) best = { d, q }; }
+    take({ edge: { t: 'circle', c: c.c.toArray(), n: c.n.toArray(), r: c.r, ...(c.src ? { src: c.src } : {}) } }, best.d, best.q);
   }
-  for (const [a, b] of topo.lines) take({ edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, toScreen(a), toScreen(b)));
-  return withDist ? best : best?.edge || null;
+  for (const [a, b] of topo.lines) { const sa = toScreen(a), sb = toScreen(b); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1))); take({ edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), a.clone().lerp(b, t)); }
+  // An edge behind the part (seen through it in the wireframe of hidden lines) is not picked: the nearest visible one is.
+  const dirV = camera.getWorldDirection(new THREE.Vector3()); const span = (camera.top - camera.bottom) / camera.zoom; let best = null;
+  for (const cd of cands.sort((x, y) => x.pd - y.pd).slice(0, 8)) {
+    const hit = bodyMeshObj ? new THREE.Raycaster(cd.wq.clone().addScaledVector(dirV, -1e4), dirV).intersectObject(bodyMeshObj)[0] : null;
+    if (!hit || hit.distance >= 1e4 - Math.max(span * 2e-3, 1e-3)) { best = cd; break; }
+  }
+  if (best) delete best.wq; return withDist ? best : best?.edge || null;
 }
 function edgeSegs(e) {
   if (e.t === 'line') return [[V3(e.a), V3(e.b)]];
