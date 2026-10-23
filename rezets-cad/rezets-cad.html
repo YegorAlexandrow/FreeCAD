@@ -3613,7 +3613,14 @@ function toggleRegion(id) {
 }
 
 // ---------------- property manager ----------------
+// The values last used for a kind of feature are where the next one starts (SolidWorks remembers them too).
+const OPT_KEYS = { extrude: ['depth', 'end'], revolve: ['angle'], fillet: ['r'], chamfer: ['d'], shell: ['t'], hole: ['kind', 'std', 'dia', 'end', 'depth', 'cbD', 'cbH', 'csD', 'csA'], lpattern: ['d', 'n'], cpattern: ['n', 'angle'] };
+const optKey = (f) => f.type + (f.type === 'extrude' || f.type === 'revolve' ? ':' + (f.mode || 'add') : '');
+function rememberOpts(f) { const keys = OPT_KEYS[f.type]; if (!keys || f.exprs) return; let all = {}; try { all = JSON.parse(localStorage.getItem('rezets-opts') || '{}'); } catch { /* none */ }
+  all[optKey(f)] = Object.fromEntries(keys.filter((k) => f[k] != null && !(k === 'end' && !['blind', 'through', 'mid'].includes(f[k]))).map((k) => [k, f[k]])); try { localStorage.setItem('rezets-opts', JSON.stringify(all)); } catch { /* private mode */ } }
+function recallOpts(f) { if (!OPT_KEYS[f.type]) return; try { const o = JSON.parse(localStorage.getItem('rezets-opts') || '{}')[optKey(f)]; if (o) for (const k of OPT_KEYS[f.type]) if (o[k] != null) f[k] = o[k]; } catch { /* none */ } }
 function openPM(pm) {
+  if (pm.kind === 'feature' && pm.isNew && pm.feature) recallOpts(pm.feature);
   S.pm = pm; renderSide(); renderCorner(); renderTools(); if (pm.feature) { rebuild(); drawRegions(); } setHint();
   if (pm.kind === 'feature' && pm.isNew) {
     // Seen straight along the sketch's normal, an extrusion's depth is invisible: the view turns to an isometric one.
@@ -3642,7 +3649,7 @@ function okPM() {
     S.pm = null; groups.regions.clear(); groups.measure.clear(); rebuild();
     // A new feature that fails is not put into the tree: its panel stays open to be fixed, as in SolidWorks.
     if (S.errors[f.id] && pm.isNew) { const i = S.doc.features.indexOf(f); if (i >= 0) S.doc.features.splice(i, 1); if (S.doc.rollback != null) S.doc.rollback--; S.pm = pm; rebuild(); drawRegions(); renderSide(); renderCorner(); setHint(); toast(`${f.name}: ${S.errors[f.id] || 'не строится'}. Исправьте параметры или Esc`, 'err'); return; }
-    renderSide(); renderCorner(); setHint(); pushUndo();
+    renderSide(); renderCorner(); setHint(); pushUndo(); if (pm.isNew && !S.errors[f.id]) rememberOpts(f);
     if (S.errors[f.id]) { toast(`${f.name}: ${S.errors[f.id]}`, 'err'); return; }
     const sfp = featById(f.sketch)?.plane; const look = camera.position.clone().sub(controls.target).normalize();
     if (sfp && Math.abs(look.dot(new THREE.Vector3(...sfp.n))) > 0.98) setView(new THREE.Vector3(1, 0.85, 1.15), new THREE.Vector3(0, 1, 0)); return;
