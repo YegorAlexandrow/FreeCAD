@@ -7007,7 +7007,10 @@ const numField = (label, id, val, onset, unit = 'мм') => {
       inp.value = back();
       if (miss.length === 1 && S.doc && /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*$/.test(miss[0])) toast(`Нет переменной «${miss[0]}»`, 'warn', [{ label: `Создать ${miss[0]} = ${fmt(last, 4)}`, act: () => { (S.doc.vars ||= []).push({ name: miss[0], expr: fmt(last, 4) }); inp.value = str; apply0(); pushUndo(); } }]);
       else toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
-  inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } });
+  // Up and Down arrows (or the wheel over the focused field) step the value: 1, with Shift 10, with Alt 0.1.
+  const step = (dir, e) => { const v = evalExpr(inp.value); if (!Number.isFinite(v) || hasIdent(inp.value)) return; const d = (e.shiftKey ? 10 : e.altKey ? 0.1 : 1) * dir; const nv = +(v + d).toFixed(6); if (nv <= 0 && !['mateVal', 'pmFromOff'].includes(id) && !(id === 'pmOffset' && nv === 0)) return; inp.value = fmt(nv, 4); apply(); };
+  inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); step(e.key === 'ArrowUp' ? 1 : -1, e); } });
+  inp.addEventListener('wheel', (e) => { if (document.activeElement !== inp) return; e.preventDefault(); step(e.deltaY < 0 ? 1 : -1, e); }, { passive: false });
   return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
 };
 function renderPM() {
