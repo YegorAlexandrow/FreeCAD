@@ -2117,6 +2117,8 @@ function viewCmd(k) {
   const back = { back: 'front', left: 'right', bottom: 'top' }[k]; if (back) { const p = PLANES[back]; return setView(new THREE.Vector3(...p.n).negate(), new THREE.Vector3(...p.y)); }
   const p = PLANES[k]; setView(new THREE.Vector3(...p.n), new THREE.Vector3(...p.y));
 }
+// The browser is asked to keep this site's storage (the local copy of the project) instead of clearing it when space runs low.
+try { navigator.storage?.persist?.().catch(() => {}); } catch { /* not offered */ }
 // SolidWorks' view keys: Ctrl+1…8, and Space for a menu of the orientations.
 const VIEW_KEYS = ['front', 'back', 'left', 'right', 'top', 'bottom', 'iso', 'normal'];
 const VIEW_NAMES = { front: 'Спереди', back: 'Сзади', left: 'Слева', right: 'Справа', top: 'Сверху', bottom: 'Снизу', iso: 'Изометрия', normal: 'Перпендикулярно' };
@@ -5699,6 +5701,8 @@ async function importStlFile(file) {
     // An STL's normals are only the facets' own, needed for sorting the faces: not kept, half the size to store.
     data.nrm = null; busy?.remove?.();
     addDoc('import', data.name, data);
+    // An STL with holes in its surface is said so at once: booleans and export will trip on it later otherwise.
+    { const bad = badEdges(importGeometry(activeEntry())); if (bad) toast(`В «${data.name}» поверхность не замкнута: ${bad} ${plural(bad, 'открытое ребро', 'открытых ребра', 'открытых рёбер')}. Объём и вырезы по нему могут быть неверны`, 'warn'); }
     toast(`STL импортирован: ${tri.length / 9} треугольников, ${faces.length} граней, ${data.cyls.length} цилиндрических. Чтобы править, вставьте его в деталь кнопкой «STEP / STL»`, 'info');
   } catch (e) { busy?.remove?.(); toast(`STL не прочитан: ${e.message || e}`, 'err'); }
 }
@@ -6227,7 +6231,7 @@ function asmInsert(docId) {
   toast(c.fixed ? `«${c.name}» вставлен и зафиксирован в начале координат` : `«${c.name}» вставлен. Тяните его мышью или добавьте сопряжения`, 'info');
 }
 function cmdInsert() {
-  const parts = S.project.docs.filter((d) => d.kind !== 'asm');
+  const parts = S.project.docs.filter((d) => d.kind !== 'asm' && d.kind !== 'drw');
   if (!parts.length) { toast('В проекте нет деталей для вставки', 'warn'); return; }
   openPM({ kind: 'insert' });
 }
@@ -6671,7 +6675,7 @@ function renderAsmPM() {
     box.append(grp); side.append(box); return;
   }
   if (pm.kind === 'insert') {
-    const parts = S.project.docs.filter((d) => d.kind !== 'asm');
+    const parts = S.project.docs.filter((d) => d.kind !== 'asm' && d.kind !== 'drw');
     side.append(h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.insert), h('span', {}, 'Вставить компонент'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Детали проекта'), h('div', { class: 'chips' }, parts.map((d) => h('button', { class: 'chip', onclick: () => asmInsert(d.id) }, svg(ICON[KIND_ICON[d.kind]]), d.name))),
         h('button', { class: 'ghost-btn', onclick: () => $('stepIn').click() }, 'Импорт STEP / STL…'))));
