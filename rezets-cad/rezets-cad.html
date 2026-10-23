@@ -6946,6 +6946,8 @@ function renderSketchPanel() {
   side.textContent = ''; const f = editF(); const sk = f.sk; const a = S.analysis;
   const { state, text: stateText } = sketchState(sk, a);
   const pmEl = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.sketch), h('span', {}, f.name), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)))));
+  // The active tool's options come first, where the eye is after picking the tool; the state follows.
+  const topt = toolOptionsPanel(); if (topt) pmEl.append(topt);
   pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dofMain ? h('span', { class: 'note' }, `  свободно: ${a.dofMain} ${plural(a.dofMain, 'степень', 'степени', 'степеней')}`) : null),
     a && a.dofMain ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
     // Each line picks out on the sketch what it is about; past the first five, a button shows the rest.
@@ -6953,7 +6955,6 @@ function renderSketchPanel() {
       return [...ex.slice(0, n).map((t, i) => h('div', { class: 'note', style: 'margin-top:4px;cursor:pointer', title: 'Выделить на эскизе', onclick: () => { S.sel = new Set(ex.keys[i]); refreshSketch(); } }, t)),
         ex.length > n ? h('button', { class: 'chip', style: 'margin-top:4px', onclick: () => { S.allFree = true; renderSide(); } }, `Ещё ${ex.length - n}`) : null]; })() : []),
     ...(a && a.redundant.size ? redundantList(sk, a) : [])));
-  const topt = toolOptionsPanel(); if (topt) pmEl.append(topt);
   const sel = [...S.sel];
   if (sel.length) {
     const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Выделено: ${sel.length}`));
