@@ -4043,7 +4043,7 @@ function renderSweepLoftPM() {
 // ГОСТ 2.301: A4 stands upright; the larger sheets lie or stand. Scales after ГОСТ 2.302.
 const SHEETS = { A4: [210, 297], 'A4 горизонтально': [297, 210], A3: [420, 297], 'A3 вертикально': [297, 420], A2: [594, 420], A1: [841, 594], A0: [1189, 841] };
 const STD_SCALES = [50, 40, 20, 10, 5, 4, 2.5, 2, 1, 1 / 2, 1 / 2.5, 1 / 4, 1 / 5, 1 / 10, 1 / 15, 1 / 20, 1 / 25, 1 / 40, 1 / 50, 1 / 75, 1 / 100, 1 / 200];
-const scaleText = (s) => (s >= 1 ? `${fmt(s)}:1` : `1:${fmt(1 / s)}`);
+const scaleText = (s) => (s >= 1 ? `${fmt(s)}:1` : `1:${fmt(1 / s)}`).replace('.', ',');
 const DRW_VIEWS = {
   front: { label: 'Главный вид', R: [1, 0, 0], U: [0, 1, 0], D: [0, 0, 1] },
   top: { label: 'Вид сверху', R: [1, 0, 0], U: [0, 0, -1], D: [0, 1, 0] },
@@ -4193,7 +4193,7 @@ function dimSvg(d) {
   const t = (x, y, s, rot = 0) => `<text x="${x.toFixed(2)}" y="${y.toFixed(2)}" font-size="3.5" text-anchor="middle" font-family="ISOCPEUR, Arial, sans-serif" fill="#000"${rot ? ` transform="rotate(${rot} ${x.toFixed(2)} ${y.toFixed(2)})"` : ''}>${s}</text>`;
   const arrow = (x, y, dx, dy) => { const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L; const a = 2.5, b = 0.6; return `<path d="M${x} ${y} L${x - dx * a - dy * b} ${y - dy * a + dx * b} L${x - dx * a + dy * b} ${y - dy * a - dx * b} Z" fill="#000"/>`; };
   const ln = (x1, y1, x2, y2) => `<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="#000" stroke-width="0.25"/>`;
-  const val = fmt(d.val, 2);
+  const val = fmt(d.val, 2).replace('.', ','); // ЕСКД: decimal comma
   if (d.kind === 'h') { const s = Math.sign(d.at - d.y) || -1; return ln(d.x1, d.y, d.x1, d.at + s * 2) + ln(d.x2, d.y2 ?? d.y, d.x2, d.at + s * 2) + ln(d.x1, d.at, d.x2, d.at) + arrow(d.x1, d.at, d.x1 - d.x2, 0) + arrow(d.x2, d.at, d.x2 - d.x1, 0) + t((d.x1 + d.x2) / 2, d.at - 1, val); }
   if (d.kind === 'v') { const s = Math.sign(d.at - d.x) || -1; return ln(d.x, d.y1, d.at + s * 2, d.y1) + ln(d.x2 ?? d.x, d.y2, d.at + s * 2, d.y2) + ln(d.at, d.y1, d.at, d.y2) + arrow(d.at, d.y1, 0, d.y1 - d.y2) + arrow(d.at, d.y2, 0, d.y2 - d.y1) + t(d.at - 1, (d.y1 + d.y2) / 2, val, -90); }
   if (d.kind === 'dia') { const a = (d.ang ?? -45) * Math.PI / 180; const ex = d.cx + d.r * Math.cos(a), ey = d.cy + d.r * Math.sin(a), sx = d.cx - d.r * Math.cos(a), sy = d.cy - d.r * Math.sin(a); const lx = ex + 6, ly = ey - 6;
@@ -4227,7 +4227,7 @@ function drawingSvg(drw, L) {
   for (const d of dims) parts.push(dimSvg(d));
   // Title block (simplified ГОСТ 2.104 form 1): 185 x 55 at the bottom right.
   const tx = fx1 - 185, ty = fy1 - 55; const ent = docEntry(drw.src); const st = (x, y, s, size = 3.5, w = '') => `<text x="${x}" y="${y}" font-size="${size}" font-family="ISOCPEUR, Arial, sans-serif"${w}>${s}</text>`;
-  let mass = ''; if (ent?.kind !== 'asm') { const inf = docInfo(drw.src); if (inf?.geo) { const mat = matOf(ent.data); mass = fmt(massProps(inf.geo).vol * MATERIALS[mat][1] / 1000 / 1000, 3); } }
+  let mass = ''; if (ent?.kind !== 'asm') { const inf = docInfo(drw.src); if (inf?.geo) { const mat = matOf(ent.data); const kg = massProps(inf.geo).vol * MATERIALS[mat][1] / 1000 / 1000; mass = (kg > 0 && kg < 0.01 ? String(+kg.toPrecision(2)) : fmt(kg, 3)).replace('.', ','); } }
   parts.push(`<g stroke="#000" fill="none"><rect x="${tx}" y="${ty}" width="185" height="55" stroke-width="0.7"/><line x1="${tx + 65}" y1="${ty}" x2="${tx + 65}" y2="${fy1}" stroke-width="0.7"/><line x1="${tx + 65}" y1="${ty + 15}" x2="${fx1}" y2="${ty + 15}" stroke-width="0.7"/><line x1="${tx + 65}" y1="${ty + 40}" x2="${fx1}" y2="${ty + 40}" stroke-width="0.7"/><line x1="${tx + 135}" y1="${ty + 15}" x2="${tx + 135}" y2="${fy1}" stroke-width="0.7"/><line x1="${tx + 135}" y1="${ty + 25}" x2="${fx1}" y2="${ty + 25}" stroke-width="0.35"/><line x1="${tx + 152}" y1="${ty + 15}" x2="${tx + 152}" y2="${ty + 25}" stroke-width="0.35"/><line x1="${tx + 167}" y1="${ty + 15}" x2="${tx + 167}" y2="${ty + 25}" stroke-width="0.35"/>${[11, 22, 33, 44].map((d) => `<line x1="${tx}" y1="${ty + d}" x2="${tx + 65}" y2="${ty + d}" stroke-width="0.35"/>`).join('')}</g>`);
   parts.push(st(tx + 100, ty + 30, escXml(ent?.name || ''), 7, ' text-anchor="middle"'), st(tx + 100, ty + 50, escXml(ent?.kind === 'asm' ? 'Сборочный чертёж' : MATERIALS[matOf(ent?.data)][0]), 3.5, ' text-anchor="middle"'),
     st(tx + 137, ty + 19, 'Лит.', 2.5), st(tx + 154, ty + 19, 'Масса', 2.5), st(tx + 169, ty + 19, 'Масштаб', 2.5), st(tx + 159.5, ty + 24, mass, 3, ' text-anchor="middle"'), st(tx + 176, ty + 24, scaleText(L.scale), 3, ' text-anchor="middle"'),
