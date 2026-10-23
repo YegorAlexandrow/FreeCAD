@@ -6920,17 +6920,19 @@ const numField = (label, id, val, onset, unit = 'мм') => {
   const obj = S.mode === 'part' && S.pm?.feature && FIELD_KEYS[id] ? S.pm.feature : null; const key = FIELD_KEYS[id]; const ex = obj?.exprs?.[key];
   const inp = h('input', { type: 'text', id, value: ex ?? fmt(val, 4), inputmode: 'decimal', title: ex ? `${ex} = ${fmt(val, 4)}` : '' });
   // onset may re-render the panel, and removing the focused input fires 'change' again with the old text.
+  // A wrong entry goes back to the last good value, not to the one the panel opened with.
+  let last = val; const back = () => obj?.exprs?.[key] ?? fmt(last, 4);
   let busy = false; const apply = () => { if (busy) return; busy = true; try { apply0(); } finally { busy = false; } };
   const apply0 = () => { const str = inp.value; const v = evalExpr(str);
     // Each copy is a boolean on the whole part: thousands would freeze the page with no way to stop it.
-    if ((id === 'pmCount' || id === 'pmCount2') && v > MAX_COPIES) { inp.value = ex ?? fmt(val, 4); toast(`Не больше ${MAX_COPIES} копий в одном массиве`, 'warn'); return; }
+    if ((id === 'pmCount' || id === 'pmCount2') && v > MAX_COPIES) { inp.value = back(); toast(`Не больше ${MAX_COPIES} копий в одном массиве`, 'warn'); return; }
     if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal' || id === 'pmFromOff')) {
     if (obj) { if (hasIdent(str)) obj.exprs = { ...obj.exprs, [key]: str.trim() }; else if (obj.exprs) { delete obj.exprs[key]; if (!Object.keys(obj.exprs).length) delete obj.exprs; } }
-    const shown = onset(v); inp.value = obj?.exprs?.[key] ?? fmt(shown ?? v, 4); } else {
+    const shown = onset(v); last = shown ?? v; inp.value = obj?.exprs?.[key] ?? fmt(last, 4); } else {
       // A name that is not a variable yet can become one, with the value the field had, and the field then uses it.
       const known = new Set([...(S.doc?.vars || []).map((x) => x.name), ...Object.keys(EXPR_FN)]); const miss = (str.replace(UNIT_RE, '$1').match(IDENT_RE) || []).filter((w) => !known.has(w));
-      inp.value = ex ?? fmt(val, 4);
-      if (miss.length === 1 && S.doc && /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*$/.test(miss[0])) toast(`Нет переменной «${miss[0]}»`, 'warn', [{ label: `Создать ${miss[0]} = ${fmt(val, 4)}`, act: () => { (S.doc.vars ||= []).push({ name: miss[0], expr: fmt(val, 4) }); inp.value = str; apply0(); pushUndo(); } }]);
+      inp.value = back();
+      if (miss.length === 1 && S.doc && /^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*$/.test(miss[0])) toast(`Нет переменной «${miss[0]}»`, 'warn', [{ label: `Создать ${miss[0]} = ${fmt(last, 4)}`, act: () => { (S.doc.vars ||= []).push({ name: miss[0], expr: fmt(last, 4) }); inp.value = str; apply0(); pushUndo(); } }]);
       else toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
   inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } });
   return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
