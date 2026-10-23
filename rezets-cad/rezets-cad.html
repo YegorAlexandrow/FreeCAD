@@ -2458,6 +2458,8 @@ function sketchDown(ev) {
       if (down.shift && S.sel.has(p.key)) S.sel.delete(p.key); else S.sel.add(p.key);
       const ent = p.key.startsWith('e:') ? sk.ents[p.key.slice(2)] : null; const pt = p.key.startsWith('p:') ? sk.pts[p.key.slice(2)] : null;
       if (!p.key.startsWith('e:H') && !p.key.startsWith('e:V') && !ent?.ext && !pt?.fixed) S.drag = { key: p.key, start: m, snap: snapshotGeo(sk) };
+      // A point whose model corner is gone is repaired by dragging it onto another corner (SolidWorks' dangling repair).
+      else if (pt?.lost) { S.drag = { key: p.key, start: m, snap: snapshotGeo(sk), lostPt: pt.id }; setHint('Перетащите точку на вершину модели, к которой её привязать'); }
       refreshSketch();
     } else { if (!down.shift) S.sel.clear(); S.box = [m, m]; refreshSketch(); }
     return;
@@ -2471,6 +2473,8 @@ function sketchDown(ev) {
 function sketchMove(ev) {
   const m = mouseToSketch(ev); const sk = editSk(); $('stXY').textContent = `X ${fmt(m.u, 2)}  Y ${fmt(m.v, 2)}`;
   if (S.tool === 'select') {
+    if (S.drag?.lostPt && down?.moved) { const q = sk.pts[S.drag.lostPt]; let hit = null; for (const v of S.refs?.verts || []) { const sc = sScreen(v[0], v[1]); const d = Math.hypot(sc.x - m.sx, sc.y - m.sy); if (d < 12 && (!hit || d < hit.d)) hit = { d, v }; }
+      S.drag.hit = hit?.v || null; q.x = hit ? hit.v[0] : m.u; q.y = hit ? hit.v[1] : m.v; updateSketchVisuals(); return; }
     if (S.drag && down?.moved) { dragTo(m); return; }
     if (S.box && down) { S.box[1] = m; updateSketchVisuals(); return; }
     const p = pick(m); const k = p?.key || null; if (k !== S.hover) { S.hover = k; updateSketchVisuals(); }
@@ -2490,6 +2494,10 @@ function sketchMove(ev) {
 }
 function sketchUp(ev, d) {
   const sk = editSk();
+  if (S.drag?.lostPt) { const D = S.drag; S.drag = null; const q = sk.pts[D.lostPt];
+    if (d.moved && D.hit && S.refs?.mref) { q.x = D.hit[0]; q.y = D.hit[1]; q.mref = S.refs.mref('p', D.hit); delete q.lost; const f = editF(); const rest = (S.dangling.get(f.id) || []).filter((id) => id !== q.id); if (rest.length) S.dangling.set(f.id, rest); else S.dangling.delete(f.id); solveSketch(sk); commitSketch(); toast('Привязка к модели восстановлена', 'info'); }
+    else { restoreGeo(sk, D.snap); refreshSketch(); if (d.moved) toast('Отпустите точку на вершине модели: она привязывается только к ней', 'info'); }
+    return; }
   if (S.drag) { const moved = d.moved; S.drag = null; if (moved) commitSketch(); else updateRelBar(); return; }
   if (S.box) {
     const [a, b] = S.box; S.box = null;
