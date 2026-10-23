@@ -5407,7 +5407,7 @@ function checkMateRefs(asm) {
   for (const m of asm.mates) {
     let broken = null;
     for (const ref of [m.a, m.b]) {
-      const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
+      if (ref.std) continue; const c = asm.comps.find((x) => x.id === ref.comp); const inf = c && docInfo(c.doc); if (!inf || inf.empty || inf.ent?.kind === 'import') continue;
       const k = refExists(ref, inf);
       if (k >= 0) { ref.e = k; ref.n = inf.ents.length; if (ref.by === undefined) ref.by = entCreator(c, inf, k);
         // A slot's other end and a cam's outline are taken again from the part as it is now.
@@ -5625,6 +5625,10 @@ function drawMatePicks() {
       else segs = edgeSegs(ref.edge).map(([a, b]) => [a.clone().applyMatrix4(M), b.clone().applyMatrix4(M)]);
       const l = segLines(segs.flatMap(([a, b]) => [...a.toArray(), ...b.toArray()]), lineMat(col, 3.5, { depthTest: false })); l.renderOrder = 17; groups.measure.add(l); return;
     }
+    if (ref.std) { const M = new THREE.Matrix4().fromArray(c.T); inf.geo.computeBoundingBox(); const sz = inf.geo.boundingBox.getSize(new THREE.Vector3()).length() * 0.6 || 20; const pl = PLANES[ref.std]; const X = V3(pl.x), Y = V3(pl.y);
+      const q = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b2]) => X.clone().multiplyScalar(a * sz).addScaledVector(Y, b2 * sz).applyMatrix4(M)); const arr = []; for (let i = 0; i < 4; i++) arr.push(...q[i].toArray(), ...q[(i + 1) % 4].toArray());
+      const l = segLines(arr, lineMat(col, 2.5, { depthTest: false })); l.renderOrder = 17; groups.measure.add(l);
+      const g = new THREE.BufferGeometry().setFromPoints([q[0], q[1], q[2], q[0], q[2], q[3]]); const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthTest: false, depthWrite: false })); m.renderOrder = 16; groups.measure.add(m); return; }
     const ent = inf.ents[ref.e]; if (!ent) return;
     const M = new THREE.Matrix4().fromArray(c.T); const pos = inf.geo.getAttribute('position'); const arr = []; const v = new THREE.Vector3();
     for (const t of ent.tris) for (let k = 0; k < 3; k++) { v.fromBufferAttribute(pos, 3 * t + k).applyMatrix4(M); arr.push(v.x, v.y, v.z); }
@@ -6039,7 +6043,7 @@ function drawInterference() {
   asmGroup.traverse((o) => { if (o.isMesh && o.material) { o.material.transparent = true; o.material.opacity = 0.35; o.material.depthWrite = false; } });
   requestRender();
 }
-function pickName(r) { if (r.kind === 'plane') return 'Грань'; if (r.kind === 'point') return 'Вершина'; if (r.edge?.t === 'line') return 'Ребро'; if (r.edge) return 'Круглое ребро ⌀' + fmt(2 * r.r); return 'Ось цилиндра ⌀' + fmt(2 * r.r); }
+function pickName(r) { if (r.std) return 'Плоскость «' + PLANES[r.std].label + '»'; if (r.kind === 'plane') return 'Грань'; if (r.kind === 'point') return 'Вершина'; if (r.edge?.t === 'line') return 'Ребро'; if (r.edge) return 'Круглое ребро ⌀' + fmt(2 * r.r); return 'Ось цилиндра ⌀' + fmt(2 * r.r); }
 function asmDeleteComp(c) {
   const asm = S.doc; asm.comps = asm.comps.filter((x) => x !== c); asm.mates = asm.mates.filter((m) => m.a.comp !== c.id && m.b.comp !== c.id);
   for (const pt of asm.patterns || []) { pt.seeds = pt.seeds.filter((x) => x !== c.id); if (pt.ref.comp === c.id) pt.ref = { axis: 'x' }; } asm.patterns = (asm.patterns || []).filter((pt) => pt.seeds.length);
@@ -6072,6 +6076,8 @@ function renderAsmPM() {
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Выбранные объекты'),
     ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])} · ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр')),
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
+  box.append(h('details', { class: 'grp', open: pm.stdOpen || null, ontoggle: (e) => { pm.stdOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Плоскости компонентов'),
+    ...asm.comps.filter((c) => !c.hidden).map((c) => h('div', { class: 'field', style: 'gap:4px;flex-wrap:wrap' }, h('span', { style: 'flex:1 1 100%;font-size:12px' }, c.name), h('div', { class: 'chips' }, ...Object.keys(PLANES).map((k) => h('button', { class: 'chip', style: pm.picks.some((q) => q.comp === c.id && q.std === k) ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => addMatePick(stdPlaneRef(c, k)) }, PLANES[k].label)))))));
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
@@ -6081,6 +6087,15 @@ function renderAsmPM() {
     pm.suggest ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const i = pm.picks.findIndex((r) => r.comp === pm.suggest.comp); if (i >= 0) pm.picks[i] = pm.suggest; pm.suggest = null; previewMate(); } }, 'Взять подсвеченную')) : null));
   side.append(box);
 }
+function addMatePick(ref) {
+  const pm = S.pm; const same = (q) => q.comp === ref.comp && q.kind === ref.kind && (q.std || ref.std ? q.std === ref.std : q.e != null ? q.e === ref.e : JSON.stringify(q.p) === JSON.stringify(ref.p));
+  const hit = pm.picks.findIndex(same); if (hit >= 0) { pm.picks.splice(hit, 1); pm.flip = null; pm.v = null; previewMate(); renderSide(); return; }
+  const onComp = pm.picks.findIndex((q) => q.comp === ref.comp); if (onComp >= 0) pm.picks.splice(onComp, 1); else if (pm.picks.length >= 2) pm.picks.pop();
+  pm.picks.push(ref); pm.flip = null; pm.flipTouched = false; pm.v = null; previewMate();
+}
+// The part's own planes (Спереди, Сверху, Справа) as mate references: a shaft can be held at its middle, a part
+// centred on another by its planes, as in SolidWorks.
+const stdPlaneRef = (c, k) => ({ comp: c.id, kind: 'plane', p: [0, 0, 0], d: PLANES[k].n.slice(), std: k });
 // ---------------- pointer handling in the assembly ----------------
 function asmDown(ev) {
   if (ev.button !== 0) return;
@@ -6164,10 +6179,7 @@ function asmUp(ev, d) {
     if (p?.point) { const c = S.doc.comps.find((x) => x.id === p.comp); if (c) ref.at = p.point.clone().applyMatrix4(new THREE.Matrix4().fromArray(c.T).invert()).toArray().map((v) => +v.toFixed(5)); }
     // A click on what is already picked takes it off; a click on another object of a picked component replaces that
     // pick; with both picked, a third click replaces the second (the first, usually right, is kept).
-    const same = (q) => q.comp === ref.comp && q.kind === ref.kind && (q.e != null ? q.e === ref.e : JSON.stringify(q.p) === JSON.stringify(ref.p));
-    const hit = pm.picks.findIndex(same); if (hit >= 0) { pm.picks.splice(hit, 1); pm.flip = null; pm.v = null; previewMate(); renderSide(); return; }
-    const onComp = pm.picks.findIndex((q) => q.comp === ref.comp); if (onComp >= 0) pm.picks.splice(onComp, 1); else if (pm.picks.length >= 2) pm.picks.pop();
-    pm.picks.push(ref); pm.flip = null; pm.flipTouched = false; pm.v = null; previewMate(); return;
+    addMatePick(ref); return;
   }
   if (d && !d.moved && !S.pm) { const p = asmPick(ev); S.asmSel = p?.comp || null; if (S.asmSel) S.mateSel = null; asmRefresh(); }
 }
@@ -7110,5 +7122,5 @@ $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'pro
 // Without Manifold booleans fall back to the old CSG, whose meshes have seams: say so instead of exporting them silently.
 if (!MF) setTimeout(() => toast(`Движок Manifold не загрузился (${MF_ERR || 'нет ответа'}): тела и STL могут получиться с дырами`, 'warn'), 1500);
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, depthHandle, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, depthHandle, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
