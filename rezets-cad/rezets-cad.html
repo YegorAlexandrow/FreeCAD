@@ -2657,7 +2657,7 @@ function openDimEditor(c) {
       const r = tryAddConstraint(sk, nc); if (r.status !== 'ok') { sk.cons[c.id] = c; reportAdd(r, nc); } commitSketch(); return;
     }
     if (!Number.isFinite(v) || v <= 0 && c.t !== 'angle') { toast('Введите положительное число, например 25 или 50/2', 'warn'); refreshSketch(); return; }
-    if (c.driven) { if (Math.abs(v - c.v) > 1e-9) toast('Размер справочный, он только показывает значение. Снимите отметку «Справочный», чтобы задавать его', 'info'); refreshSketch(); return; }
+    if (c.driven) { if (Math.abs(v - c.v) > 1e-9) toast('Размер справочный и только показывает значение. Снимите отметку «спр.» рядом с полем, чтобы задавать его', 'info'); refreshSketch(); return; }
     const old = c.v, oldExpr = c.expr; const before = snapshotGeo(sk); c.v = v; if (hasIdent(inp.value)) c.expr = inp.value.trim(); else delete c.expr;
     // A new angle turns the second line, the first one stays (SolidWorks moves the later pick).
     const l0 = c.t === 'angle' ? sk.ents[c.refs[0]] : null; const keep = new Set(l0 ? ['p' + l0.p1, 'p' + l0.p2] : []);
