@@ -4128,7 +4128,9 @@ function layoutDrawing(drw) {
   const x0 = fx0 + gap, y0 = fy0 + gap + 6; const pos = {};
   pos.front = { x: x0, y: y0 }; pos.left = { x: x0 + w('front') * scale + gap, y: y0 }; pos.top = { x: x0, y: y0 + hgt('front') * scale + gap };
   if (views.iso) { const xi = pos.left.x + w('left') * scale + gap; const isoW = w('iso') * scale, isoH = hgt('iso') * scale; if (xi + isoW <= fx1 - 4 && y0 + isoH <= fy1 - 55 - 8) pos.iso = { x: xi, y: y0 }; else { const yi = pos.top.y; const xi2 = pos.top.x + w('top') * scale + gap; if (xi2 + isoW <= fx1 - 4 && yi + isoH <= fy1 - 55 - 8) pos.iso = { x: xi2, y: yi }; else delete views.iso; } }
-  return { views, pos, scale, W, H, frame: [fx0, fy0, fx1, fy1], asm: docEntry(drw.src)?.kind === 'asm' };
+  // A view past the frame or over the title block at the chosen scale is reported, not silently cut by the sheet's edge.
+  const overflow = ['front', 'top', 'left'].filter((k) => { const X1 = pos[k].x + w(k) * scale, Y1 = pos[k].y + hgt(k) * scale; return X1 > fx1 + 0.01 || Y1 > fy1 + 0.01 || (X1 > fx1 - 185 && Y1 > fy1 - 55); });
+  return { views, pos, scale, W, H, frame: [fx0, fy0, fx1, fy1], asm: docEntry(drw.src)?.kind === 'asm', overflow };
 }
 // Paper coordinates of a model point in a view.
 function toPaper(L, key, w) { const v = L.views[key]; const p = V3(w); const u = p.dot(V3(v.R)), vv = p.dot(V3(v.U)); return [L.pos[key].x + (u - v.box.umin) * L.scale, L.pos[key].y + (v.box.vmax - vv) * L.scale]; }
@@ -4143,7 +4145,19 @@ function autoDims(L) {
   const ef = ext('front'), et = ext('top');
   if (ef) out.push({ kind: 'h', x1: ef.xl[0], x2: ef.xr[0], y: ef.xl[1], y2: ef.xr[1], at: f.Y1 + 9, val: f.w }, { kind: 'v', y1: ef.yt[1], y2: ef.yb[1], x: ef.yt[0], x2: ef.yb[0], at: f.X0 - 9, val: f.h });
   if (et) out.push({ kind: 'v', y1: et.yt[1], y2: et.yb[1], x: et.yt[0], x2: et.yb[0], at: t.X0 - 9, val: t.h });
-  if (!L.asm) for (const k of ['front', 'top', 'left']) { const seen = new Set(); for (const c of v[k].circles) { const key = c.r.toFixed(3); if (seen.has(key) || seen.size >= 6) continue; seen.add(key); const [cx, cy] = toPaper(L, k, c.w); out.push({ kind: 'dia', cx, cy, r: c.r * L.scale, val: 2 * c.r, ang: [-45, -20, -65, -30, -55, -10][seen.size - 1] }); } }
+  // A full circle gets its diameter («2 отв. ⌀10» when there are several alike), an arc its radius, drawn to the
+  // part of it that is there (ГОСТ 2.307: an arc up to a half circle is dimensioned by R).
+  if (!L.asm) for (const k of ['front', 'top', 'left']) {
+    const vv = v[k]; const P = (u, w) => [L.pos[k].x + (u - vv.box.umin) * L.scale, L.pos[k].y + (vv.box.vmax - w) * L.scale]; const segs = vv.vis.map((q) => [...P(q[0], q[1]), ...P(q[2], q[3])]);
+    const dseg = (x, y, q) => { const dx = q[2] - q[0], dy = q[3] - q[1]; const l2 = dx * dx + dy * dy || 1e-12; const t = Math.max(0, Math.min(1, ((x - q[0]) * dx + (y - q[1]) * dy) / l2)); return Math.hypot(x - q[0] - t * dx, y - q[1] - t * dy); };
+    const info = vv.circles.map((c) => { const [cx, cy] = toPaper(L, k, c.w); const r = c.r * L.scale; const tol = Math.max(0.2, r * 0.04); const on = [];
+      for (let i = 0; i < 24; i++) { const a = i * Math.PI / 12; const x = cx + r * Math.cos(a), y = cy + r * Math.sin(a); if (segs.some((q) => dseg(x, y, q) < tol)) on.push(i); }
+      return { c, cx, cy, r, on, full: on.length >= 22 }; });
+    const seen = new Set();
+    for (const it of info) { if (!it.on.length) continue; const key = (it.full ? 'd' : 'r') + it.c.r.toFixed(3); if (seen.has(key) || seen.size >= 6) continue; seen.add(key);
+      if (it.full) { const n = info.filter((o) => o.full && Math.abs(o.c.r - it.c.r) < 1e-3).length; out.push({ kind: 'dia', cx: it.cx, cy: it.cy, r: it.r, val: 2 * it.c.r, count: n, ang: [-45, -20, -65, -30, -55, -10][seen.size - 1] }); }
+      else { const prefer = [21, 20, 22, 19, 23, 18, 0, 17, 1, 16]; const i = prefer.find((q) => it.on.includes(q)) ?? it.on[Math.floor(it.on.length / 2)]; out.push({ kind: 'rad', cx: it.cx, cy: it.cy, r: it.r, val: it.c.r, ang: i * 15 }); } }
+  }
   return out;
 }
 function dimSvg(d) {
@@ -4154,7 +4168,10 @@ function dimSvg(d) {
   if (d.kind === 'h') { const s = Math.sign(d.at - d.y) || -1; return ln(d.x1, d.y, d.x1, d.at + s * 2) + ln(d.x2, d.y2 ?? d.y, d.x2, d.at + s * 2) + ln(d.x1, d.at, d.x2, d.at) + arrow(d.x1, d.at, d.x1 - d.x2, 0) + arrow(d.x2, d.at, d.x2 - d.x1, 0) + t((d.x1 + d.x2) / 2, d.at - 1, val); }
   if (d.kind === 'v') { const s = Math.sign(d.at - d.x) || -1; return ln(d.x, d.y1, d.at + s * 2, d.y1) + ln(d.x2 ?? d.x, d.y2, d.at + s * 2, d.y2) + ln(d.at, d.y1, d.at, d.y2) + arrow(d.at, d.y1, 0, d.y1 - d.y2) + arrow(d.at, d.y2, 0, d.y2 - d.y1) + t(d.at - 1, (d.y1 + d.y2) / 2, val, -90); }
   if (d.kind === 'dia') { const a = (d.ang ?? -45) * Math.PI / 180; const ex = d.cx + d.r * Math.cos(a), ey = d.cy + d.r * Math.sin(a), sx = d.cx - d.r * Math.cos(a), sy = d.cy - d.r * Math.sin(a); const lx = ex + 6, ly = ey - 6;
-    return ln(sx, sy, ex, ey) + arrow(ex, ey, Math.cos(a), Math.sin(a)) + arrow(sx, sy, -Math.cos(a), -Math.sin(a)) + ln(ex, ey, lx, ly) + ln(lx, ly, lx + 9, ly) + `<text x="${(lx + 0.5).toFixed(2)}" y="${(ly - 0.8).toFixed(2)}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif">⌀${val}</text>`; }
+    const lab = (d.count > 1 ? d.count + ' отв. ' : '') + '⌀' + val;
+    return ln(sx, sy, ex, ey) + arrow(ex, ey, Math.cos(a), Math.sin(a)) + arrow(sx, sy, -Math.cos(a), -Math.sin(a)) + ln(ex, ey, lx, ly) + ln(lx, ly, lx + 2 + 2.1 * lab.length, ly) + `<text x="${(lx + 0.5).toFixed(2)}" y="${(ly - 0.8).toFixed(2)}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif">${lab}</text>`; }
+  if (d.kind === 'rad') { const a = d.ang * Math.PI / 180; const ex = d.cx + d.r * Math.cos(a), ey = d.cy + d.r * Math.sin(a); const ox = ex + Math.cos(a) * 5, oy = ey + Math.sin(a) * 5; const right = Math.cos(a) >= 0; const lab = 'R' + val; const lx2 = right ? ox + 2 + 2.1 * lab.length : ox - 2 - 2.1 * lab.length;
+    return ln(d.cx, d.cy, ox, oy) + arrow(ex, ey, Math.cos(a), Math.sin(a)) + ln(ox, oy, lx2, oy) + `<text x="${(right ? ox + 0.5 : lx2 + 0.5).toFixed(2)}" y="${(oy - 0.8).toFixed(2)}" font-size="3.5" font-family="ISOCPEUR, Arial, sans-serif">${lab}</text>`; }
   return '';
 }
 // The sheet as SVG text, in millimetres.
@@ -4196,7 +4213,7 @@ function drwEnter() { canvas.style.display = 'none'; $('viewbar').hidden = true;
 function drwLeave() { canvas.style.display = ''; $('viewbar').hidden = false; $('drawing').hidden = true; groups.body.visible = true; drwLayout = null; }
 function drwRefresh() {
   const drw = S.doc; const box = $('drawing'); box.textContent = '';
-  if (!docEntry(drw.src)) { box.append(h('div', { class: 'empty-tree' }, 'Источник чертежа удалён. Выберите деталь или сборку слева.')); renderSide(); return; }
+  if (!docEntry(drw.src)) { drwLayout = null; box.append(h('div', { class: 'empty-tree' }, 'Источник чертежа удалён. Выберите деталь или сборку слева.')); renderSide(); return; }
   drwLayout = layoutDrawing(drw); if (drwLayout.error) { box.append(h('div', { class: 'empty-tree' }, drwLayout.error)); renderSide(); return; }
   const wrap = h('div', { class: 'sheet' }); wrap.innerHTML = drawingSvg(drw, drwLayout); box.append(wrap);
   const svgEl = wrap.firstChild; svgEl.removeAttribute('width'); svgEl.removeAttribute('height'); svgEl.style.width = '100%'; svgEl.style.height = '100%';
@@ -4219,11 +4236,13 @@ function drwToolHint() { const p = S.drwTool.picks; return !p.length ? 'Разм
 function drwClick(ev) {
   if (!S.drwTool) return; const T = S.drwTool; const drw = S.doc;
   if (T.picks.length === 2) { const [a, b] = T.picks; const [x, y] = drwPaperPoint(ev); const L = drwLayout; const v = L.views[a.view]; const ymin = Math.min(a.py, b.py), ymax = Math.max(a.py, b.py);
-    const horiz = y < ymin || y > ymax; const off = horiz ? (y - L.pos[a.view].y) / L.scale : (x - L.pos[a.view].x) / L.scale; void v;
+    // Points one above the other give a vertical size whatever side the click is on (a horizontal one would read 0), and the same way round.
+    const flatX = Math.abs(a.px - b.px) < 0.05, flatY = Math.abs(a.py - b.py) < 0.05; const horiz = flatX ? false : flatY ? true : y < ymin || y > ymax; const off = horiz ? (y - L.pos[a.view].y) / L.scale : (x - L.pos[a.view].x) / L.scale; void v;
     drw.dims.push({ kind: horiz ? 'h' : 'v', view: a.view, a: a.w, b: b.w, off }); S.drwTool = { picks: [] }; pushUndo(); drwRefresh(); return; }
   const n = drwNearest(ev); if (!n) return;
   if (n.kind === 'circle' && !T.picks.length) { drw.dims.push({ kind: 'dia', view: n.view, c: n.c, r: n.r }); pushUndo(); drwRefresh(); return; }
   if (n.kind !== 'pt') return; if (T.picks.length === 1 && T.picks[0].view !== n.view) { toast('Обе точки должны быть в одном виде', 'warn'); return; }
+  if (T.picks.length === 1 && Math.hypot(T.picks[0].px - n.px, T.picks[0].py - n.py) < 0.05) { toast('Это та же точка: щёлкните вторую вершину', 'info'); return; }
   T.picks.push(n); setHint(drwToolHint());
 }
 function renderDrawingPanel() {
@@ -4234,7 +4253,7 @@ function renderDrawingPanel() {
   const chk = (label, key) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!drw[key], onchange: (e) => { drw[key] = e.target.checked; pushUndo(); drwRefresh(); } }), label);
   const author = h('input', { type: 'text', value: drw.author || '', id: 'drwAuthor' }); author.onchange = () => { drw.author = author.value; pushUndo(); drwRefresh(); }; author.addEventListener('keydown', (e) => e.stopPropagation());
   side.append(h('div', { class: 'sec-h' }, h('span', {}, activeEntry().name), h('span', { class: 'meta' }, 'чертёж')),
-    h('div', { class: 'grp' }, h('label', { class: 'field' }, h('span', {}, 'Модель'), sel), h('label', { class: 'field' }, h('span', {}, 'Формат'), sheet), h('label', { class: 'field' }, h('span', {}, 'Масштаб'), sc), h('label', { class: 'field' }, h('span', {}, 'Разработал'), author)),
+    h('div', { class: 'grp' }, h('label', { class: 'field' }, h('span', {}, 'Модель'), sel), h('label', { class: 'field' }, h('span', {}, 'Формат'), sheet), h('label', { class: 'field' }, h('span', {}, 'Масштаб'), sc), drwLayout?.overflow?.length ? h('div', { class: 'note', style: 'color:var(--bad)' }, `Виды не помещаются на лист ${drw.sheet} в масштабе ${scaleText(drwLayout.scale)}: возьмите формат больше или масштаб мельче`) : null, h('label', { class: 'field' }, h('span', {}, 'Разработал'), author)),
     h('div', { class: 'grp' }, chk('Изометрия', 'iso'), chk('Невидимые линии', 'hidden'), chk('Габаритные размеры и диаметры', 'auto'),
       h('div', { class: 'note' }, `Своих размеров: ${drw.dims.length}`), drw.dims.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { drw.dims.pop(); pushUndo(); drwRefresh(); } }, 'Убрать последний'), h('button', { class: 'chip', onclick: () => { drw.dims = []; pushUndo(); drwRefresh(); } }, 'Убрать все')) : null));
 }
