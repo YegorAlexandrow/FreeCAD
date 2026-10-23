@@ -4050,7 +4050,8 @@ const DRW_VIEWS = {
   left: { label: 'Вид слева', R: [0, 0, 1], U: [0, 1, 0], D: [-1, 0, 0] },
   iso: { label: 'Изометрия', R: [0.7071, 0, -0.7071], U: [-0.4082, 0.8165, -0.4082], D: [0.5774, 0.5774, 0.5774] },
 };
-const newDrawing = (src) => ({ src, sheet: 'A4', scale: null, iso: true, hidden: true, dims: [], auto: true, author: '' });
+// An assembly's hidden lines (every part behind every other) make its views unreadable: off by default there.
+const newDrawing = (src) => ({ src, sheet: 'A4', scale: null, iso: true, hidden: docEntry(src)?.kind !== 'asm', dims: [], auto: true, author: '' });
 // Geometry the drawing shows: the part body, or every component of an assembly in place.
 function drawingSources(srcId) {
   const ent = docEntry(srcId); if (!ent) return [];
