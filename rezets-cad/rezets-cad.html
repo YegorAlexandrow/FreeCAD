@@ -6142,6 +6142,8 @@ function asmRefresh(reanalyze) {
     const src = asm.comps[i] || c; const entD = docEntry(c.doc)?.data; const compCol = src.color || partColor(entD) || COMP_COLORS[i % COMP_COLORS.length];
     let geoC = shadedGeo(inf.geo); const vc = bodyColors(inf.geo, entD, inf.cyls, compCol); if (vc) { geoC = geoC.clone(); geoC.setAttribute('color', new THREE.BufferAttribute(vc, 3)); }
     const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : new THREE.Color(compCol), vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
+    // A component made see-through lets the parts inside it show (and stays pickable).
+    if (src.clear) { mat.transparent = true; mat.opacity = 0.3; mat.depthWrite = false; }
     const mesh = new THREE.Mesh(geoC, mat); mesh.userData.comp = c.virtual ? null : c.id; if (c.virtual) mesh.userData.virt = c.name; g.add(mesh);
     g.add(segLines(inf.edges, lineMat(colors.edge, 1.3)));
     asmGroup.add(g);
@@ -6374,7 +6376,7 @@ function mateMessage(r) {
   return r.status === 'redundant' ? `Это сопряжение ничего не добавляет: положение уже задано${names.length ? ' (' + q + ')' : ''}` : names.length ? `Вместе с ${q} это сопряжение требует невозможного положения (элементы ${names.length > 1 ? 'тех сопряжений' : 'того сопряжения'} подсвечены красным). Погасите одно из них или выберите другие элементы` : 'Сопряжение противоречит существующим';
 }
 // One menu for a component, from the tree and from the model alike.
-const compMenu = (asm, c, e) => [['Переименовать (F2)', () => renameFeature(c, () => asmRefresh())], ['Переместить или повернуть…', () => cmdMoveComp(c)], [c.hidden ? 'Показать' : 'Скрыть', () => toggleCompHidden(c)], ...(asm.comps.some((x) => x.hidden) ? [['Показать все', () => { for (const x of asm.comps) delete x.hidden; asmRefresh(); pushUndo(); }]] : []), [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]];
+const compMenu = (asm, c, e) => [['Переименовать (F2)', () => renameFeature(c, () => asmRefresh())], ['Переместить или повернуть…', () => cmdMoveComp(c)], [c.hidden ? 'Показать' : 'Скрыть', () => toggleCompHidden(c)], [c.clear ? 'Непрозрачный' : 'Прозрачный', () => { if (c.clear) delete c.clear; else c.clear = true; asmRefresh(true); pushUndo(); }], ...(asm.comps.some((x) => x.hidden) ? [['Показать все', () => { for (const x of asm.comps) delete x.hidden; asmRefresh(); pushUndo(); }]] : []), [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]];
 function renderAsmTree() {
   const asm = S.doc; const an = S.asmAnalysis; side.textContent = '';
   side.append(h('div', { class: 'sec-h' }, h('span', {}, activeEntry().name), h('span', { class: 'meta' }, !asm.comps.length ? 'пустая' : an ? (an.dof ? `свободно: ${an.dof}` : 'определена') : '')));
