@@ -2534,6 +2534,8 @@ function sketchAt(ev) {
   return best?.f || null;
 }
 // The hover highlight goes when the pointer leaves the view (it stayed lit while the pointer was on the tree).
+// A double click of the middle button (the wheel) fits the model, as in SolidWorks.
+let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitView(); midClickAt = 0; } else midClickAt = t; });
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
   if (S.pickSketch) { const sf = sketchAt(ev); if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; }
@@ -7634,6 +7636,8 @@ window.addEventListener('keydown', (e) => {
     if (k === 'r') { const btn = side.querySelector('button[data-flip]'); if (btn) { e.preventDefault(); btn.click(); return; } }
     if (/^[1-9]$/.test(e.key)) { const btn = side.querySelectorAll('[data-mtype]')[+e.key - 1]; if (btn) { e.preventDefault(); btn.click(); return; } }
   }
+  // Z zooms out and Shift+Z in, as in SolidWorks.
+  if (k === 'z' && !e.ctrlKey && !e.metaKey && !e.altKey) { camera.zoom = Math.min(1e4, Math.max(1e-4, camera.zoom * (e.shiftKey ? 1.25 : 0.8))); camera.updateProjectionMatrix(); controls.dispatchEvent({ type: 'change' }); requestRender(); return; }
   if (e.key === 'Enter' && S.editing && S.skOp?.kind === 'offset') { okOffset(); return; }
   if (e.key === 'Enter' && S.pm) { okPM(); return; }
   if (e.key === 'Enter' && S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
