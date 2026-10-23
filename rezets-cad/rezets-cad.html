@@ -4712,7 +4712,7 @@ function renderMassPM() {
   const xyz = (v) => `${fmt(v.x, 2)}; ${fmt(v.y, 2)}; ${fmt(v.z, 2)} мм`;
   if (S.mode === 'asm') {
     const r = asmMass(); const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Итого'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(r.mass))), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(r.com))));
-    const list = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), ...r.rows.map((x) => h('div', { class: 'kv' }, h('span', {}, `${x.c.name} · ${MATERIALS[x.mat][0]}`), h('b', {}, fmtMass(x.mass)))));
+    const list = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), ...r.rows.map((x) => h('div', { class: 'kv' }, h('span', {}, `${x.c.name}, ${MATERIALS[x.mat][0]}${x.ent?.data?.material ? '' : ' (материал не задан)'}`), h('b', {}, fmtMass(x.mass)))));
     box.append(grp, list, h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Материал задаётся в детали: откройте её и нажмите «Масса».')));
     side.append(box); return;
   }
@@ -4728,7 +4728,7 @@ function renderMassPM() {
 function bomRows() {
   const map = new Map();
   for (const c of allComps(S.doc)) { const ent = docEntry(c.doc); if (!ent) continue; const r = map.get(c.doc) || { ent, qty: 0 }; r.qty++; map.set(c.doc, r); }
-  return [...map.values()].map((r, i) => { const inf = docInfo(r.ent.id); const mat = matOf(r.ent.data); const vol = inf?.geo ? massProps(inf.geo).vol : 0; return { n: i + 1, name: r.ent.name, qty: r.qty, mat: MATERIALS[mat][0], mass: vol * MATERIALS[mat][1] / 1000, kind: r.ent.kind }; });
+  return [...map.values()].map((r, i) => { const inf = docInfo(r.ent.id); const mat = matOf(r.ent.data); const vol = inf?.geo ? massProps(inf.geo).vol : 0; return { n: i + 1, name: r.ent.name, qty: r.qty, mat: MATERIALS[mat][0] + (r.ent.data?.material ? '' : ' (не задан)'), mass: vol * MATERIALS[mat][1] / 1000, kind: r.ent.kind }; });
 }
 function cmdBom() {
   const rows = bomRows(); if (!rows.length) { toast('Сборка пустая', 'warn'); return; }
