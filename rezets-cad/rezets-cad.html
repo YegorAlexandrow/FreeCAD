@@ -7118,6 +7118,8 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   // Ctrl+S saves now (the browser would offer to save the page).
+  // Ctrl+P on a drawing prints the sheet, not the screen with the panels around it.
+  if ((e.ctrlKey || e.metaKey) && k === 'p' && S.mode === 'drw') { e.preventDefault(); drwPrint(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); saveProjectSoon(); if (SRV.on) serverSave(); else if (CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudTimer); cloudSave(); } else toast('Проект сохранён в этом браузере', 'info'); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Escape' && S.pickSketch) { S.pickSketch = null; updateSketchVisuals(); setHint(); requestRender(); return; }
