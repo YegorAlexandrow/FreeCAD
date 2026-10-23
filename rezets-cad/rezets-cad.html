@@ -3761,7 +3761,10 @@ function previewOffset() {
     const tmp = { pts: { c, a: { x: c.x + (a.x - c.x) / A * (A + o), y: c.y + (a.y - c.y) / A * (A + o) } } }; const P = curvePts(tmp, { t: 'ellipse', c: 'c', p1: 'a', r: Math.max(1e-3, e.r + o) }); for (let i = 0; i + 1 < P.length; i++) segs.push([P[i].x, P[i].y, P[i + 1].x, P[i + 1].y]); }
   S.draw = { stage: 0, preview: segs }; updateSketchVisuals();
 }
-function okOffset() { const op = S.skOp; if (!op.ids.length) { cancelSkOp(); return; } S.skOp = null; S.draw = null; const err = applyOffset(editSk(), op.ids, S.toolOpt.offsetD, S.toolOpt.offsetFlip); if (err) toast(err, 'warn'); S.sel.clear(); commitSketch(); setHint(); }
+function okOffset() { const op = S.skOp; if (!op.ids.length) { cancelSkOp(); return; } S.skOp = null; S.draw = null; const sk = editSk(); const err = applyOffset(sk, op.ids, S.toolOpt.offsetD, S.toolOpt.offsetFlip); if (err) toast(err, 'warn');
+  // «Исходные вспомогательные»: the chain offset from turns into construction geometry (model edges stay as they are).
+  else if (S.toolOpt.offsetBaseConstr) for (const id of op.ids) { const e = sk.ents[id]; if (e && !e.ext) e.constr = true; }
+  S.sel.clear(); commitSketch(); setHint(); }
 function cancelSkOp() { S.skOp = null; S.draw = null; refreshSketch(); setHint(); }
 // Panel section for the active sketch tool's options.
 function toolOptionsPanel() {
@@ -3774,6 +3777,7 @@ function toolOptionsPanel() {
   if (S.skOp?.kind === 'pattern') return patternPanel(S.skOp.opt, (ch) => { if (S.skOp?.kind !== 'pattern') return; Object.assign(S.skOp.opt, ch); renderSide(); previewPattern(); }, okPattern);
   if (S.skOp?.kind === 'offset') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), field('Расстояние', 'opOffset', o.offsetD, (v) => { o.offsetD = v; previewOffset(); }),
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'opOffFlip', checked: o.offsetFlip, onchange: (e) => { o.offsetFlip = e.target.checked; previewOffset(); } }), 'В другую сторону'),
+    h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.offsetBaseConstr, onchange: (e) => { o.offsetBaseConstr = e.target.checked; } }), 'Исходные сделать вспомогательными'),
     S.skOp.ids.length ? null : h('div', { class: 'note' }, 'Щёлкните линию, дугу или окружность: берётся вся цепочка'),
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okOffset }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')));
   // The radius is for the next fillets and, as in SolidWorks, for the ones already put with the tool this time.
