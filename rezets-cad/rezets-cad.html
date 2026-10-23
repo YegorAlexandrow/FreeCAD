@@ -7165,6 +7165,9 @@ window.addEventListener('keydown', (e) => {
   // Ctrl+P on a drawing prints the sheet, not the screen with the panels around it.
   if ((e.ctrlKey || e.metaKey) && k === 'p' && S.mode === 'drw') { e.preventDefault(); drwPrint(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); saveProjectSoon(); if (SRV.on) serverSave(); else if (CLOUD.db && !CLOUD.blocked && !CLOUD.conflict) { clearTimeout(cloudTimer); cloudSave(); } else toast('Проект сохранён в этом браузере', 'info'); return; }
+  // Ctrl+C / Ctrl+V in an assembly: another instance of the copied component, next to it, turned the same way.
+  if ((e.ctrlKey || e.metaKey) && S.mode === 'asm' && !S.pm && k === 'c') { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) { S.asmClip = c.doc; S.asmClipT = c.T.slice(); toast(`«${c.name}» скопирован: Ctrl+V вставит ещё один`, 'info'); } return; }
+  if ((e.ctrlKey || e.metaKey) && S.mode === 'asm' && !S.pm && k === 'v' && S.asmClip) { e.preventDefault(); if (!docEntry(S.asmClip)) return; asmInsert(S.asmClip); const c = S.doc.comps.at(-1); if (c && S.asmClipT) { const inf = docInfo(c.doc); inf.geo.computeBoundingBox(); const w = inf.geo.boundingBox.getSize(new THREE.Vector3()).length() * 0.6; const T = S.asmClipT.slice(); T[12] += w; T[13] += w * 0.3; c.T = T; c.fixed = false; S.asmSel = c.id; asmRefresh(true); pushUndo(true); } return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Escape' && S.pickSketch) { S.pickSketch = null; updateSketchVisuals(); setHint(); requestRender(); return; }
   // Esc while dragging puts the geometry back where it was.
