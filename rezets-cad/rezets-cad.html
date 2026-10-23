@@ -885,7 +885,11 @@ function tryAddConstraint(sk, con, opt = {}) {
   }
   const group = new Set();
   for (const d of deps) for (const [k, v] of d.comb) if (k < others.length && Math.abs(v) > 1e-6) group.add(others[k].cid);
-  const ok = solveSystem(sys, X);
+  // While drawing, the relations of the new piece move the new piece: an arc ended on a line's midpoint bends to
+  // reach it, the line under it stays (SolidWorks moves the newest geometry first).
+  const fresh = opt.fresh ?? (S.draw?.nid0 != null && editSk() === sk ? S.draw.nid0 : null); let W = null;
+  if (fresh != null) { const isNew = (o) => +o.slice(1) >= fresh; if (sys.owner.some(isNew)) W = sys.owner.map((o, i) => [i, isNew(o) ? 1 : 1e-4]); }
+  const ok = solveSystem(sys, X, W);
   let degenerate = false;
   if (ok) { writeBack(sk, sys, X); for (const [id, l] of lineLens(sk)) if (l < 1e-6 && (lensBefore.get(id) ?? 1) > 1e-6) degenerate = true; }
   const cleanGroup = [...group].filter((g) => !g.startsWith('arc:'));
@@ -2459,7 +2463,7 @@ function finishSpline(closed) {
 }
 function endDrawing() { S.draw = null; updateSketchVisuals(); setHint(); }
 function drawMove(m) {
-  const D = S.draw || (S.draw = { stage: 0 }); const sk = editSk();
+  const sk = editSk(); const D = S.draw || (S.draw = { stage: 0, nid0: sk.nid });
   const exclude = new Set(D.newPts || []);
   const sn = snap(m, { excludePts: exclude });
   D.cursor = { x: m.sx, y: m.sy }; D.glyph = sn.glyph || null; D.guides = sn.guides; D.preview = []; D.sn = sn;
