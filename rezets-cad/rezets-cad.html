@@ -7682,12 +7682,19 @@ function docUsers(d) {
 function deleteDoc(d, confirmed) {
   const users = docUsers(d);
   if (users.length) { toast(`«${d.name}» используется: ${users.map((u) => '«' + u.name + '»').join(', ')}. Сначала уберите его оттуда`, 'warn'); return; }
-  if (S.project.docs.length === 1) { toast('В проекте должен остаться хотя бы один документ', 'warn'); return; }
-  if (!confirmed) { showModal(`Удалить «${d.name}»?`, 'Документ уйдёт из проекта. Вернуть его можно кнопкой «Отменить» в сообщении после удаления.', null, [['Удалить', () => { closeModal(); deleteDoc(d, true); }], ['Закрыть', closeModal]]); return; }
+  // The last document makes way for an empty part: a project is never left with nothing to show.
+  const last = S.project.docs.length === 1;
+  if (!confirmed) { showModal(`Удалить «${d.name}»?`, last ? 'Это последний документ: вместо него появится пустая деталь. Вернуть его можно кнопкой «Отменить» в сообщении после удаления.' : 'Документ уйдёт из проекта. Вернуть его можно кнопкой «Отменить» в сообщении после удаления.', null, [['Удалить', () => { closeModal(); deleteDoc(d, true); }], ['Закрыть', closeModal]]); return; }
   const wasActive = d.id === S.project.active; if (wasActive) leaveCurrentDoc(); const at = S.project.docs.indexOf(d);
-  S.project.docs = S.project.docs.filter((x) => x !== d);
-  if (wasActive) { S.project.active = S.project.docs[0].id; S.mode = null; enterDoc(); } else renderDocTabs();
-  saveProjectSoon(); toast(`Документ «${d.name}» удалён`, 'info', [{ label: 'Отменить', act: () => { if (S.project.docs.includes(d)) return; S.project.docs.splice(Math.min(at, S.project.docs.length), 0, d); renderDocTabs(); saveProjectSoon(); toast(`«${d.name}» возвращён`, 'info'); } }]);
+  S.project.docs = S.project.docs.filter((x) => x !== d); let blank = null;
+  if (last) { blank = { id: 'd' + S.project.nid++, kind: 'part', name: uniqueDocName('Деталь'), data: newDoc() }; blank.data.name = blank.name; S.project.docs.push(blank); }
+  // The active one gives way to the document opened before it, not to whichever comes first in the list.
+  if (wasActive) { S.project.active = (recentDocs().map(docEntry).find((x) => x && x !== d) || S.project.docs[0]).id; S.mode = null; enterDoc(); } else renderDocTabs();
+  saveProjectSoon(); toast(`Документ «${d.name}» удалён`, 'info', [{ label: 'Отменить', act: () => { if (S.project.docs.includes(d)) return; S.project.docs.splice(Math.min(at, S.project.docs.length), 0, d);
+    // The empty part that stood in for it goes again while nothing was drawn in it.
+    const bl = blank && S.project.docs.includes(blank) && !(blank.id === S.project.active ? S.doc : blank.data).features.length ? blank : null;
+    if (bl) { const was = bl.id === S.project.active; if (was) leaveCurrentDoc(); S.project.docs = S.project.docs.filter((x) => x !== bl); if (was) { S.project.active = d.id; S.mode = null; enterDoc(); } }
+    renderDocTabs(); saveProjectSoon(); toast(`«${d.name}» возвращён`, 'info'); } }]);
 }
 // A project file opened over the current one: its documents join this project by default; replacing the whole
 // project is a separate, explicit choice that can still be taken back.
@@ -7705,7 +7712,12 @@ function mergeProject(p) {
   toast(`Добавлено документов: ${p.docs.length}`, 'info');
 }
 // The tab strip scrolls; the full list is one click away, and file commands live in one menu.
-$('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP / STL…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()]]); };
+$('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP / STL…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()], null, ['Оформление…', () => themeMenu(r)]]); };
+// Light, dark or as the system says; kept in this browser.
+const THEMES = [['', 'Как в системе'], ['light', 'Светлое'], ['dark', 'Тёмное']];
+function applyTheme(t) { if (t) document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme'); try { localStorage.setItem('rezets-theme', t); } catch { /* not kept */ } }
+function themeMenu(r) { const cur = document.documentElement.getAttribute('data-theme') || ''; openMenu(r.left, r.bottom + 4, THEMES.map(([t, l]) => [(t === cur ? '✓ ' : '    ') + l, () => applyTheme(t)])); }
+try { const t = localStorage.getItem('rezets-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch { /* default theme */ }
 $('bAdd').onclick = (e) => {
   const r = e.currentTarget.getBoundingClientRect();
   openMenu(r.left, r.bottom + 4, [
