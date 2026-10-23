@@ -3544,7 +3544,7 @@ function filletCorner(sk, pid, r) {
   const u = far.map((A) => { const l = Math.hypot(A.x - P.x, A.y - P.y); return { x: (A.x - P.x) / l, y: (A.y - P.y) / l, l }; });
   const cosF = u[0].x * u[1].x + u[0].y * u[1].y; const phi = Math.acos(Math.max(-1, Math.min(1, cosF)));
   if (phi < 1e-3 || phi > Math.PI - 1e-3) return 'Линии в этой точке не образуют угол';
-  const d = r / Math.tan(phi / 2); if (d >= u[0].l - 1e-6 || d >= u[1].l - 1e-6) return `Радиус ${fmt(r)} не помещается на этих линиях`;
+  const d = r / Math.tan(phi / 2); if (d >= u[0].l - 1e-6 || d >= u[1].l - 1e-6) return `Радиус ${fmt(r)} не помещается на этих линиях, наибольший около ${fmt(Math.min(u[0].l, u[1].l) * Math.tan(phi / 2) * 0.999, 2)} мм`;
   const T = u.map((w) => ({ x: P.x + w.x * d, y: P.y + w.y * d })); const bl = Math.hypot(u[0].x + u[1].x, u[0].y + u[1].y);
   const C = { x: P.x + (u[0].x + u[1].x) / bl * r / Math.sin(phi / 2), y: P.y + (u[0].y + u[1].y) / bl * r / Math.sin(phi / 2) };
   const tIds = T.map((t) => { const id = nid(sk); sk.pts[id] = { id, x: t.x, y: t.y }; return id; }); const cId = nid(sk); sk.pts[cId] = { id: cId, x: C.x, y: C.y };
@@ -4240,7 +4240,7 @@ function edgeTool(body, edge, kind, size) {
   const d1 = [pick.sr, 0], d2 = [0, pick.sn];
   const n1 = convex ? [0, -pick.sn] : [0, pick.sn], n2 = convex ? [-pick.sr, 0] : [pick.sr, 0];
   const sec = edgeSection(kind, size, [edge.r, 0], d1, d2, n1, n2, convex);
-  if (sec.some((p) => p[0] < 1e-6)) throw new Error('Размер больше радиуса кромки');
+  if (sec.some((p) => p[0] < 1e-6)) throw new Error(`${kind === 'fillet' ? 'Радиус скругления' : 'Размер фаски'} ${fmt(size)} не меньше радиуса круглой кромки ${fmt(edge.r)} мм`);
   const g = revolveGeometry([{ pts: sec, holes: [] }], [0, 0], [0, 1], 360);
   g.applyMatrix4(new THREE.Matrix4().makeBasis(rho, n, new THREE.Vector3().crossVectors(rho, n)).setPosition(c)); g.computeVertexNormals(); return { g, convex };
 }
