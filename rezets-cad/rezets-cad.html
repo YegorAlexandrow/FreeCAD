@@ -2999,6 +2999,9 @@ function drawClick(m) {
     const p2 = nid(sk); sk.pts[p2] = { id: p2, x: gp(sk, p3).x, y: gp(sk, p1).y }; const p4 = nid(sk); sk.pts[p4] = { id: p4, x: gp(sk, p1).x, y: gp(sk, p3).y };
     const L = [[p1, p2], [p2, p3], [p3, p4], [p4, p1]].map(([a, b]) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b }; return id; });
     pending.push({ t: 'horizontal', refs: [L[0]] }, { t: 'horizontal', refs: [L[2]] }, { t: 'vertical', refs: [L[1]] }, { t: 'vertical', refs: [L[3]] });
+    // «Диагонали»: construction lines corner to corner, as SolidWorks' rectangle options; their crossing is the
+    // centre to dimension or relate from.
+    if (S.toolOpt.rectDiag) for (const [a, b] of [[p1, p3], [p2, p4]]) { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b, constr: true }; }
     addRelations(sk, pending); S.draw = null; commitSketch(); return;
   }
   if (t === 'slot') {
@@ -3776,6 +3779,7 @@ function toolOptionsPanel() {
   // The radius is for the next fillets and, as in SolidWorks, for the ones already put with the tool this time.
   if (S.tool === 'sfillet') { const sk = editSk(); const made = () => (S.toolFillets || []).map((id) => sk?.ents[id]).filter(Boolean);
     return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности')); }
+  if (S.tool === 'rect') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Прямоугольник'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.rectDiag, onchange: (e) => { o.rectDiag = e.target.checked; } }), 'Вспомогательные диагонали'));
   if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true));
   return null;
 }
