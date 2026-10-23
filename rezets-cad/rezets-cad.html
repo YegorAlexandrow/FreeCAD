@@ -3089,7 +3089,7 @@ function releasePatternCopies(sk) {
 }
 // What is still free, in words: which points can move and how, which sizes are not set.
 function explainFree(sk, a) {
-  if (!a?.dof) return []; const N = a.nullvecs || []; const out = [];
+  if (!a?.dof) return []; const N = a.nullvecs || []; const out = []; out.keys = []; const add = (text, keys) => { out.push(text); out.keys.push(keys); };
   const how = (id) => {
     const i = a.sys.idx['p' + id]; if (i === undefined) return null;
     const cols = N.map((v) => [v[i], v[i + 1]]).filter((c) => Math.hypot(c[0], c[1]) > 1e-7); if (!cols.length) return null;
@@ -3103,16 +3103,16 @@ function explainFree(sk, a) {
     if (e.constr || e.ext) continue;
     if (e.t === 'circle' || e.t === 'arc' || e.t === 'ellipse') {
       const nm = e.t === 'circle' ? `Окружность ⌀${fmt(2 * e.r)}` : e.t === 'arc' ? `Дуга R${fmt(e.r)}` : 'Эллипс'; const c = how(e.c); seen.add(e.c);
-      if (c) out.push(`${nm}: центр ${xy(e.c)} ${c}. Задайте его размерами от начала координат или ребра, либо сделайте окружность концентричной с ребром модели`);
-      if (a.free.has(a.sys.idx['r' + e.id])) out.push(`${nm}: не задан размер, поставьте диаметр или радиус`);
-      if (e.t === 'arc') for (const p of [e.p1, e.p2]) { seen.add(p); const m = how(p); if (m && !c) out.push(`${nm}: конец ${xy(p)} ${m}`); }
+      if (c) add(`${nm}: центр ${xy(e.c)} ${c}. Задайте его размерами от начала координат или ребра, либо сделайте окружность концентричной с ребром модели`, ['e:' + e.id]);
+      if (a.free.has(a.sys.idx['r' + e.id])) add(`${nm}: не задан размер, поставьте диаметр или радиус`, ['e:' + e.id]);
+      if (e.t === 'arc') for (const p of [e.p1, e.p2]) { seen.add(p); const m = how(p); if (m && !c) add(`${nm}: конец ${xy(p)} ${m}`, ['p:' + p]); }
     } else if (e.t === 'line') {
       const m1 = how(e.p1), m2 = how(e.p2); seen.add(e.p1); seen.add(e.p2);
-      if (m1 && m2) out.push(`Линия ${xy(e.p1)} → ${xy(e.p2)}: оба конца свободны (${m1 === m2 ? m1 : m1 + ' / ' + m2})`);
-      else if (m1 || m2) out.push(`Линия: конец ${xy(m1 ? e.p1 : e.p2)} ${m1 || m2}`);
-    } else for (const p of entPts(e)) { if (seen.has(p)) continue; seen.add(p); const m = how(p); if (m) out.push(`Кривая: точка ${xy(p)} ${m}`); }
+      if (m1 && m2) add(`Линия ${xy(e.p1)} → ${xy(e.p2)}: оба конца свободны (${m1 === m2 ? m1 : m1 + ' / ' + m2})`, ['e:' + e.id]);
+      else if (m1 || m2) add(`Линия: конец ${xy(m1 ? e.p1 : e.p2)} ${m1 || m2}`, ['p:' + (m1 ? e.p1 : e.p2)]);
+    } else for (const p of entPts(e)) { if (seen.has(p)) continue; seen.add(p); const m = how(p); if (m) add(`Кривая: точка ${xy(p)} ${m}`, ['p:' + p]); }
   }
-  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed && !seen.has(id)) { const m = how(id); if (m) out.push(`Точка ${xy(id)} ${m}`); }
+  for (const [id, p] of Object.entries(sk.pts)) if (p.free && !p.fixed && !seen.has(id)) { const m = how(id); if (m) add(`Точка ${xy(id)} ${m}`, ['p:' + id]); }
   return out;
 }
 function showUnderDefined() {
@@ -6948,7 +6948,10 @@ function renderSketchPanel() {
   const pmEl = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.sketch), h('span', {}, f.name), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)))));
   pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dofMain ? h('span', { class: 'note' }, `  свободно: ${a.dofMain} ${plural(a.dofMain, 'степень', 'степени', 'степеней')}`) : null),
     a && a.dofMain ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
-    ...(a && a.dofMain ? explainFree(sk, a).slice(0, 5).map((t) => h('div', { class: 'note', style: 'margin-top:4px' }, t)) : []),
+    // Each line picks out on the sketch what it is about; past the first five, a button shows the rest.
+    ...(a && a.dofMain ? (() => { const ex = explainFree(sk, a); const n = S.allFree ? ex.length : 5;
+      return [...ex.slice(0, n).map((t, i) => h('div', { class: 'note', style: 'margin-top:4px;cursor:pointer', title: 'Выделить на эскизе', onclick: () => { S.sel = new Set(ex.keys[i]); refreshSketch(); } }, t)),
+        ex.length > n ? h('button', { class: 'chip', style: 'margin-top:4px', onclick: () => { S.allFree = true; renderSide(); } }, `Ещё ${ex.length - n}`) : null]; })() : []),
     ...(a && a.redundant.size ? redundantList(sk, a) : [])));
   const topt = toolOptionsPanel(); if (topt) pmEl.append(topt);
   const sel = [...S.sel];
