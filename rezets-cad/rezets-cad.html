@@ -3366,6 +3366,11 @@ function deleteSelection() {
   const usedPts = new Set(); for (const e of Object.values(sk.ents)) entPts(e).forEach((p) => usedPts.add(p));
   for (const id of Object.keys(sk.pts)) if (!usedPts.has(id) && (delPts.has(id) || !sk.pts[id].free)) delete sk.pts[id];
   for (const c of Object.values(sk.cons)) if (delCons.has(c.id) || c.refs.some((r) => !(r in sk.pts) && !(r in sk.ents) && !(r in REF_PTS) && !(r in REF_ENTS))) delete sk.cons[c.id];
+  // Offsets whose distance dimension went with a deleted curve get it back on one of them; none is left tied to a
+  // dimension (or a tangent arc) that is no longer there, which showed nowhere and still held the copies.
+  { const orphan = Object.values(sk.cons).filter((c) => c.t === 'offset' && c.m && !sk.cons[c.m]); const remap = new Map();
+    for (const c of orphan) { if (!remap.has(c.m)) { const m = { t: 'offd', refs: [c.refs[0], c.refs[1]], v: c.v }; m.id = nid(sk); sk.cons[m.id] = m; remap.set(c.m, m.id); } c.m = remap.get(c.m); }
+    for (const c of Object.values(sk.cons)) if (c.t === 'offset') for (const k of ['c1', 'c2']) if (c[k] && !(c[k] in sk.ents)) delete c[k]; }
   releasePatternCopies(sk);
   S.sel.clear(); S.conflict = new Set(); solveSketch(sk); commitSketch();
 }
