@@ -7737,6 +7737,11 @@ async function saveStl(list, zipName) {
   const a = h('a', { href: URL.createObjectURL(blob), download: filename }); document.body.append(a); a.click(); a.remove(); return true;
 }
 $('bStl').onclick = () => {
+  // An assembly goes out as its visible components where they stand: all in one file, or one file each.
+  if (S.mode === 'asm') { const asm = S.doc; const parts = asm.comps.filter((c) => !c.hidden).map((c) => { const inf = docInfo(c.doc); if (!inf?.geo || inf.empty) return null; const g = (inf.geo.index ? inf.geo.toNonIndexed() : inf.geo.clone()); g.applyMatrix4(displayT(asm, c)); return { name: c.name.replace(/[<>]/g, '_'), geo: g }; }).filter(Boolean);
+    if (!parts.length) { toast('В сборке нет видимых компонентов с телом', 'warn'); return; } const name = activeEntry()?.name || 'Сборка';
+    const merged = () => { const n = parts.reduce((a, q) => a + q.geo.getAttribute('position').array.length, 0); const arr = new Float32Array(n); let o = 0; for (const q of parts) { arr.set(q.geo.getAttribute('position').array, o); o += q.geo.getAttribute('position').array.length; } const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(arr, 3)); return g; };
+    const r = $('bFile').getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Вся сборка одним файлом', () => saveStl([{ name, geo: merged() }], name)], ['Каждый компонент отдельным файлом', () => saveStl(parts, name + ' компоненты')]]); return; }
   if (!S.body) { toast('Сначала создайте тело', 'warn'); return; }
   const name = activeEntry()?.name || S.doc.name || 'Деталь'; const bodies = splitBodies(S.body);
   if (bodies.length < 2) { saveStl([{ name, geo: S.body }], name); return; }
