@@ -130,7 +130,7 @@ button { font: inherit; color: inherit; }
 .row:hover { background: var(--panel-2); }
 .row.sel { background: var(--accent-soft); color: var(--accent); }
 .row.origin { box-shadow: inset 3px 0 0 var(--accent); color: var(--accent); }
-.row.off { opacity: .45; }
+.row.off { opacity: .45; } .row.supp .nm { font-style: italic; text-decoration: line-through; text-decoration-thickness: 1px; }
 .row.err .nm { color: var(--bad); }
 .row.child { padding-left: 26px; }
 .row svg { width: 16px; height: 16px; flex: 0 0 16px; }
@@ -6174,7 +6174,8 @@ function checkMateRefs(asm) {
 const ASM_ORIGIN = { id: '@asm', name: 'Сборка', fixed: true, T: new THREE.Matrix4().toArray(), origin: true };
 const compOf = (asm, id) => (id === '@asm' ? ASM_ORIGIN : asm.comps.find((c) => c.id === id));
 function asmSystem(asm, extra = []) {
-  const vars = []; const comps = asm.comps; const idx = new Map();
+  // A suppressed component is out of the solve, and so are its mates.
+  const vars = []; const comps = asm.comps.filter((c) => !c.suppressed); const idx = new Map();
   comps.forEach((c) => { if (!c.fixed) { idx.set(c.id, vars.length); vars.push(c.id); } });
   const base = new Map(comps.map((c) => [c.id, poseOf(c)]));
   const pose = (c, X) => { const b = base.get(c.id); const i = idx.get(c.id); if (i === undefined) return b; const k = 6 * i;
@@ -6297,7 +6298,8 @@ function asmRefresh(reanalyze) {
   asmGroup.clear();
   allComps(asm).forEach((c) => {
     const inf = docInfo(c.doc); if (!inf || inf.empty) return; const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id));
-    if (asm.comps[i]?.hidden) return;
+    // Pattern copies keep showing when their seed is hidden (as in SolidWorks); a suppressed seed takes them along.
+    if (!c.virtual && asm.comps[i]?.hidden) return;
     const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.copy(displayT(asm, c)); g.userData.comp = c.virtual ? null : c.id;
     const sel = S.asmSel === c.id || (S.pm?.kind === 'cpat' && S.pm.pat.seeds.includes(c.id)) || (S.pm?.kind === 'explode' && S.pm.cur.comps.includes(c.id)); const hov = S.asmHover?.comp === c.id && !S.pm;
     const src = asm.comps[i] || c; const entD = docEntry(c.doc)?.data; const compCol = src.color || partColor(entD) || COMP_COLORS[i % COMP_COLORS.length];
@@ -6312,6 +6314,8 @@ function asmRefresh(reanalyze) {
   drawMatePicks(); renderSide(); setHint(); if (S.section || secGroup.children.length) applySection(); requestRender();
 }
 // A hidden component stays in the assembly (its mates, mass and BOM line too); it is only not drawn or picked.
+// A suppressed component stays in the tree but is out of the model: not drawn, not solved, not counted.
+function toggleCompSuppressed(c) { if (c.suppressed) delete c.suppressed; else { c.suppressed = true; if (S.asmSel === c.id) S.asmSel = null; } asmRefresh(true); pushUndo(); toast(c.suppressed ? `«${c.name}» погашен: его сопряжения не действуют` : `«${c.name}» высвечен`, 'info'); }
 function toggleCompHidden(c) { if (c.hidden) delete c.hidden; else { c.hidden = true; if (S.asmSel === c.id) S.asmSel = null; } asmRefresh(); pushUndo(); }
 const shadedCache = new WeakMap(); function shadedGeo(g) { if (!shadedCache.has(g)) shadedCache.set(g, toCreasedNormals(g.clone(), 30 * Math.PI / 180)); return shadedCache.get(g); }
 // Vertices and edges of components near the cursor, for mates (in component coordinates).
@@ -6320,7 +6324,7 @@ function asmEdgePick(ev) {
   const take = (o, d, tol, wq) => { if (d < tol) cands.push({ o, d, wq }); };
   const pxPerMm = view.clientHeight * camera.zoom / (camera.top - camera.bottom);
   for (const c of S.doc.comps) {
-    if (c.hidden) continue; const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
+    if (c.hidden || c.suppressed) continue; const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
     // A circle's centre is not a corner of the part: a click there means the circle (its axis), not a vertex.
     for (const v of T.verts) { const cc = T.circles.find((ci) => ci.c.distanceTo(v) < 1e-6); if (cc) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'axis', p: cc.c.toArray(), d: cc.n.toArray(), r: cc.r, edge: { t: 'circle', c: cc.c.toArray(), n: cc.n.toArray(), r: cc.r } }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); continue; } const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
     for (const ci of T.circles) {
@@ -6537,7 +6541,7 @@ function mateMessage(r) {
   return r.status === 'redundant' ? `Это сопряжение ничего не добавляет: положение уже задано${names.length ? ' (' + q + ')' : ''}` : names.length ? `Вместе с ${q} это сопряжение требует невозможного положения (элементы ${names.length > 1 ? 'тех сопряжений' : 'того сопряжения'} подсвечены красным). Погасите одно из них или выберите другие элементы` : 'Сопряжение противоречит существующим';
 }
 // One menu for a component, from the tree and from the model alike.
-const compMenu = (asm, c, e) => [['Переименовать (F2)', () => renameFeature(c, () => asmRefresh())], ['Переместить или повернуть…', () => cmdMoveComp(c)], [c.hidden ? 'Показать' : 'Скрыть', () => toggleCompHidden(c)], ['Изолировать', () => { for (const x of asm.comps) if (x !== c) x.hidden = true; delete c.hidden; asmRefresh(true); pushUndo(); toast('Видна только эта деталь. «Показать все» в меню возвращает остальные', 'info'); }], [c.clear ? 'Непрозрачный' : 'Прозрачный', () => { if (c.clear) delete c.clear; else c.clear = true; asmRefresh(true); pushUndo(); }], ...(asm.comps.some((x) => x.hidden) ? [['Показать все', () => { for (const x of asm.comps) delete x.hidden; asmRefresh(); pushUndo(); }]] : []), [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]];
+const compMenu = (asm, c, e) => [['Переименовать (F2)', () => renameFeature(c, () => asmRefresh())], ['Переместить или повернуть…', () => cmdMoveComp(c)], [c.hidden ? 'Показать' : 'Скрыть', () => toggleCompHidden(c)], [c.suppressed ? 'Высветить' : 'Погасить', () => toggleCompSuppressed(c)], ['Изолировать', () => { for (const x of asm.comps) if (x !== c) x.hidden = true; delete c.hidden; asmRefresh(true); pushUndo(); toast('Видна только эта деталь. «Показать все» в меню возвращает остальные', 'info'); }], [c.clear ? 'Непрозрачный' : 'Прозрачный', () => { if (c.clear) delete c.clear; else c.clear = true; asmRefresh(true); pushUndo(); }], ...(asm.comps.some((x) => x.hidden) ? [['Показать все', () => { for (const x of asm.comps) delete x.hidden; asmRefresh(); pushUndo(); }]] : []), [c.fixed ? 'Освободить' : 'Зафиксировать', () => { c.fixed = !c.fixed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Редактировать в сборке', () => editInContext(c.id)], ['Открыть деталь', () => switchDoc(c.doc)], ['Цвет…', () => compColorMenu(c, e.clientX, e.clientY)], null, ['Удалить', () => asmDeleteComp(c)]];
 function renderAsmTree() {
   const asm = S.doc; const an = S.asmAnalysis; side.textContent = '';
   side.append(h('div', { class: 'sec-h' }, h('span', {}, activeEntry().name), h('span', { class: 'meta' }, !asm.comps.length ? 'пустая' : an ? (an.dof ? `свободно: ${an.dof}` : 'определена') : '')));
@@ -6549,7 +6553,7 @@ function renderAsmTree() {
     const eye = h('button', { class: 'eye', title: c.hidden ? 'Показать' : 'Скрыть', 'aria-label': c.hidden ? 'Показать' : 'Скрыть', onclick: (e) => { e.stopPropagation(); toggleCompHidden(c); } }, c.hidden ? '◌' : '◉');
     // A component whose part document is gone from the project is marked, not shown as an ordinary one.
     const lostDoc = !S.project.docs.some((d) => d.id === c.doc); const noBody = !lostDoc && docInfo(c.doc)?.empty;
-    const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : '') + (c.hidden ? ' off' : '') + (lostDoc || noBody ? ' warn' : ''), tabindex: '0', role: 'treeitem', title: lostDoc ? 'Документа этой детали больше нет в проекте: компонент пустой. Удалите его или замените' : noBody ? 'У детали сейчас нет тела (ошибка в её дереве или всё откачено): компонент не виден. Откройте деталь' : (c.hidden ? 'Скрыт. ' : '') + (c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён') },
+    const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : '') + (c.hidden || c.suppressed ? ' off' : '') + (c.suppressed ? ' supp' : '') + (lostDoc || noBody ? ' warn' : ''), tabindex: '0', role: 'treeitem', title: lostDoc ? 'Документа этой детали больше нет в проекте: компонент пустой. Удалите его или замените' : noBody ? 'У детали сейчас нет тела (ошибка в её дереве или всё откачено): компонент не виден. Откройте деталь' : (c.hidden ? 'Скрыт. ' : '') + (c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён') },
       svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name), eye);
     r.onclick = () => { S.asmSel = c.id; S.mateSel = null; asmRefresh(); };
     r.ondblclick = () => switchDoc(c.doc);
@@ -6616,7 +6620,8 @@ function cpatInstances(asm, pat) {
 // Components plus pattern copies (and the pattern being edited).
 function allComps(asm) {
   const pats = [...(asm.patterns || []).filter((p) => !(S.pm?.kind === 'cpat' && S.pm.pat.id === p.id))]; if (S.pm?.kind === 'cpat') pats.push(S.pm.pat);
-  return [...asm.comps, ...pats.flatMap((p) => cpatInstances(asm, p))];
+  const off = new Set(asm.comps.filter((c) => c.suppressed).map((c) => c.id));
+  return [...asm.comps.filter((c) => !off.has(c.id)), ...pats.flatMap((p) => cpatInstances(asm, p)).filter((c) => !off.has(c.seed))];
 }
 function cmdCompPattern(type) {
   if (!S.doc.comps.length) { toast('Сборка пустая', 'warn'); return; }
@@ -6850,7 +6855,7 @@ function renderAsmPM() {
     ...[0, 1].map((i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), pm.picks[i] ? `${pickName(pm.picks[i])}, ${cname(pm.picks[i])}` : 'щёлкните грань или цилиндр', pm.picks[i] ? h('button', { class: 'x', title: 'Убрать этот выбор', 'aria-label': 'Убрать этот выбор', onclick: () => { pm.picks.splice(i, 1); pm.flip = null; pm.v = null; previewMate(); renderSide(); } }, '✕') : null)),
     pm.picks.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { pm.picks = []; pm.flip = null; pm.v = null; previewMate(); } }, 'Сбросить')) : null));
   box.append(h('details', { class: 'grp', open: pm.stdOpen || null, ontoggle: (e) => { pm.stdOpen = e.target.open; } }, h('summary', { class: 'lbl', style: 'cursor:pointer' }, 'Плоскости сборки и компонентов'),
-    ...[ASM_ORIGIN, ...asm.comps.filter((c) => !c.hidden)].map((c) => h('div', { class: 'field', style: 'gap:4px;flex-wrap:wrap' }, h('span', { style: 'flex:1 1 100%;font-size:12px' }, c.name), h('div', { class: 'chips' }, ...Object.keys(PLANES).map((k) => h('button', { class: 'chip', style: pm.picks.some((q) => q.comp === c.id && q.std === k) ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => addMatePick(stdPlaneRef(c, k)) }, PLANES[k].label)))))));
+    ...[ASM_ORIGIN, ...asm.comps.filter((c) => !c.hidden && !c.suppressed)].map((c) => h('div', { class: 'field', style: 'gap:4px;flex-wrap:wrap' }, h('span', { style: 'flex:1 1 100%;font-size:12px' }, c.name), h('div', { class: 'chips' }, ...Object.keys(PLANES).map((k) => h('button', { class: 'chip', style: pm.picks.some((q) => q.comp === c.id && q.std === k) ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => addMatePick(stdPlaneRef(c, k)) }, PLANES[k].label)))))));
   if (opts.length) {
     box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Тип'), h('div', { class: 'chips' }, opts.map((t, i) => h('button', { class: 'chip' + (pm.type === t ? ' bad' : ''), 'data-mtype': t, title: `Клавиша ${i + 1}`, style: pm.type === t ? 'border-color:var(--accent);color:var(--accent)' : '', onclick: () => { pm.type = t; pm.v = null; previewMate(); } }, h('b', {}, MATE_GLYPH[t]), MATE_NAMES[t]))),
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
@@ -8015,7 +8020,7 @@ async function saveStl(list, zipName) {
 }
 $('bStl').onclick = () => {
   // An assembly goes out as its visible components where they stand: all in one file, or one file each.
-  if (S.mode === 'asm') { const asm = S.doc; const parts = asm.comps.filter((c) => !c.hidden).map((c) => { const inf = docInfo(c.doc); if (!inf?.geo || inf.empty) return null; const g = (inf.geo.index ? inf.geo.toNonIndexed() : inf.geo.clone()); g.applyMatrix4(displayT(asm, c)); return { name: c.name.replace(/[<>]/g, '_'), geo: g }; }).filter(Boolean);
+  if (S.mode === 'asm') { const asm = S.doc; const parts = asm.comps.filter((c) => !c.hidden && !c.suppressed).map((c) => { const inf = docInfo(c.doc); if (!inf?.geo || inf.empty) return null; const g = (inf.geo.index ? inf.geo.toNonIndexed() : inf.geo.clone()); g.applyMatrix4(displayT(asm, c)); return { name: c.name.replace(/[<>]/g, '_'), geo: g }; }).filter(Boolean);
     if (!parts.length) { toast('В сборке нет видимых компонентов с телом', 'warn'); return; } const name = activeEntry()?.name || 'Сборка';
     const merged = () => { const n = parts.reduce((a, q) => a + q.geo.getAttribute('position').array.length, 0); const arr = new Float32Array(n); let o = 0; for (const q of parts) { arr.set(q.geo.getAttribute('position').array, o); o += q.geo.getAttribute('position').array.length; } const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(arr, 3)); return g; };
     const r = $('bFile').getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Вся сборка одним файлом', () => saveStl([{ name, geo: merged() }], name)], ['Каждый компонент отдельным файлом', () => saveStl(parts, name + ' компоненты')]]); return; }
