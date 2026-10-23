@@ -2902,7 +2902,9 @@ function relationOptions(sk) {
   // A relation already there, or its opposite (horizontal on a vertical line), is not offered.
   const OPP = { horizontal: 'vertical', vertical: 'horizontal', parallel: 'perpendicular', perpendicular: 'parallel', hpts: 'vpts', vpts: 'hpts' };
   const has = (t, refs) => Object.values(sk.cons).some((x) => x.t === t && x.refs.length === refs.length && x.refs.every((r) => refs.includes(r)));
-  return out.filter(([, , fn]) => { const list = fn(); return !list.length || !list.every((c) => has(c.t, c.refs) || (OPP[c.t] && has(OPP[c.t], c.refs))); });
+  // Nor one between things that cannot move (model edges, converted outlines): it would change nothing.
+  const fixedRef = (r) => { const e = sk.ents[r]; if (e) return !!e.ext || (e.t === 'line' && entPts(e).every((q) => sk.pts[q]?.fixed)); return !!sk.pts[r]?.fixed || r === 'O'; };
+  return out.filter(([, , fn]) => { const list = fn(); return !list.length || !list.every((c) => has(c.t, c.refs) || (OPP[c.t] && has(OPP[c.t], c.refs)) || c.refs.every(fixedRef)); });
 }
 function applyRelation(fn) {
   const sk = editSk(); const list = fn(); S.conflict = new Set();
