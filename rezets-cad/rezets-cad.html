@@ -477,13 +477,17 @@ const CON_GLYPH = { tanpt: '⌒', horizontal: '—', vertical: '|', hpts: '—',
 // depends on, so the Jacobian is computed locally and cheaply.
 function buildSystem(sk, opts = {}) {
   upgradeFillets(sk);
+  // Relations to model geometry that is gone (points shown lost) take no part, as SolidWorks leaves dangling relations
+  // out: one of them used to make the whole sketch unsolvable, so that no dimension in it could be changed.
+  const lostRef = (r) => sk.pts[r]?.lost || (sk.ents[r]?.ext && [sk.ents[r].p1, sk.ents[r].p2, sk.ents[r].c].some((q) => q && sk.pts[q]?.lost));
+  const dead = (c) => c.refs.some(lostRef);
   const idx = {}; const X = []; const owner = [];
   // A pattern copy or a mirror image is placed by its source point: it is computed from it, not solved for. Hundreds
   // of copied points would otherwise each add two unknowns and two equations, and the solve then takes seconds.
   // A point gets one such definition; any further one stays an ordinary equation.
   const defs = new Map(), used = new Set();
   if (!opts.noDerive) for (const cid in sk.cons) {
-    const c = sk.cons[cid]; if (c.driven || (opts.skip && opts.skip.has(cid))) continue; let q, src;
+    const c = sk.cons[cid]; if (c.driven || (opts.skip && opts.skip.has(cid)) || dead(c)) continue; let q, src;
     if (c.t === 'patpt' && sk.pats?.[c.pat]) { q = c.refs[1]; src = c.refs[0]; }
     else if (c.t === 'symmetric') { const ax = ge(sk, c.refs[2]); if (!ax) continue; const axPts = ax.t === 'ellipse' ? [ax.c, ax.p1] : [ax.p1, ax.p2]; [src, q] = sk.pts[c.refs[1]]?.fixed ? [c.refs[1], c.refs[0]] : [c.refs[0], c.refs[1]]; if (axPts.includes(q)) continue; }
     else continue;
@@ -534,7 +538,7 @@ function buildSystem(sk, opts = {}) {
   for (const cid in sk.cons) {
     const c = sk.cons[cid];
     if (opts.skip && opts.skip.has(cid)) continue;
-    if (c.driven || used.has(cid)) continue;
+    if (c.driven || used.has(cid) || dead(c)) continue;
     const r = c.refs;
     const dir = (A, B) => [B[0] - A[0], B[1] - A[1]];
     const cross = (u, v) => u[0] * v[1] - u[1] * v[0];
@@ -1444,7 +1448,8 @@ function followOtherSketches(f, features) {
   const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y);
   for (const p of pts) {
     const g = features.find((x) => x.id === p.mref.sk); const q = g && !g.suppressed && g.sk?.pts[p.mref.pt];
-    if (!q) { if (usedPt(f.sk, p.id)) lost.push(p.id); continue; }
+    if (!q) { if (usedPt(f.sk, p.id)) { lost.push(p.id); if (!p.lost) { p.lost = true; moved = true; } } continue; }
+    if (p.lost) { delete p.lost; moved = true; }
     const w = toWorld(g.plane, q.x, q.y).sub(o); const x = +w.dot(X).toFixed(6), y = +w.dot(Y).toFixed(6);
     if (Math.abs(x - p.x) > 1e-9 || Math.abs(y - p.y) > 1e-9) { p.x = x; p.y = y; moved = true; }
     if (p.mref.ent) { const ge = g.sk.ents[p.mref.ent]; if (ge?.r != null) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && Math.abs(e.r - ge.r) > 1e-9) { e.r = ge.r; moved = true; } }
@@ -1500,7 +1505,8 @@ function followSketchRefs(f, body, cyls) {
   if (moved) solveSketch(f.sk);
   // What could not be followed still hangs where the model used to be: shown in red, and reattached on request.
   const lost = pts.filter((p) => usedPt(f.sk, p.id)).filter((p) => { const w = world(p); return !verts.some((v) => v.distanceTo(w) < 1e-3) && !circles.some((c) => c.c.distanceTo(w) < 1e-3); }).map((p) => p.id);
-  if (lost.length) S.dangling.set(f.id, lost);
+  for (const p of pts) { if (lost.includes(p.id)) p.lost = true; else delete p.lost; }
+  if (lost.length) { S.dangling.set(f.id, lost); solveSketch(f.sk); }
 }
 const usedPt = (sk, id) => Object.values(sk.ents).some((e) => e.p1 === id || e.p2 === id || e.c === id || e.pts?.includes(id)) || Object.values(sk.cons).some((c) => c.refs.includes(id));
 // Puts every hanging reference point of the sketch being edited on the nearest point of the model as it is now;
@@ -1509,12 +1515,12 @@ function reattachRefs() {
   const f = editF(); const lost = S.dangling.get(f.id) || []; const R = S.refs; if (!lost.length || !R) return;
   const cands = [...R.verts.map(([x, y]) => ({ x, y, ref: () => R.mref('p', [x, y]) })), ...R.lines.flatMap(([x1, y1, x2, y2]) => [{ x: x1, y: y1 }, { x: x2, y: y2 }]).map((q) => ({ ...q, ref: () => R.mref('p', [q.x, q.y]) })), ...R.circles.map((c, i) => ({ x: c.x, y: c.y, r: c.r, ref: () => R.mref('c', i) }))];
   if (!cands.length) {
-    for (const id of lost) { const p = f.sk.pts[id]; if (!p) continue; delete p.fixed; delete p.free; delete p.mref; for (const e of Object.values(f.sk.ents)) if (e.ext && (e.p1 === id || e.p2 === id || e.c === id)) delete e.ext; }
+    for (const id of lost) { const p = f.sk.pts[id]; if (!p) continue; delete p.fixed; delete p.free; delete p.mref; delete p.lost; for (const e of Object.values(f.sk.ents)) if (e.ext && (e.p1 === id || e.p2 === id || e.c === id)) delete e.ext; }
     S.dangling.delete(f.id); commitSketch(); toast('На плоскости эскиза нет рёбер модели: висевшие точки стали обычными точками эскиза, задайте их размерами', 'warn'); return;
   }
   for (const id of lost) {
     const p = f.sk.pts[id]; if (!p) continue; let best = null; for (const q of cands) { const d = Math.hypot(q.x - p.x, q.y - p.y); if (!best || d < best.d) best = { d, q }; }
-    p.x = best.q.x; p.y = best.q.y; p.mref = best.q.ref(); if (best.q.r) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === id) e.r = best.q.r;
+    p.x = best.q.x; p.y = best.q.y; p.mref = best.q.ref(); delete p.lost; if (best.q.r) for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === id) e.r = best.q.r;
   }
   S.dangling.delete(f.id); commitSketch(); toast(`Привязки к модели обновлены: ${lost.length}`, 'info');
 }
