@@ -1883,6 +1883,18 @@ function buildTool(f, body, cyls = []) {
     if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = reach ? -reach[0] : -d; z1 = reach ? reach[1] : d; }
     // A cut drawn on the walls of the body (the same sketch as the boss) leaves coplanar faces the
     // boolean cannot resolve; the tool is widened by 0.2 µm so it clears those walls instead.
+    // «Перевернуть сторону для резания»: the material outside the profile goes, inside it stays. The tool is a frame
+    // around the whole part (seen in the sketch plane) with the profile as its hole, and the profile's holes as islands.
+    if (f.mode === 'cut' && f.flipSide) {
+      const inv = M.clone().invert(); const P = new THREE.Vector3(); let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+      const add = (u, v) => { u0 = Math.min(u0, u); v0 = Math.min(v0, v); u1 = Math.max(u1, u); v1 = Math.max(v1, v); };
+      if (body) { const pos = body.getAttribute('position'); for (let i = 0; i < pos.count; i++) { P.fromBufferAttribute(pos, i).applyMatrix4(inv); add(P.x, P.y); } }
+      for (const l of loops) for (const [u, v] of l.pts) add(u, v);
+      const m = Math.max(1, (u1 - u0 + v1 - v0) * 0.05); const ar = (r) => { let a = 0; for (let i = 0; i < r.length; i++) { const q = r[(i + 1) % r.length]; a += r[i][0] * q[1] - q[0] * r[i][1]; } return a; };
+      const sgn = Math.sign(ar(loops[0].pts)) || 1; const orient = (r, want) => (Math.sign(ar(r)) === want ? r : r.slice().reverse());
+      const frame = orient([[u0 - m, v0 - m], [u1 + m, v0 - m], [u1 + m, v1 + m], [u0 - m, v1 + m]], sgn);
+      loops = [{ pts: frame, holes: loops.map((l) => orient(l.pts, -sgn)) }, ...loops.flatMap((l) => l.holes.map((hh) => ({ pts: orient(hh, sgn), holes: [] })))];
+    }
     if (f.mode === 'cut' && body) loops = loops.map((l) => ({ ...l, pts: offsetRing(l.pts, 2e-4), holes: l.holes.map((hh) => offsetRing(hh, 2e-4)) }));
     if (f.draft > 0) {
       const tn = Math.tan(f.draft * Math.PI / 180) * (f.draftOut ? 1 : -1); const zs = z0 < -1e-3 && z1 > 1e-3 ? [z0, 0, z1] : [z0, z1];
@@ -7286,7 +7298,8 @@ function renderPM() {
       f.end === 'face' ? numField('Не доходя', 'pmOffset', f.offset || 0, (v) => { f.offset = v; schedulePreview(); }) : null,
       f.end === 'blind' || f.end === 'mid' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
       f.end !== 'mid' && f.end !== 'face' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление') : null,
-      f.end === 'through' && f.mode === 'cut' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.both, onchange: (e) => { f.both = e.target.checked; schedulePreview(); } }), 'В обе стороны') : null),
+      f.end === 'through' && f.mode === 'cut' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.both, onchange: (e) => { f.both = e.target.checked; schedulePreview(); } }), 'В обе стороны') : null,
+      f.mode === 'cut' ? h('label', { class: 'chk', title: 'Удаляется материал снаружи контура, а внутри остаётся' }, h('input', { type: 'checkbox', checked: !!f.flipSide, onchange: (e) => { f.flipSide = e.target.checked; schedulePreview(); } }), 'Перевернуть сторону для резания') : null),
       h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.draft > 0, onchange: (e) => { f.draft = e.target.checked ? 3 : 0; refresh(); } }), 'Уклон'),
         f.draft > 0 ? numField('Угол уклона', 'pmDraft', f.draft, (v) => { f.draft = Math.min(45, v); schedulePreview(); }, '°') : null,
         f.draft > 0 ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.draftOut, onchange: (e) => { f.draftOut = e.target.checked; schedulePreview(); } }), 'Уклон наружу') : null));
