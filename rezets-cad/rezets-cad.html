@@ -1679,7 +1679,9 @@ function computeBody(features) {
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
     if (f.type === 'sketch' && !f.suppressed && !body) S.dangling.delete(f.id);
     if (f.type === 'sketch' && !f.suppressed && !body) followOtherSketches(f, features);
-    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.plane.face && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
+    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
+    // A sketch on a face of a body that is no longer there (its boss deleted) hangs in the air just the same.
+    else if (f.type === 'sketch' && !body && !f.suppressed && f.plane?.face) S.offFace.add(f.id);
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
     // A circular pattern's axis taken from a hole or boss stays on that hole when a dimension moves it.
