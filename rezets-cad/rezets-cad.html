@@ -1935,11 +1935,13 @@ new ResizeObserver(resize).observe(view);
 const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); refreshAll(); });
 new MutationObserver(() => { readColors(); refreshAll(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
+const planeHalf = () => { const g = S.mode === 'part' ? S.body : null; if (!g) return 60; g.computeBoundingBox(); const r = g.boundingBox.getBoundingSphere(new THREE.Sphere()).radius; return Math.min(5000, Math.max(1, r * 0.7)); };
 function buildPlanes() {
   groups.planes.clear();
   for (const [k, p] of Object.entries(PLANES)) {
     const sel = S.selectedTree === 'plane:' + k; const hov = S.hoverPlane === k;
-    const M = planeMatrix(p); const s = 60;
+    // Planes are sized to the part (60 mm when there is none), so a 2 mm part is not lost under them nor a 2 m one cut short.
+    const M = planeMatrix(p); const s = planeHalf();
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2 * s, 2 * s), new THREE.MeshBasicMaterial({ color: sel ? colors['geo-sel'] : colors.accent, transparent: true, opacity: sel ? 0.16 : hov ? 0.12 : 0.05, side: THREE.DoubleSide, depthWrite: false }));
     mesh.applyMatrix4(M); mesh.userData.plane = k; mesh.renderOrder = 1; groups.planes.add(mesh);
     const c = [[-s, -s], [s, -s], [s, s], [-s, s]].map(([u, v]) => new THREE.Vector3(u, v, 0).applyMatrix4(M));
@@ -2099,7 +2101,7 @@ function fitView() {
   const ctr = box.getCenter(new THREE.Vector3()); const sphere = box.getBoundingSphere(new THREE.Sphere());
   const off = camera.position.clone().sub(controls.target); controls.target.copy(ctr); camera.position.copy(ctr).add(off);
   const half = 160; const asp = (camera.right - camera.left) / (camera.top - camera.bottom);
-  camera.zoom = Math.max(0.05, half * Math.min(1, asp) / (sphere.radius * 1.25 + 1)); camera.updateProjectionMatrix(); controls.update(); requestRender();
+  camera.zoom = Math.max(0.05, half * Math.min(1, asp) / (sphere.radius * 1.25 + Math.min(1, sphere.radius * 0.1 + 1e-3))); camera.updateProjectionMatrix(); controls.update(); requestRender();
 }
 // All planes on or off at once (each reference plane also keeps its own Show/Hide).
 function togglePlanes() { S.showPlanes = S.showPlanes === false; buildPlanes(); requestRender(); toast(S.showPlanes ? 'Плоскости показаны' : 'Плоскости скрыты', 'info'); }
