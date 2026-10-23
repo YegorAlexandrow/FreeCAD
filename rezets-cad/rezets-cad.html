@@ -100,7 +100,7 @@ button { font: inherit; color: inherit; }
 #status { grid-area: status; background: var(--panel); border-top: 1px solid var(--line); display: flex; gap: 16px; align-items: center; padding: 4px 12px; color: var(--fg-2); min-width: 0; overflow: hidden; white-space: nowrap; }
 #status .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 .pill { border-radius: 999px; padding: 1px 9px; font-weight: 500; font-size: 12px; border: 1px solid currentColor; }
-.pill.under { color: var(--geo-under); } .pill.full { color: var(--good); } .pill.over { color: var(--bad); }
+.pill.under { color: var(--geo-under); } .pill.empty { color: var(--dim); } .pill.full { color: var(--good); } .pill.over { color: var(--bad); }
 #hint { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
 /* Tree */
@@ -2153,7 +2153,18 @@ function reportAdd(r, c) {
 // ---------------- sketch analysis and colors ----------------
 function analyze() {
   const sk = editSk(); if (!sk) { S.analysis = null; return; }
-  S.analysis = analyzeSketch(sk);
+  S.analysis = analyzeSketch(sk); renderSkState();
+}
+// One wording for the panel and the status bar; a sketch with nothing drawn is empty, not fully defined.
+function sketchState(sk, a) {
+  if (!Object.values(sk.ents).some((e) => !e.ext)) return { state: 'empty', text: 'Пустой эскиз' };
+  const state = !a ? 'under' : a.redundant.size ? 'over' : a.dofMain === 0 ? 'full' : 'under';
+  return { state, text: { under: 'Недоопределён', full: 'Полностью определён', over: 'Переопределён' }[state] };
+}
+function renderSkState() {
+  const st = $('stState'); st.textContent = '';
+  if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
+  if (S.editing && S.analysis) { const a = S.analysis; const { state, text } = sketchState(editSk(), a); st.append(h('span', { class: 'pill ' + state }, text + (state === 'under' && a.dofMain ? ' · ' + a.dofMain : ''))); }
 }
 function entState(sk, e) {
   if (e.ext) return 'ext';
@@ -2600,7 +2611,7 @@ function setTool(t) {
   // A in the middle of a line chain goes on with an arc tangent to the last line, as SolidWorks does.
   const chain = S.editing && S.tool === 'line' && t === 'arc' && S.draw?.stage === 1 && S.draw.start ? S.draw : null;
   const tanLine = chain && Object.values(editSk().ents).find((e) => e.t === 'line' && e.p2 === chain.start);
-  S.tool = t; S.toolFillets = []; S.filletFirst = null; S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
+  S.tool = t; S.toolFillets = []; S.filletFirst = null; S.draw = null; S.skOp = null; S.dimPick = preDim.length ? preDim : null; S.dimPre = preDim.length > 0; overlay.classList.toggle('tooling', t !== 'select' && t !== 'dim'); overlay.classList.toggle('dimtool', t === 'dim'); S.dimPreview = null; S.hover = null;
   if (tanLine) S.draw = { stage: 'tan', start: chain.start, first: chain.first, tan: tanLine.id, newPts: [chain.start], nid0: chain.nid0 };
   canvas.style.cursor = t === 'select' ? 'default' : 'crosshair';
   renderTools(); updateSketchVisuals(); setHint(); if (S.editing) renderSide();
@@ -2732,6 +2743,8 @@ function dimClick(m) {
   let p = null;
   if (picks.length < 2) p = pick(m, { tol: picks.length ? 6 : 9, noAxes: picks.length > 0 && !firstIsPoint });
   if (p && p.key.startsWith('r:')) p.key = materialize(sk, p.key);
+  // The first click on an item that was already picked before the tool is taking it, not placing the dimension on it.
+  const pre = S.dimPre; S.dimPre = false; if (pre && p && p.key === first && picks.length === 1) { refreshSketch(); setHint('Щёлкните, где поставить размер, или выберите второй объект'); return; }
   if (p && p.key !== first) {
     picks.push(p.key); S.sel = new Set(picks);
     const isPt = p.key.startsWith('p:') || p.key === 'e:H' || p.key === 'e:V';
@@ -6803,8 +6816,7 @@ function redundantList(sk, a) {
 }
 function renderSketchPanel() {
   side.textContent = ''; const f = editF(); const sk = f.sk; const a = S.analysis;
-  const state = !a ? 'under' : a.redundant.size ? 'over' : a.dofMain === 0 ? 'full' : 'under';
-  const stateText = { under: 'Недоопределён', full: 'Полностью определён', over: 'Переопределён' }[state];
+  const { state, text: stateText } = sketchState(sk, a);
   const pmEl = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.sketch), h('span', {}, f.name), h('div', { class: 'pm-act' }, h('button', { class: 'ok', title: 'Выйти из эскиза', onclick: exitSketch }, svg(ICON.exit)))));
   pmEl.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Состояние'), h('div', {}, h('span', { class: 'pill ' + state }, stateText), a && a.dofMain ? h('span', { class: 'note' }, `  свободно: ${a.dofMain} ${plural(a.dofMain, 'степень', 'степени', 'степеней')}`) : null),
     a && a.dofMain ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: showUnderDefined }, 'Показать, что не определено')) : null,
@@ -6890,9 +6902,7 @@ function setHint(text) {
   })[S.tool] : S.mode === 'asm' ? (S.pm?.kind === 'mate' ? (S.pm.picks.length < 2 ? 'Сопряжение: щёлкните грань или цилиндр на двух разных компонентах' : 'Выберите тип сопряжения и нажмите Enter') : 'Тяните компонент мышью, Shift+тянуть: вращать. Пустое место: вращение вида')
     : S.pm?.kind === 'pickPlane' ? 'Выберите плоскость или плоскую грань' : S.pm ? 'Настройте параметры, затем OK' : 'Левая кнопка: вращение, правая: сдвиг, колёсико: масштаб. Двойной щелчок по элементу дерева открывает его');
   $('hint').textContent = t;
-  const st = $('stState'); st.textContent = '';
-  if (S.mode === 'asm' && S.asmAnalysis) { const a = S.asmAnalysis; const state = a.redundant.size ? 'over' : a.dof === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределена', full: 'Определена', over: 'Переопределена' }[state] + (a.dof ? ' · ' + a.dof : ''))); }
-  if (S.editing && S.analysis) { const a = S.analysis; const state = a.redundant.size ? 'over' : a.dofMain === 0 ? 'full' : 'under'; st.append(h('span', { class: 'pill ' + state }, { under: 'Недоопределён', full: 'Определён', over: 'Переопределён' }[state] + (a.dofMain ? ' · ' + a.dofMain : ''))); }
+  renderSkState();
 }
 // Menu
 const menu = $('menu');
