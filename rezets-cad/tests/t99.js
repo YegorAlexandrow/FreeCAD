@@ -4,7 +4,7 @@ const open = require('./harness.js');
 (async () => { const { b, p, logs } = await open();
   console.log(JSON.stringify(await p.evaluate(() => { const R = window.__rezets; const S = R.S;
     R.loadDoc({ name: 'Т', nid: 10, rollback: null, features: [] });
-    const fillet = () => [...document.querySelectorAll('button.tool')].find((x) => x.textContent.startsWith('Скругление'))?.disabled;
+    const fillet = () => [...document.querySelectorAll('button.tool')].find((x) => x.textContent.startsWith('Скругление'))?.getAttribute('aria-disabled') === 'true';
     const out = { filletOffEmpty: fillet() };
     R.cmdFeature('extrude', 'add'); out.pm1 = S.pm?.kind;
     document.querySelector('.pm .ghost-btn').click(); out.forgot = S.afterSketch;
