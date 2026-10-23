@@ -417,6 +417,7 @@ const clone = (o) => JSON.parse(JSON.stringify(o));
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 // Arithmetic with the part's variables and a few functions (angles in degrees).
 const EXPR_FN = { sqrt: 'Math.sqrt', abs: 'Math.abs', min: 'Math.min', max: 'Math.max', round: 'Math.round', pi: 'Math.PI', sin: '__sin', cos: '__cos', tan: '__tan' };
+const MAX_COPIES = 500;
 const IDENT_RE = /[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*/g;
 const hasIdent = (s) => /[A-Za-zА-Яа-яЁё_]/.test(String(s));
 function evalWith(str, vals) {
@@ -4173,7 +4174,7 @@ function applyVars(doc = S.doc) {
     delete f.varErr;
     if (f.exprs) for (const [k, ex] of Object.entries(f.exprs)) { const v = evalWith(ex, vals);
       if (!Number.isFinite(v)) { errs.push(`${f.name}: ${ex}`); f.varErr = `Не вычисляется ${ex}: ${badVarReason(ex, doc)}`; continue; }
-      const why = k === 'fromOffset' ? null : k === 'offset' ? (v < 0 ? 'нужно не меньше 0' : null) : !(v > 0) ? 'нужно больше 0' : k === 'angle' && v > 360 ? 'нужно не больше 360°' : k === 'draft' && v >= 90 ? 'уклон должен быть меньше 90°' : null;
+      const why = k === 'fromOffset' ? null : (k === 'n' || k === 'n2') && v > MAX_COPIES ? `нужно не больше ${MAX_COPIES}` : k === 'offset' ? (v < 0 ? 'нужно не меньше 0' : null) : !(v > 0) ? 'нужно больше 0' : k === 'angle' && v > 360 ? 'нужно не больше 360°' : k === 'draft' && v >= 90 ? 'уклон должен быть меньше 90°' : null;
       if (why) { f.varErr = `${ex} = ${fmt(v, 4)}, ${why}`; continue; }
       f[k] = k === 'n' || k === 'n2' ? Math.max(k === 'n2' ? 1 : 2, Math.round(v)) : v; }
     if (f.type === 'sketch') {
@@ -6830,7 +6831,10 @@ const numField = (label, id, val, onset, unit = 'мм') => {
   const inp = h('input', { type: 'text', id, value: ex ?? fmt(val, 4), inputmode: 'decimal', title: ex ? `${ex} = ${fmt(val, 4)}` : '' });
   // onset may re-render the panel, and removing the focused input fires 'change' again with the old text.
   let busy = false; const apply = () => { if (busy) return; busy = true; try { apply0(); } finally { busy = false; } };
-  const apply0 = () => { const str = inp.value; const v = evalExpr(str); if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal' || id === 'pmFromOff')) {
+  const apply0 = () => { const str = inp.value; const v = evalExpr(str);
+    // Each copy is a boolean on the whole part: thousands would freeze the page with no way to stop it.
+    if ((id === 'pmCount' || id === 'pmCount2') && v > MAX_COPIES) { inp.value = ex ?? fmt(val, 4); toast(`Не больше ${MAX_COPIES} копий в одном массиве`, 'warn'); return; }
+    if (Number.isFinite(v) && (v > 0 || id === 'pmOffset' && v >= 0 || id === 'mateVal' || id === 'pmFromOff')) {
     if (obj) { if (hasIdent(str)) obj.exprs = { ...obj.exprs, [key]: str.trim() }; else if (obj.exprs) { delete obj.exprs[key]; if (!Object.keys(obj.exprs).length) delete obj.exprs; } }
     const shown = onset(v); inp.value = obj?.exprs?.[key] ?? fmt(shown ?? v, 4); } else { inp.value = ex ?? fmt(val, 4); toast(hasIdent(str) ? 'Неизвестная переменная или ошибка в выражении' : 'Введите положительное число', 'warn'); } };
   inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply(); okPM(); } });
