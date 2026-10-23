@@ -3779,6 +3779,7 @@ function toolOptionsPanel() {
   // The radius is for the next fillets and, as in SolidWorks, for the ones already put with the tool this time.
   if (S.tool === 'sfillet') { const sk = editSk(); const made = () => (S.toolFillets || []).map((id) => sk?.ents[id]).filter(Boolean);
     return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности')); }
+  if (S.tool === 'slot') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Паз'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.slotDims, onchange: (e) => { o.slotDims = e.target.checked; } }), 'Проставить размеры'));
   if (S.tool === 'rect') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Прямоугольник'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.rectDiag, onchange: (e) => { o.rectDiag = e.target.checked; } }), 'Вспомогательные диагонали'));
   if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true));
   return null;
@@ -3793,6 +3794,8 @@ function makeSlot(sk, c1, c2, r) {
   const arc2 = ent({ t: 'arc', c: c2, p1: B2, p2: A2, r }), arc1 = ent({ t: 'arc', c: c1, p1: A1, p2: B1, r });
   const axis = ent({ t: 'line', p1: c1, p2: c2, constr: true });
   addRelations(sk, [{ t: 'tangent', refs: [top, arc1] }, { t: 'tangent', refs: [top, arc2] }, { t: 'tangent', refs: [bot, arc1] }, { t: 'tangent', refs: [bot, arc2] }, { t: 'equal', refs: [arc1, arc2] }]);
+  // «Проставить размеры»: the centre distance and the width, as SolidWorks' «Add dimensions» on a slot.
+  if (S.toolOpt.slotDims) addRelations(sk, [{ t: 'dist', refs: [c1, c2], v: l, pos: [(P1.x + P2.x) / 2 + nx * (r + 6), (P1.y + P2.y) / 2 + ny * (r + 6)] }, { t: 'diam', refs: [arc2], v: 2 * r, pos: [P2.x + ux * (r + 6), P2.y + uy * (r + 6)] }]);
   void axis;
 }
 // Regular polygon on a construction circle: vertices on the circle, sides equal.
