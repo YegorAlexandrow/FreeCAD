@@ -16,5 +16,5 @@ const open = require('./harness.js'); const fs = require('fs');
     R.loadDoc({ name: 'Т', nid: 10, rollback: null, features: [{ id: 'f1', type: 'sketch', name: 'Эскиз1', plane: R.PLANES.front, sk }, { id: 'f2', type: 'extrude', name: 'Бобышка1', sketch: 'f1', mode: 'add', end: 'blind', depth: 10, dir: 1, regions: null, draft: 40 }] });
     out.collapse = JSON.stringify(S.errors).slice(0, 160);
     return out; }, doc)));
-  console.log('expect plain removed = area of selected regions x 3.6, no errors; draft15 removed somewhat less (walls taper 0.96 mm), closed (bad 0), no errors; draft44 on small regions: an error about the draft closing the profile (or none if they fit); collapse: the error');
+  console.log('expect plain (checkerboard through: pieces touch at corners) refused with the zero-thickness error, removed 0; draft15 also refused (the pockets still meet at their top corners): the corner error, removed 0; draft44 on small regions: an error about the draft closing the profile (or none if they fit); collapse: the error');
   console.log(logs.join('\n')); await b.close(); })();
