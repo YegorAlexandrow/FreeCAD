@@ -427,6 +427,8 @@ function evalWith(str, vals) {
   // A comma is the decimal mark (2,5) except inside a function call, where it separates the arguments (max(10,20)).
   { const st = []; let o = ''; for (let i = 0; i < s.length; i++) { const ch = s[i]; if (ch === '(') st.push(/[A-Za-zА-Яа-яЁё_0-9]/.test(s[i - 1] || '') ? 'fn' : 'grp'); else if (ch === ')') st.pop();
     if (ch === ',' && st[st.length - 1] !== 'fn') { o += /\d/.test(s[i - 1] || '') ? '.' : /\d/.test(s[i + 1] || '') ? '0.' : ','; continue; } o += ch; } s = o; }
+  // Units typed after a number are taken (25 мм, 2.5 см, 1 in, 90°); the model is in millimetres and degrees.
+  s = s.replace(/(\d(?:\.\d*)?)(?:\s*(мм|mm|см|cm|дюйма|дюймов|дюйм|in|")|(м|m|°|deg))(?![A-Za-zА-Яа-яЁё_0-9])/g, (w, n, u1, u2) => { const u = u1 || u2; const k = { см: 10, cm: 10, м: 1000, m: 1000, дюйм: 25.4, дюйма: 25.4, дюймов: 25.4, in: 25.4, '"': 25.4 }[u] || 1; return k === 1 ? n : `(${n}*${k})`; });
   s = s.replace(/(\d)[.,](?=\s*$)/, '$1').replace(IDENT_RE, (w) => { if (w in vals) return '(' + vals[w] + ')'; if (w in EXPR_FN) return EXPR_FN[w]; bad = true; return w; });
   if (bad) return NaN; const chk = s.replace(/Math\.[a-zA-Z]+|__sin|__cos|__tan/g, ''); if (!/^[0-9+\-*/().,\seE]*$/.test(chk)) return NaN;
   try { const d = Math.PI / 180; const v = Function('__sin', '__cos', '__tan', '"use strict";return (' + s + ')')((x) => Math.sin(x * d), (x) => Math.cos(x * d), (x) => Math.tan(x * d)); return Number.isFinite(v) ? v : NaN; } catch { return NaN; }
