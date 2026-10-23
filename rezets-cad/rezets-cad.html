@@ -4181,7 +4181,15 @@ function drawingSvg(drw, L) {
   parts.push(`<rect x="${fx0}" y="${fy0}" width="${fx1 - fx0}" height="${fy1 - fy0}" fill="none" stroke="#000" stroke-width="0.7"/>`);
   for (const [k, v] of Object.entries(L.views)) {
     if (!L.pos[k]) continue; const map = (u, vv) => [L.pos[k].x + (u - v.box.umin) * L.scale, L.pos[k].y + (v.box.vmax - vv) * L.scale];
-    const path = (segs) => segs.map((s) => { const a = map(s[0], s[1]), b = map(s[2], s[3]); return `M${a[0].toFixed(3)} ${a[1].toFixed(3)}L${b[0].toFixed(3)} ${b[1].toFixed(3)}`; }).join('');
+    // Pieces that meet end to end are written as one polyline: a dashed line restarts its pattern at every «M», and
+    // a hidden curve made of 0.3 mm pieces would come out solid.
+    const path = (segs) => { const key = (x, y) => `${Math.round(x * 1e3)},${Math.round(y * 1e3)}`; const at = new Map(); const used = new Uint8Array(segs.length);
+      segs.forEach((q, i) => { for (const k of [key(q[0], q[1]), key(q[2], q[3])]) { if (!at.has(k)) at.set(k, []); at.get(k).push(i); } });
+      const next = (k) => (at.get(k) || []).find((j) => !used[j]); const P = (x, y) => { const a = map(x, y); return `${a[0].toFixed(3)} ${a[1].toFixed(3)}`; }; let out = '';
+      for (let i = 0; i < segs.length; i++) { if (used[i]) continue; used[i] = 1; let pts = [[segs[i][0], segs[i][1]], [segs[i][2], segs[i][3]]];
+        for (const dir of [1, 0]) { for (;;) { const end = dir ? pts[pts.length - 1] : pts[0]; const j = next(key(end[0], end[1])); if (j == null) break; used[j] = 1; const q = segs[j]; const far = key(q[0], q[1]) === key(end[0], end[1]) ? [q[2], q[3]] : [q[0], q[1]]; if (dir) pts.push(far); else pts.unshift(far); } }
+        out += 'M' + pts.map(([x, y]) => P(x, y)).join('L'); }
+      return out; };
     if (drw.hidden && k !== 'iso' && v.hid.length) parts.push(`<path d="${path(v.hid)}" fill="none" stroke="#000" stroke-width="0.25" stroke-dasharray="2 1"/>`);
     parts.push(`<path d="${path(v.vis)}" fill="none" stroke="#000" stroke-width="0.5" stroke-linecap="round"/>`);
     // Views in projection relation carry no label (ГОСТ 2.305).
