@@ -5437,6 +5437,12 @@ function drawPatternRefs() {
     if (spec.edge) { const segs = edgeSegs(spec.edge); const l2 = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(col, 3, { depthTest: false })); l2.renderOrder = 21; groups.measure.add(l2); } };
   if (f.type === 'lpattern') { show(f.dir, colors['geo-sel']); if (f.dir2) show(f.dir2, colors['geo-ext']); }
   if (f.type === 'cpattern') show(f.axis, colors['geo-sel']);
+  // The mirror plane is drawn as a frame across the part, so it is clear what the copy is mirrored about.
+  if (f.type === 'mirror' && S.body && !(f.planeGuessed && f.planeGuessed === f.plane)) { let pl = null; try { pl = mirrorPlane(f, S.doc.features); } catch { /* the error shows in the panel */ }
+    if (pl) { S.body.computeBoundingBox(); const bb = S.body.boundingBox; const r = bb.getSize(new THREE.Vector3()).length() * 0.6 + 5; const n = V3(pl.n).normalize(); const o = V3(pl.o); const c = bb.getCenter(new THREE.Vector3()); const ctr = c.clone().addScaledVector(n, -c.clone().sub(o).dot(n));
+      const [u, w] = perpBasis(n); const P = (a, b2) => ctr.clone().addScaledVector(u, a * r).addScaledVector(w, b2 * r); const q = [P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)];
+      const l = segLines(q.flatMap((v, i) => [...v.toArray(), ...q[(i + 1) % 4].toArray()]), lineMat(colors['geo-sel'], 1.6, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l);
+      const g = new THREE.BufferGeometry().setFromPoints([q[0], q[1], q[2], q[0], q[2], q[3]]); const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: colors['geo-sel'], transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false })); m.renderOrder = 19; groups.measure.add(m); } }
   if (pm.hoverEdge) { const segs = edgeSegs(pm.hoverEdge); const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(colors['geo-hover'], 3, { depthTest: false })); l.renderOrder = 22; groups.measure.add(l); }
   requestRender();
 }
