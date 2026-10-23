@@ -5320,7 +5320,9 @@ function patternMatrices(f, features) {
     }
   } else if (f.type === 'cpattern') {
     const A = axisOf(f.axis); if (!A) throw new Error('Выберите ось');
-    const n = Math.max(1, f.n | 0); const total = Math.min(360, f.angle || 360); const step = (total >= 360 - 1e-9 ? 360 / n : total / Math.max(1, n - 1)) * Math.PI / 180 * (f.flip ? -1 : 1);
+    const n = Math.max(1, f.n | 0); const total = Math.min(360, f.angle || 360);
+    // «Равный шаг» off: the angle is the step between neighbouring copies (SolidWorks' default when it is unticked).
+    const step = (f.angleIsStep ? total : total >= 360 - 1e-9 ? 360 / n : total / Math.max(1, n - 1)) * Math.PI / 180 * (f.flip ? -1 : 1);
     for (let k = 1; k < n; k++) { const R = new THREE.Matrix4().makeRotationAxis(A.d, step * k); out.push(new THREE.Matrix4().makeTranslation(A.p.x, A.p.y, A.p.z).multiply(R).multiply(new THREE.Matrix4().makeTranslation(-A.p.x, -A.p.y, -A.p.z))); }
   } else {
     const pl = mirrorPlane(f, features); const n = V3(pl.n).normalize(); const o = V3(pl.o); const d = n.dot(o);
@@ -5517,7 +5519,8 @@ function renderPatternPM() {
   } else if (f.type === 'cpattern') {
     body.append(pickRow('Ось', 'axis', f.axis, (v) => { f.axis = v; }));
     body.append(h('div', { class: 'grp' }, numField('Количество', 'pmCount', f.n, (v) => { f.n = Math.max(2, Math.round(v)); schedulePreview(); }, 'шт'), numField('Угол', 'pmAngle', f.angle, (v) => { f.angle = Math.min(360, v); schedulePreview(); }, '°'),
-      h('div', { class: 'note' }, f.angle >= 360 ? 'Копии равномерно по кругу' : 'Копии равномерно в пределах угла'),
+      h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !f.angleIsStep, onchange: (e) => { if (e.target.checked) delete f.angleIsStep; else f.angleIsStep = true; renderSide(); schedulePreview(); } }), 'Равный шаг'),
+      h('div', { class: 'note' }, f.angleIsStep ? 'Угол между соседними копиями' : f.angle >= 360 ? 'Копии равномерно по кругу' : 'Копии равномерно в пределах угла'),
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (e) => { f.flip = e.target.checked; schedulePreview(); } }), 'Обратное направление')));
   } else {
     const b = f.plane; const name = b.std ? PLANES[b.std].label : b.plane ? featById(b.plane)?.name || '?' : 'Грань детали';
