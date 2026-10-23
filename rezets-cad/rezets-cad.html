@@ -178,7 +178,11 @@ button { font: inherit; color: inherit; }
 .rel.bad { color: var(--bad); }
 #relbar { position: absolute; display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); z-index: 5; }
 #relbar button { display: flex; align-items: center; gap: 4px; border: none; background: none; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 12px; color: var(--fg); white-space: nowrap; }
-#relbar button:hover { background: var(--accent-soft); color: var(--accent); }
+#relbar button:hover, #mateBar button:hover { background: var(--accent-soft); color: var(--accent); }
+#mateBar { position: absolute; display: flex; gap: 2px; padding: 3px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 18px rgb(0 0 0 / .16); z-index: 5; }
+#mateBar button { border: none; background: none; border-radius: 5px; padding: 4px 7px; cursor: pointer; font-size: 14px; color: var(--fg); min-width: 28px; }
+#mateBar button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+#mateBar .ok { color: var(--good); } #mateBar .no { color: var(--bad); }
 #relbar b { font-size: 13px; min-width: 12px; text-align: center; }
 kbd.k { font-family: var(--font-num); font-size: 10px; color: var(--fg-2); border: 1px solid var(--line); border-radius: 3px; padding: 0 3px; margin-left: 2px; }
 .measure-main { font-family: var(--font-num); font-size: 22px; font-weight: 500; color: var(--fg); font-variant-numeric: tabular-nums; }
@@ -326,6 +330,7 @@ label.chk { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     <div id="overlay"></div>
     <div id="editLayer"></div>
     <div id="relbar" hidden></div>
+    <div id="mateBar" hidden></div>
     <div id="viewbar">
       <button data-view="front">Спереди</button><button data-view="top">Сверху</button><button data-view="right">Справа</button><button data-view="iso">Изометрия</button><button data-view="normal">Перпендикулярно</button><button data-view="fit">Вписать (F)</button><button data-view="section" id="bSection" title="Вид в разрезе">Разрез</button>
     </div>
@@ -3951,6 +3956,7 @@ function openPM(pm) {
   }
 }
 function closePM(silent) {
+  { const mb = $('mateBar'); if (mb) mb.hidden = true; }
   if (S.mode === 'asm') { const had = S.pm; S.pm = null; if (had?.before) restorePoses(S.doc, had.before); if (had?.edit && !had.done) S.doc.mates.splice(had.editAt, 0, had.edit); groups.measure.clear(); asmRefresh(true); renderCorner(); return; }
   const had = S.pm; S.pm = null; if (!silent && had?.kind === 'pickPlane') { S.afterSketch = null; S.sketchTool = null; } groups.measure.clear(); S.hoverRegion = null; groups.regions.clear(); if (!silent && had) rebuild(); renderSide(); renderCorner(); renderTools(); setHint(); requestRender(); }
 function okPM() {
@@ -6655,6 +6661,15 @@ function renderAsmTree() {
   side.append(tree);
 }
 // Distance and angle mates are edited in place, like a dimension.
+function renderMateBar(pm, opts, a, b) {
+  const bar = $('mateBar'); bar.textContent = ''; bar.hidden = !(pm.kind === 'mate' && pm.picks.length === 2 && opts.length && pm.at); if (bar.hidden) return;
+  const go = (sel) => { const el = $('side').querySelector(sel); el?.click(); };
+  for (const t of opts) bar.append(h('button', { 'aria-pressed': String(pm.type === t), title: MATE_NAMES[t], onclick: () => go(`[data-mtype="${t}"]`) }, MATE_GLYPH[t]));
+  if (canReverse(a, b, pm.type)) bar.append(h('button', { title: 'Реверс', onclick: () => go('[data-flip]') }, '⇄'));
+  bar.append(h('button', { class: 'ok', title: 'OK (Enter)', onclick: () => okMate() }, '✓'), h('button', { class: 'no', title: 'Отмена (Esc)', onclick: () => closePM() }, '✕'));
+  const r = view.getBoundingClientRect(); const w = bar.offsetWidth || 200, hh = bar.offsetHeight || 34;
+  bar.style.left = Math.max(4, Math.min(pm.at.x - r.left + 18, r.width - w - 4)) + 'px'; bar.style.top = Math.max(4, Math.min(pm.at.y - r.top + 18, r.height - hh - 4)) + 'px';
+}
 function editMateValue(m, row) {
   if (m.v == null) return; const asm = S.doc;
   const inp = h('input', { type: 'text', value: fmt(m.v), class: 'inline-val', 'aria-label': 'Значение' }); row.querySelector('.meta')?.replaceWith(inp); inp.focus(); inp.select();
@@ -6935,6 +6950,8 @@ function renderAsmPM() {
   }
   if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result)),
     pm.suggest ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const i = pm.picks.findIndex((r) => r.comp === pm.suggest.comp); if (i >= 0) pm.picks[i] = pm.suggest; pm.suggest = null; previewMate(); } }, 'Взять подсвеченную')) : null));
+  // The same choices float by the second click, as SolidWorks' mate pop-up: type, turn over, OK or cancel.
+  renderMateBar(pm, opts, a, b);
   side.append(box);
 }
 function addMatePick(ref) {
@@ -7027,7 +7044,7 @@ function asmUp(ev, d) {
   if (d && !d.moved && S.pm?.kind === 'cpat') { cpatClick(ev); return; }
   if (d && !d.moved && S.pm?.kind === 'explode') { explodeClick(ev); return; }
   if (d && !d.moved && S.pm?.kind === 'mate') {
-    const ep = asmEdgePick(ev); const p = ep ? null : asmPick(ev); if (!ep && !p?.ent) return; const pm = S.pm; const ref = ep || { comp: p.comp, ...p.ent };
+    const ep = asmEdgePick(ev); const p = ep ? null : asmPick(ev); if (!ep && !p?.ent) return; const pm = S.pm; const ref = ep || { comp: p.comp, ...p.ent }; pm.at = { x: ev.clientX, y: ev.clientY };
     // Where on the face the click landed (part coordinates): two coaxial rings are one axis, the click tells which one was meant.
     if (p?.point) { const c = S.doc.comps.find((x) => x.id === p.comp); if (c) ref.at = p.point.clone().applyMatrix4(new THREE.Matrix4().fromArray(c.T).invert()).toArray().map((v) => +v.toFixed(5)); }
     // A click on what is already picked takes it off; a click on another object of a picked component replaces that
