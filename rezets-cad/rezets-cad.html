@@ -2562,9 +2562,9 @@ function partHover(ev) {
   const hp = p?.plane || null; if (hp !== S.hoverPlane) { S.hoverPlane = hp; buildPlanes(); requestRender(); }
 }
 // The sketch whose curves pass nearest the cursor, among those before the rollback bar.
-function sketchAt(ev) {
+function sketchAt(ev, open) {
   const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; let best = null;
-  for (const f of S.doc.features.slice(0, rollbackIndex())) { if (f.type !== 'sketch' || !sketchRegions(f).faces.length) continue;
+  for (const f of S.doc.features.slice(0, rollbackIndex())) { if (f.type !== 'sketch' || (!open && !sketchRegions(f).faces.length)) continue;
     for (const e of Object.values(f.sk.ents)) { if (e.constr || e.ext) continue; const sk = f.sk; let uv;
       if (e.t === 'line') uv = [gp(sk, e.p1), gp(sk, e.p2)];
       else if (e.t === 'circle' || e.t === 'arc') { const c = gp(sk, e.c); uv = Array.from({ length: 49 }, (_, i) => ({ x: c.x + e.r * Math.cos(i / 48 * TAU), y: c.y + e.r * Math.sin(i / 48 * TAU) })); }
@@ -2578,6 +2578,12 @@ function sketchAt(ev) {
 let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitView(); midClickAt = 0; } else midClickAt = t; });
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
+  // In a loft or sweep, sketches are picked in the view too: a loft takes or drops a section, a sweep takes a closed
+  // sketch as its profile and an open one as its path.
+  if (S.pm?.kind === 'feature' && ['loft', 'sweep'].includes(S.pm.feature?.type)) { const sf = sketchAt(ev, S.pm.feature.type === 'sweep'); if (sf) { const f = S.pm.feature;
+    if (f.type === 'loft') { if (!sketchRegions(sf).faces.length) return; f.sketches = f.sketches.includes(sf.id) ? f.sketches.filter((x) => x !== sf.id) : [...f.sketches, sf.id]; f.sketch = f.sketches[0]; }
+    else if (sketchRegions(sf).faces.length && sf.id !== f.path) f.sketch = sf.id; else f.path = sf.id;
+    renderSide(); schedulePreview(); updateSketchVisuals(); return; } }
   if (S.pickSketch) { const sf = sketchAt(ev); if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; }
     // A flat face instead of a sketch: a new sketch opens on it and the operation comes back when it closes.
     const p = partPickAt(ev); if (p?.face && !p.face.cyl) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'face'; S.pickedFace = planeFromFace(p.face, p.point); updateSketchVisuals(); cmdFeature(q.type, q.mode); } return; }
@@ -7475,7 +7481,7 @@ function updateRelBar() {
 view.addEventListener('pointermove', (ev) => { const bar = $('relbar'); if (bar.hidden) return; const r = bar.getBoundingClientRect(); const dx = Math.max(r.left - ev.clientX, 0, ev.clientX - r.right), dy = Math.max(r.top - ev.clientY, 0, ev.clientY - r.bottom); bar.classList.toggle('far', Math.hypot(dx, dy) > 36); });
 function updateSketchVisuals() {
   groups.sketch.clear();
-  for (const f of (S.doc.features || []).slice(0, rollbackIndex())) if (f.type === 'sketch' && f.id !== S.editing && (sketchVisible(f) || S.selectedTree === 'feat:' + f.id || (S.pickSketch && sketchRegions(f).faces.length)) && (!S.pm?.regionsOf || canSwitchSketch())) drawSketchObjects(f, false);
+  for (const f of (S.doc.features || []).slice(0, rollbackIndex())) if (f.type === 'sketch' && f.id !== S.editing && (sketchVisible(f) || S.selectedTree === 'feat:' + f.id || (S.pickSketch && sketchRegions(f).faces.length) || ['loft', 'sweep'].includes(S.pm?.feature?.type)) && (!S.pm?.regionsOf || canSwitchSketch())) drawSketchObjects(f, false);
   const e = editF(); if (e) drawSketchObjects(e, true);
   updateRelBar(); requestRender();
 }
