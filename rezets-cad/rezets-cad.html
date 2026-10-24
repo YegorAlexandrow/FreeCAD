@@ -5747,7 +5747,8 @@ function applyPattern(f, body, cyls, features) {
   let out = body; const missed = new Set();
   for (const sd of seeds) {
     if (sd.type !== 'extrude' && sd.type !== 'revolve' && sd.type !== 'hole') throw new Error(`«${sd.name}»: копировать можно вытягивания, вращения и отверстия`);
-    const own = []; const tools = sd.type === 'hole' ? holeTool(sd, out, own) : [buildTool(sd, out, own)]; const op = sd.type === 'hole' || sd.mode === 'cut' ? SUBTRACTION : ADDITION;
+    // The copied feature that fails is named: its own error repeated alone read as this feature's own fault.
+    const own = []; let tools; try { tools = sd.type === 'hole' ? holeTool(sd, out, own) : [buildTool(sd, out, own)]; } catch (e) { throw new Error(`${f.type === 'mirror' ? 'Отражение' : 'Копия'} «${sd.name}» не строится: ${(e.message || String(e)).replace(/^./, (c) => c.toLowerCase())}`); } const op = sd.type === 'hole' || sd.mode === 'cut' ? SUBTRACTION : ADDITION;
     const fast = mats.length >= 4 && patternInManifold(out, tools, mats, op, missed); if (fast) { out = fast; for (const M of mats) for (const c of own) added.push(placeCyl(c, M)); continue; }
     mats.forEach((M, i) => { const v0 = op === SUBTRACTION ? geoVolume(out) : 0; for (const tool of tools) out = boolean(out, placeTool(tool, M), op); for (const c of own) added.push(placeCyl(c, M)); if (op === SUBTRACTION && Math.abs(geoVolume(out) - v0) < 1e-6 * Math.max(1, v0)) missed.add(i); });
   }
