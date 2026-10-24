@@ -2154,8 +2154,8 @@ new ResizeObserver(resize).observe(view);
 // On a phone the slide-out tree starts under the header (it covered the document name and the tabs).
 new ResizeObserver(() => document.documentElement.style.setProperty('--top-h', $('top').offsetHeight + 'px')).observe($('top'));
 controls.addEventListener('start', () => { S.fitted = false; });
-const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); viewCube.retheme(); refreshAll(); });
-new MutationObserver(() => { readColors(); viewCube.retheme(); refreshAll(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+const mq = matchMedia('(prefers-color-scheme: dark)'); mq.addEventListener?.('change', () => { readColors(); viewCube.retheme(); refreshAll(true); });
+new MutationObserver(() => { readColors(); viewCube.retheme(); refreshAll(true); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 const planeHalf = () => { const g = S.mode === 'part' ? S.body : null; if (!g) return 60; g.computeBoundingBox(); const r = g.boundingBox.getBoundingSphere(new THREE.Sphere()).radius; return Math.min(5000, Math.max(1, r * 0.7)); };
 function buildPlanes() {
@@ -2203,9 +2203,11 @@ function applyDisplay() {
 function displayMenu(btn) { const r = btn.getBoundingClientRect(); const cur = S.display || 'shaded'; openMenu(r.left, r.bottom + 4, [['shaded', 'Тонированный с рёбрами'], ['hlr', 'Без невидимых линий'], ['wire', 'Каркас']].map(([k, l]) => [(k === cur ? '✓ ' : '') + l, () => { S.display = k; applyDisplay(); }])); }
 function updateBodyMesh0() {
   if (S.measure) { S.measure.picks = []; S.measure.result = null; groups.measure.clear(); }
-  groups.body.clear(); bodyMeshObj = null; faceIndex = []; originGroup.clear();
+  groups.body.clear(); bodyMeshObj = null; faceIndex = []; originGroup.clear(); meshOf = S.body;
   if (!S.body) { buildPlanes(); return; }
-  const shaded = toCreasedNormals(S.body.clone(), 30 * Math.PI / 180);
+  // A dense mesh (a scanned or fine STL) is shown with its facets' own normals: smoothing 400k triangles took 3 s and
+  // its facets are too small to see anyway.
+  const dense = S.body.getAttribute('position').count > 600000; const shaded = dense ? (() => { const g = S.body.clone(); g.computeVertexNormals(); return g; })() : toCreasedNormals(S.body.clone(), 30 * Math.PI / 180);
   const base = partColor(S.doc) || ('#' + colors.body.getHexString()); const vc = bodyColors(S.body, S.doc, S.cyls, base); if (vc) shaded.setAttribute('color', new THREE.BufferAttribute(vc, 3));
   const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : base, vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
   bodyMeshObj = new THREE.Mesh(shaded, mat); groups.body.add(bodyMeshObj);
@@ -5982,7 +5984,13 @@ function stlFaces(tri) {
   const nT = tri.length / 9; const key = (t, k) => `${Math.round(tri[9 * t + 3 * k] * 1e4)},${Math.round(tri[9 * t + 3 * k + 1] * 1e4)},${Math.round(tri[9 * t + 3 * k + 2] * 1e4)}`;
   const N = []; const D = [];
   for (let t = 0; t < nT; t++) { const a = new THREE.Vector3(tri[9 * t], tri[9 * t + 1], tri[9 * t + 2]), b = new THREE.Vector3(tri[9 * t + 3], tri[9 * t + 4], tri[9 * t + 5]), c = new THREE.Vector3(tri[9 * t + 6], tri[9 * t + 7], tri[9 * t + 8]); const n = b.sub(a).cross(c.sub(a)); const l = n.length(); n.divideScalar(l || 1); N.push(n); D.push(n.dot(a)); }
-  const edges = new Map(); for (let t = 0; t < nT; t++) for (let k = 0; k < 3; k++) { const a = key(t, k), b = key(t, (k + 1) % 3); const ek = a < b ? a + '|' + b : b + '|' + a; if (!edges.has(ek)) edges.set(ek, []); edges.get(ek).push(t); }
+  // Vertices get numbers once (a text key per corner, not two per edge), edges a numeric key, and each edge keeps its two
+  // triangles in a flat list: a 400k-triangle STL spent seconds on strings and small arrays here.
+  const ids = new Map(); const vid = new Int32Array(nT * 3); for (let t = 0; t < nT; t++) for (let k = 0; k < 3; k++) { const s2 = key(t, k); let id = ids.get(s2); if (id === undefined) { id = ids.size; ids.set(s2, id); } vid[3 * t + k] = id; }
+  const first = new Map(); const pairsA = []; const pairsB = []; const many = new Set();
+  for (let t = 0; t < nT; t++) for (let k = 0; k < 3; k++) { const a = vid[3 * t + k], b = vid[3 * t + (k + 1) % 3]; if (a === b) continue; const ek = a < b ? a * 67108864 + b : b * 67108864 + a; const v = first.get(ek);
+    if (v === undefined) first.set(ek, t); else if (v >= 0) { first.set(ek, -1 - pairsA.length); pairsA.push(v); pairsB.push(t); } else many.add(-1 - v); }
+  const edges = { values: function* () { for (let i = 0; i < pairsA.length; i++) if (!many.has(i)) yield [pairsA[i], pairsB[i]]; } };
   const uf = (n) => { const p = Array.from({ length: n }, (_, i) => i); const f = (x) => { while (p[x] !== x) x = p[x] = p[p[x]]; return x; }; return { f, u: (a, b) => { a = f(a); b = f(b); if (a !== b) p[a] = b; } }; };
   // Flat faces: neighbours in one plane.
   const P = uf(nT); for (const ts of edges.values()) if (ts.length === 2) { const [a, b] = ts; if (N[a].dot(N[b]) > 1 - 1e-6 && Math.abs(D[a] - D[b]) < 1e-4) P.u(a, b); }
@@ -8050,7 +8058,10 @@ function updateSketchVisuals() {
 }
 function refreshSketch(keepDraw) { if (!keepDraw && S.tool !== 'select' && S.tool !== 'dim') { /* keep tool */ } analyze(); updateSketchVisuals(); renderSide(); setHint(); }
 function commitSketch(keepDraw, merge) { const sk = editSk(); if (sk) { if (cleanZeroLines(sk)) pushUndo(merge); solveSketch(sk); } analyze(); updateSketchVisuals(); renderSide(); setHint(); pushUndo(merge); void keepDraw; }
-function refreshAll() { updateBodyMesh(); updateSketchVisuals(); drawRegions(); renderSide(); renderTools(); renderCorner(); setHint(); requestRender(); }
+// The body's mesh is redone only when the body changed (or colours did): refreshAll() right after a rebuild built it
+// twice, 7 s of a 17 s import of a 400k-triangle STL.
+let meshOf = null;
+function refreshAll(force) { if (force || meshOf !== S.body) updateBodyMesh(); updateSketchVisuals(); drawRegions(); renderSide(); renderTools(); renderCorner(); setHint(); requestRender(); }
 function state() { return S.mode === 'import' ? null : JSON.stringify({ doc: S.doc, editing: S.editing }); }
 let lastSaved = null;
 function pushUndo(merge) {
@@ -8243,8 +8254,9 @@ function checkSolid(g, type, flatOnly) {
 }
 function badEdges(g) {
   const pos = g.getAttribute('position'); const ids = new Map(); const q = 1e5; const vid = (i) => { const k = Math.round(pos.getX(i) * q) + ',' + Math.round(pos.getY(i) * q) + ',' + Math.round(pos.getZ(i) * q); let id = ids.get(k); if (id === undefined) { id = ids.size; ids.set(k, id); } return id; };
-  const cnt = new Map(); for (let t = 0; t < pos.count; t += 3) { const v = [vid(t), vid(t + 1), vid(t + 2)]; if (v[0] === v[1] || v[1] === v[2] || v[0] === v[2]) continue; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const k = a < b ? a + ',' + b : b + ',' + a; const c = cnt.get(k) || [0, 0]; c[a < b ? 0 : 1]++; cnt.set(k, c); } }
-  let bad = 0; for (const [, c] of cnt) if (c[0] !== 1 || c[1] !== 1) bad++; return bad;
+  const cnt = new Map(); for (let t = 0; t < pos.count; t += 3) { const v = [vid(t), vid(t + 1), vid(t + 2)]; if (v[0] === v[1] || v[1] === v[2] || v[0] === v[2]) continue; for (let e = 0; e < 3; e++) { const a = v[e], b = v[(e + 1) % 3]; const k = a < b ? a * 67108864 + b : b * 67108864 + a; cnt.set(k, (cnt.get(k) || 0) + (a < b ? 1 : 1024)); } }
+  // Each undirected edge counts its two directions in one number (forward + 1024 × backward): exactly once each is closed.
+  let bad = 0; for (const c of cnt.values()) if (c !== 1025) bad++; return bad;
 }
 // A body that came out of the fallback CSG (or an imported mesh) can have cracks and T-junctions that a slicer
 // reports as non-manifold. Before saving it is welded and passed through Manifold; failing that, the cracks are
