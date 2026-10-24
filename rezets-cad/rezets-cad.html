@@ -2144,7 +2144,7 @@ function updateSilhouette() {
   const l = segLines(arr, lineMat(colors.edge, 1.4)); const cp = groups.body.children.find((o) => o.material?.clippingPlanes)?.material.clippingPlanes; if (cp) l.material.clippingPlanes = cp; silGroup.add(l); silState.obj = l;
 }
 function resize() {
-  const w = view.clientWidth, hgt = view.clientHeight; renderer.setSize(w, hgt, false);
+  const w = view.clientWidth, hgt = view.clientHeight; viewH = hgt; renderer.setSize(w, hgt, false);
   const half = 160; const asp = w / Math.max(hgt, 1); camera.left = -half * asp; camera.right = half * asp; camera.top = half; camera.bottom = -half; camera.updateProjectionMatrix();
   LINE_RES.set(w, hgt);
   // A model just fitted stays fitted when the window changes size; one zoomed or turned by hand stays as it was.
@@ -2402,7 +2402,8 @@ function mouseToSketch(ev) {
   const hit = new THREE.Vector3(); if (!rc.ray.intersectPlane(plane, hit)) { rc.ray.closestPointToPoint(new THREE.Vector3(...pl.o), hit); }
   const d = hit.sub(new THREE.Vector3(...pl.o)); return { u: d.dot(new THREE.Vector3(...pl.x)), v: d.dot(new THREE.Vector3(...pl.y)), sx: ev.clientX - r.left, sy: ev.clientY - r.top };
 }
-const unitsPerPx = () => (camera.top - camera.bottom) / camera.zoom / Math.max(view.clientHeight, 1);
+// The view's height is kept from the last resize: reading it here for every dimension forced a layout each time.
+let viewH = 1; const unitsPerPx = () => (camera.top - camera.bottom) / camera.zoom / Math.max(viewH, 1);
 // Nearest sketch item under the cursor, in screen pixels.
 function pick(m, opts = {}) {
   const sk = editSk(); const tol = opts.tol ?? 9; let best = null;
@@ -2508,9 +2509,13 @@ function reportAdd(r, c) {
 }
 
 // ---------------- sketch analysis and colors ----------------
+// The analysis is redone only when the sketch changed: a click in empty space (a selection) ran it twice, which on a
+// sketch with a hundred holes was most of the click.
+let analyzedKey = null, analyzedSk = null;
 function analyze() {
-  const sk = editSk(); if (!sk) { S.analysis = null; return; }
-  S.analysis = analyzeSketch(sk); renderSkState();
+  const sk = editSk(); if (!sk) { S.analysis = null; analyzedKey = null; return; }
+  const k = JSON.stringify([sk.pts, sk.ents, sk.cons]); if (k !== analyzedKey || sk !== analyzedSk || !S.analysis) { S.analysis = analyzeSketch(sk); analyzedKey = k; analyzedSk = sk; }
+  renderSkState();
 }
 // One wording for the panel and the status bar; a sketch with nothing drawn is empty, not fully defined.
 function sketchState(sk, a) {
