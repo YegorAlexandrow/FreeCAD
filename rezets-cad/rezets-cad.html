@@ -7910,8 +7910,10 @@ const thumbs = (() => {
     sc.traverse((o) => { if (o.isLineSegments) o.geometry.dispose(); }); for (const m of mats) m.dispose(); return url;
   }
   // Makes the picture of d now (from what is open) or after the queue; null when there is nothing to show yet.
-  function make(d) { const sg = sig(d); if (sg == null) return null; let url = null; try { url = draw(items(d)); } catch (e) { console.warn('thumb', d.id, e); }
-    if (!url) return null; const v = { sig: sg, url }; mem.set(key(d), v); save(key(d), v); return url; }
+  function make(d, later) { const sg = sig(d); if (sg == null) return null; const list = items(d); const k = key(d);
+    // Leaving a document only takes what is to be drawn; the drawing waits for a quiet moment (it held up the switch).
+    const run = () => { let url = null; try { url = draw(list); } catch (e) { console.warn('thumb', d.id, e); } if (!url) return null; const v = { sig: sg, url }; mem.set(k, v); save(k, v); return url; };
+    if (later) { (window.requestIdleCallback || ((f) => setTimeout(f, 200)))(run, { timeout: 2000 }); return null; } return run(); }
   function get(d, onReady) {
     const k = key(d); const sg = sig(d); if (sg == null) return null; const v = mem.get(k) || load()[k]; if (v) mem.set(k, v);
     if (v && v.sig === sg) return v.url;
@@ -7920,7 +7922,7 @@ const thumbs = (() => {
   }
   function pump() { if (busy || !queue.length) return; busy = true; setTimeout(() => { const { d, onReady } = queue.shift(); const url = S.project.docs.includes(d) ? make(d) : null; busy = false; if (url) onReady(url); pump(); }, 30); }
   // The open document is pictured as it is left: an assembly can only be drawn while it is open.
-  const capture = () => { const d = activeEntry(); if (d && d.kind !== 'drw' && sig(d) !== (mem.get(key(d)) || load()[key(d)])?.sig) make(d); };
+  const capture = () => { const d = activeEntry(); if (d && d.kind !== 'drw' && sig(d) !== (mem.get(key(d)) || load()[key(d)])?.sig) make(d, true); };
   return { get, capture, make, drop: (d) => { mem.delete(key(d)); save(key(d), null); }, cancel: () => { queue.length = 0; } };
 })();
 function openDocList(btn) {
