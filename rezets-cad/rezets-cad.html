@@ -8160,6 +8160,8 @@ function restore(s) {
   // «Cancel changes» restores the sketch undo landed in, not another one that was open before.
   if (S.editing) { if (o.editing !== prevEditing) S.editBackup = JSON.stringify(editF().sk); S.refs = modelRefs(editF()); analyze(); setTab('sketch'); } else { S.refs = null; S.analysis = null; setTab('feat'); if (S.tool !== 'select') { S.tool = 'select'; canvas.style.cursor = 'default'; } }
   rebuild(); refreshAll(); lastSaved = s; saveProjectSoon();
+  // Undo or redo that lands inside a sketch from outside it turns the view to the sketch, as opening it does (A20).
+  if (S.editing && S.editing !== prevEditing) { const pl = editF().plane; setView(new THREE.Vector3(...pl.n), new THREE.Vector3(...pl.y), false); }
 }
 function undo() {
   if (!S.undo.length) return;
