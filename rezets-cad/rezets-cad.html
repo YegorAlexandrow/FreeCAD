@@ -4033,7 +4033,7 @@ function exitSketch() {
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
   if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана. Проверьте, что концы линий соединены`, 'warn'); }
   if (featById(f.id)) { S.selectedTree = 'feat:' + f.id; renderTree(); }
-  const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. Нажмите «Вытянуть» или «Повернуть».`);
+  const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. ${f.plane?.face || f.plane?.label === 'Грань' ? 'Нажмите «Вытянуть» (E) или «Вырез» (X)' : 'Нажмите «Вытянуть» (E) или «Повернуть» (R)'}`);
 }
 const plural = (n, a, b, c) => { const m = n % 10, m2 = n % 100; return m === 1 && m2 !== 11 ? a : m >= 2 && m <= 4 && (m2 < 10 || m2 >= 20) ? b : c; };
 function pickSketchForFeature() {
