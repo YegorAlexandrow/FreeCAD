@@ -4442,7 +4442,11 @@ function followEdges(f, body, cyls) {
       // hole are told apart by it, so a taller boss keeps the chamfer on the rim it was put on.
       const side = (c, r = e.r) => { const [u] = perpBasis(N); for (const rr of [r + 0.05, r - 0.05]) { if (rr <= 0) continue; const P = c.clone().addScaledVector(u, rr); const a = isInside(body, P.clone().addScaledVector(N, 0.05)), b = isInside(body, P.clone().addScaledVector(N, -0.05)); if (a !== b) return a ? 1 : -1; } return 0; };
       const here = !resized && cs.find((c) => c.c.distanceTo(C) < tol);
-      if (here) return e.side ? e : { ...e, side: side(here.c) };
+      // The rim learns the operation that made its hole; a hole moved off its axis (its sketch shifted) is then found again
+      // by that operation, on the same side, instead of the chamfer losing its edge.
+      if (here) return e.side && (e.src || !here.src) ? e : { ...e, side: e.side || side(here.c), ...(here.src ? { src: here.src } : {}) };
+      if (!cs.length && e.src) { const mine = topo.circles.filter((c) => c.src === e.src && Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6); const same2 = e.side ? mine.filter((c) => side(c.c, c.r) === e.side) : mine; const pool2 = same2.length ? same2 : mine;
+        const c = pool2.sort((p, q) => Math.abs(p.r - e.r) - Math.abs(q.r - e.r) || p.c.distanceTo(C) - q.c.distanceTo(C))[0]; if (c) return { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r }; }
       if (!cs.length) return e;
       const same = e.side ? cs.filter((c) => side(c.c, c.r) === e.side) : cs; const pool = same.length ? same : cs;
       const c = pool.sort((p, q) => p.c.distanceTo(C) - q.c.distanceTo(C) || Math.abs(p.r - e.r) - Math.abs(q.r - e.r))[0]; return { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r };
