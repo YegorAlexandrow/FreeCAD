@@ -1993,6 +1993,7 @@ function buildTool(f, body, cyls = []) {
   g.applyMatrix4(M); g.computeVertexNormals(); return g;
 }
 function rebuild() {
+  docGen++;
   if (S.selFace) showFaceSel(null);
   if (S.mode === 'asm') return;
   if (S.mode === 'import') { const ent = activeEntry(); S.body = importGeometry(ent); S.cyls = importCyls(ent); S.errors = {}; updateBodyMesh(); renderSide(); updateSketchVisuals(); requestRender(); return; }
@@ -2305,7 +2306,9 @@ function showFeatureFaces(fid) {
   setHint(n ? `«${f.name}»: ${n} ${plural(n, 'грань', 'грани', 'граней')} на детали, ${n === 1 ? 'подсвечена' : 'подсвечены'}` : `От «${f.name}» на детали не осталось граней: их срезали более поздние операции или операция ничего не изменила`);
   requestRender();
 }
-function faceForTriangle(t) { return faceIndex.find((f) => f.tris.includes(t)); }
+// Triangle to face through a table built once per face list (the hover used to search every face's triangles).
+let triFace = null, triFaceOf = null;
+function faceForTriangle(t) { if (triFaceOf !== faceIndex) { triFace = new Map(); for (const f of faceIndex) for (const x of f.tris) triFace.set(x, f); triFaceOf = faceIndex; } return triFace.get(t); }
 // The face picked on the part stays shown in the selection colour (only the tree row and the hint said it before).
 const selFaceGroup = freeOnClear(new THREE.Group()); scene.add(selFaceGroup);
 function showFaceSel(face) {
@@ -2824,9 +2827,16 @@ canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
 // ---------------- part mode ----------------
 function rayFromEvent(ev) { const r = canvas.getBoundingClientRect(); const ndc = new THREE.Vector2((ev.clientX - r.left) / r.width * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1); fitDepth(); const rc = new THREE.Raycaster(); rc.setFromCamera(ndc, camera); return rc; }
+const pickCycle = { x: -1e9, y: -1e9, n: 0, cam: '', t: -1e9 };
+const viewKey = () => camera.position.toArray().concat(controls.target.toArray(), camera.zoom).join();
+const cycleHere = (ev) => Math.hypot(ev.clientX - pickCycle.x, ev.clientY - pickCycle.y) < 4 && pickCycle.cam === viewKey();
 function partPickAt(ev, anyFace) {
   const rc = rayFromEvent(ev);
-  if (bodyMeshObj) { const hit = keptHit(rc.intersectObject(bodyMeshObj)); if (hit) { const face = faceForTriangle(hit.faceIndex); if (face && (anyFace || !face.cyl)) return { face, point: hit.point }; if (face) return null; } }
+  // Clicking again on the same spot without turning the view takes the next face along the ray (a face hidden behind
+  // another one, a small one under a big one), as «Выбрать другой» does in SolidWorks.
+  if (bodyMeshObj) { const hits = S.section ? rc.intersectObject(bodyMeshObj).filter((h2) => secPlane.distanceToPoint(h2.point) >= -1e-6) : rc.intersectObject(bodyMeshObj); const seen = new Set(); const faces = [];
+    for (const h2 of hits) { const fc = faceForTriangle(h2.faceIndex); if (fc && !seen.has(fc)) { seen.add(fc); faces.push({ face: fc, point: h2.point }); } }
+    if (faces.length) { const pk = faces[(cycleHere(ev) ? pickCycle.n : 0) % faces.length]; if (anyFace || !pk.face.cyl) return pk; return null; } }
   if (groups.planes.visible) { const hit = rc.intersectObjects(groups.planes.children.filter((o) => o.userData.plane && (o.visible || !S.body || S.pm?.kind === 'pickPlane')))[0]; if (hit) return { plane: hit.object.userData.plane }; }
   if (S.pm?.regionsOf) return null; return null;
 }
@@ -2870,6 +2880,8 @@ let tapAt = null; canvas.addEventListener('pointerup', (ev) => { if (ev.pointerT
 let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitAnimated(); midClickAt = 0; } else midClickAt = t; });
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
+  // The second click of a double click is not a request for the face behind (a double click opens the feature).
+  { const now = performance.now(); if (now - pickCycle.t > 450) pickCycle.n = cycleHere(ev) ? pickCycle.n + 1 : 0; pickCycle.t = now; pickCycle.x = ev.clientX; pickCycle.y = ev.clientY; pickCycle.cam = viewKey(); }
   // In a loft or sweep, sketches are picked in the view too: a loft takes or drops a section, a sweep takes a closed
   // sketch as its profile and an open one as its path.
   if (S.pm?.kind === 'feature' && ['loft', 'sweep'].includes(S.pm.feature?.type)) { const sf = sketchAt(ev, S.pm.feature.type === 'sweep'); if (sf) { const f = S.pm.feature;
@@ -6169,11 +6181,15 @@ const COMP_COLORS = ['#b9c3cf', '#c9b79b', '#9fb8a5', '#b3a7c7', '#c2a2a2', '#9e
 const infoCache = new WeakMap();
 // The assembly solver asks for parts many times a frame; an unchanged part is not rebuilt.
 // The key is taken after the build, since sketches on faces settle their planes during it.
+let docGen = 0;
 function docInfo(docId) {
   const ent = docEntry(docId); if (ent?.kind !== 'part') return docInfo0(docId);
-  const key = () => JSON.stringify([ent.data.features, ent.data.rollback, ent.data.vars]);
-  if (ent._info && ent._infoKey === key()) return ent._info;
-  const info = docInfo0(docId); Object.defineProperty(ent, '_info', { value: info, writable: true, configurable: true }); Object.defineProperty(ent, '_infoKey', { value: key(), writable: true, configurable: true }); return info;
+  // A part that is not open cannot have changed since the last check unless something was edited, undone or switched
+  // (docGen): an assembly then asks for its parts per frame without serialising them each time.
+  if (ent._info && ent._infoGen === docGen && ent._infoData === ent.data && ent.data !== S.doc) return ent._info;
+  const k = JSON.stringify([ent.data.features, ent.data.rollback, ent.data.vars]); const def = (n, v) => Object.defineProperty(ent, n, { value: v, writable: true, configurable: true });
+  def('_infoGen', docGen); def('_infoData', ent.data); if (ent._info && ent._infoKey === k) return ent._info;
+  const info = docInfo0(docId); def('_info', info); def('_infoKey', k); return info;
 }
 function docInfo0(docId) {
   const ent = docEntry(docId); if (!ent) return null; let geo, cyls, faceTris = null;
@@ -7869,12 +7885,14 @@ function leaveCurrentDoc() {
   const ent = activeEntry(); if (ent) { if (S.mode !== 'import') ent.data = S.doc; Object.defineProperty(ent, '_hist', { value: { undo: S.undo, redo: S.redo, last: lastSaved }, configurable: true, writable: true, enumerable: false }); }
 }
 function switchDoc(id) {
+  docGen++;
   if (S.project.active === id && S.mode) return;
   // Leaving an in-context edit for its assembly keeps the view where it was.
   const back = S.ctx && id === S.ctx.asm && S.project.active === S.ctx.doc ? camState(S.ctx.M) : null; if (S.ctx && id !== S.ctx.doc) S.ctx = null;
   leaveCurrentDoc(); S.project.active = id; enterDoc(); saveProjectSoon(); if (back) setCamState(back);
 }
 function enterDoc() {
+  docGen++;
   ctxGroup.clear(); $('ctxBar').hidden = true;
   const ent = activeEntry(); noteRecent(ent.id); S.sel.clear(); S.selEdges = []; selEdgeGroup.clear(); S.selectedTree = null; S.pickedFace = null; showFaceSel(null); S.pm = null; S.asmSel = null; S.mateSel = null; S.measure = null; groups.measure.clear(); groups.hover.clear(); groups.regions.clear();
   const hist = ent._hist; S.undo = hist?.undo || []; S.redo = hist?.redo || []; lastSaved = hist?.last || null;
@@ -7889,7 +7907,7 @@ function enterDoc() {
   renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar();
   const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
 }
-function openProject(p) { S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
+function openProject(p) { docGen++; S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
 function addDoc(kind, name, data, open = true) {
   if (S.project && activeEntry()) leaveCurrentDoc();
   const ent = { id: 'd' + S.project.nid++, kind, name: uniqueDocName(name), data };
@@ -8118,10 +8136,12 @@ function refreshAll(force) { if (force || meshOf !== S.body) updateBodyMesh(); u
 function state() { return S.mode === 'import' ? null : JSON.stringify({ doc: S.doc, editing: S.editing }); }
 let lastSaved = null;
 function pushUndo(merge) {
+  docGen++;
   const s = state(); if (s == null || s === lastSaved) { saveProjectSoon(); return; } if (lastSaved) S.touched = true; if (lastSaved && !merge) S.undo.push(lastSaved); if (S.undo.length > 120) S.undo.shift(); S.redo = []; lastSaved = s;
   saveProjectSoon();
 }
 function restore(s) {
+  docGen++;
   if (S.mode === 'drw') { const o = JSON.parse(s); activeEntry().data = S.doc = o.doc; lastSaved = s; drwRefresh(); saveProjectSoon(); return; }
   if (S.mode === 'asm') { const o = JSON.parse(s); activeEntry().data = S.doc = o.doc; lastSaved = s;
     // A component whose document was deleted after this state can't come back: it and its mates are left out.
@@ -8145,6 +8165,7 @@ $('bUndo').onclick = undo; $('bRedo').onclick = redo;
 setInterval(() => { const u = $('bUndo'), r = $('bRedo'); const cu = S.undo.length > 0, cr = S.redo.length > 0; if (u.classList.contains('dim') === cu) u.classList.toggle('dim', !cu); if (r.classList.contains('dim') === cr) r.classList.toggle('dim', !cr); }, 400);
 
 function loadDoc(doc, msg) {
+  docGen++;
   if (!S.project) S.project = newProject([]);
   let ent = S.project.docs.find((d) => d.data === doc);
   if (!ent) { ent = { id: 'd' + S.project.nid++, kind: 'part', name: doc.name || 'Деталь', data: doc }; S.project.docs.push(ent); }
