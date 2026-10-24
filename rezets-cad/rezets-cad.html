@@ -2838,10 +2838,11 @@ const cycleHere = (ev) => Math.hypot(ev.clientX - pickCycle.x, ev.clientY - pick
 function partPickAt(ev, anyFace) {
   const rc = rayFromEvent(ev);
   // Clicking again on the same spot without turning the view takes the next face along the ray (a face hidden behind
-  // another one, a small one under a big one), as «Выбрать другой» does in SolidWorks.
+  // another one, a small one under a big one), as «Выбрать другой» does in SolidWorks. Only for plain selection: a
+  // command's picks toggle on a second click.
   if (bodyMeshObj) { const hits = S.section ? rc.intersectObject(bodyMeshObj).filter((h2) => secPlane.distanceToPoint(h2.point) >= -1e-6) : rc.intersectObject(bodyMeshObj); const seen = new Set(); const faces = [];
     for (const h2 of hits) { const fc = faceForTriangle(h2.faceIndex); if (fc && !seen.has(fc)) { seen.add(fc); faces.push({ face: fc, point: h2.point }); } }
-    if (faces.length) { const pk = faces[(cycleHere(ev) ? pickCycle.n : 0) % faces.length]; if (anyFace || !pk.face.cyl) return pk; return null; } }
+    if (faces.length) { const pk = faces[(!S.pm && cycleHere(ev) ? pickCycle.n : 0) % faces.length]; if (anyFace || !pk.face.cyl) return pk; return null; } }
   if (groups.planes.visible) { const hit = rc.intersectObjects(groups.planes.children.filter((o) => o.userData.plane && (o.visible || !S.body || S.pm?.kind === 'pickPlane')))[0]; if (hit) return { plane: hit.object.userData.plane }; }
   if (S.pm?.regionsOf) return null; return null;
 }
