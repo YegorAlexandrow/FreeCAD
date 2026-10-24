@@ -1761,6 +1761,10 @@ function computeBody(features) {
   let body = null; const errors = {}; const key = []; let cyls = [];
   for (const f of features) if (f.type === 'sketch' && f.planeRef) { const pf = features.find((g) => g.id === f.planeRef); if (pf) { const pl = refPlane(pf, features); f.plane = { ...pl, label: pf.name }; } }
   const steps = []; let lastSolid = null; let nBodies = 1;
+  // Below a suppressed feature references are not followed: what they pointed at is only switched off, and following
+  // would move them onto other geometry for good (a sketch's hole centre went to another hole, and stayed there once
+  // the boss was back: switching a feature off and on again changed the part).
+  let frozen = false;
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
     // The following of references (faces, edges, points on the model) is skipped when this feature meets the same
@@ -1768,7 +1772,7 @@ function computeBody(features) {
     // the tree used to redo it all (a click on a face of BASE walked the tree once per feature).
     // Sketches it takes points from count too: a sketch follows another one even when the body stays the same.
     const deps = f.type === 'sketch' ? [...new Set(Object.values(f.sk?.pts || {}).map((q) => q.mref?.sk).filter(Boolean))].map((id) => JSON.stringify(features.find((x) => x.id === id)?.sk?.pts || null)).join('|') : '';
-    const fm = followMemo.get(f); const fj = JSON.stringify(f) + deps; const same = fm && fm.body === body && fm.json === fj;
+    const fm = followMemo.get(f); const fj = JSON.stringify(f) + deps; const same = frozen || (fm && fm.body === body && fm.json === fj);
     if (!same) {
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
     if (f.type === 'sketch' && !f.suppressed && !body) S.dangling.delete(f.id);
@@ -1784,6 +1788,7 @@ function computeBody(features) {
     // Where a region pick is remembered (points, entity names) does not change the solid: it stays out of the key, so the
     // build after the first one (which fills them in) still finds its steps in the cache.
     key.push(JSON.stringify(f, (k2, v) => (k2 === 'regionPts' || k2 === 'regionSigs' ? undefined : v)));
+    if (f.suppressed && f.type !== 'sketch' && f.type !== 'plane') frozen = true;
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
     const k = key.join('\n');
@@ -1867,9 +1872,14 @@ function selectedRegionIds(f, reg, out) {
   return new Set(reg.faces.filter((x) => x.defaultOn).map((x) => x.id));
 }
 function bodyMesh(body) { const m = new THREE.Mesh(body, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })); m.updateMatrixWorld(); return m; }
+// The tree over the body's triangles is built once per body (a rim's side, a sketch reference and a fillet each ask
+// several times per rebuild); an indexed twin shares the positions so the body itself is left as it is.
+const insideBvh = new WeakMap();
 function isInside(body, p) {
-  if (!body) return false; const m = bodyMesh(body); const rc = new THREE.Raycaster(p.clone(), new THREE.Vector3(0.5773, 0.5774, 0.5775).normalize());
-  return rc.intersectObject(m).length % 2 === 1;
+  if (!body) return false; const pos = body.getAttribute('position'); let c = insideBvh.get(body);
+  if (!c || c.attr !== pos || c.ver !== pos.version) { const g = new THREE.BufferGeometry(); g.setAttribute('position', pos); if (body.index) g.setIndex(body.index); else g.setIndex(new THREE.BufferAttribute(Uint32Array.from({ length: pos.count }, (_, i) => i), 1)); c = { bvh: new MeshBVH(g, { indirect: true }), attr: pos, ver: pos.version }; insideBvh.set(body, c); }
+  const ray = new THREE.Ray(p.clone(), new THREE.Vector3(0.5773, 0.5774, 0.5775).normalize());
+  return c.bvh.raycast(ray, THREE.DoubleSide).length % 2 === 1;
 }
 function buildTool(f, body, cyls = []) {
   const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
@@ -3959,6 +3969,8 @@ function rebuildPolygon(sk, circ, n, mode) {
 const planeByKey = (k) => (k.startsWith('f:') ? (featById(k.slice(2)) ? refPlane(featById(k.slice(2))) : null) : { ...PLANES[k] });
 function cmdSketch() {
   if (S.editing) return; if (S.measure) closeMeasure(); if (S.pickSketch) { S.pickSketch = null; updateSketchVisuals(); }
+  // A sketch picked in the tree is opened for editing, as in SolidWorks, not doubled by a new one on some plane.
+  if (S.selectedTree?.startsWith('feat:') && featById(S.selectedTree.slice(5))?.type === 'sketch') return editFeature(featById(S.selectedTree.slice(5)));
   if (S.selectedTree?.startsWith('feat:') && featById(S.selectedTree.slice(5))?.type === 'plane') return startSketch(refPlane(featById(S.selectedTree.slice(5))));
   if (S.selectedTree?.startsWith('plane:')) return startSketch({ ...PLANES[S.selectedTree.slice(6)] });
   if (S.selectedTree === 'face' && S.pickedFace) return startSketch(S.pickedFace);
@@ -4100,7 +4112,7 @@ function okPM() {
 // the field being typed in keeps its focus.
 function refreshPmError() {
   const f = S.pm?.feature; const box = side.querySelector('.pm'); if (!f || !box) return; const err = S.errors[f.id] || S.warns[f.id] || null; const old = box.querySelector('.pm-errbox');
-  if ((old?.textContent || null) === err) return; if (old) old.remove(); if (err) box.append(pmErr(err));
+  if ((old?.querySelector('.note')?.textContent || null) === err) return; if (old) old.remove(); if (err) box.append(pmErr(err));
 }
 let previewTimer = null; function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(() => { rebuild(); drawRegions(); refreshPmError(); }, 120); }
 function drawRegions() {
@@ -5577,7 +5589,10 @@ function cmdHole() {
 function holePointsCount(sf) { try { return holePoints(sf).length; } catch { return 0; } }
 // A feature waiting for a pick ("Выберите грань…") is not in error: that line reads as the next step.
 const isAsk = (err) => /^(Выберите|Щёлкните|Укажите)/.test(err || '');
-const pmErr = (err) => h('div', { class: 'grp pm-errbox' }, h('div', { class: 'note', style: isAsk(err) ? 'color:var(--accent)' : 'color:var(--bad)' }, err));
+// A feature that does not build is most often fixed in its sketch: the error offers to open it.
+const pmErr = (err) => { const f = S.pm?.kind === 'feature' && !S.pm.isNew ? S.pm.feature : null; const sk = f?.sketch && !isAsk(err) ? featById(f.sketch) : null;
+  return h('div', { class: 'grp pm-errbox' }, h('div', { class: 'note', style: isAsk(err) ? 'color:var(--accent)' : 'color:var(--bad)' }, err),
+    sk ? h('button', { class: 'btn', style: 'margin-top:6px', onclick: () => { closePM(); editFeature(sk); } }, `Открыть «${sk.name}»`) : null); };
 function renderHolePM() {
   const pm = S.pm; const f = pm.feature; const err = S.errors[f.id]; const sf = featById(f.sketch);
   const refresh = () => { renderSide(); schedulePreview(); };
@@ -7276,13 +7291,13 @@ function renderTools() {
       h('div', { class: 'sep' }),
       toolBtn('Вытянуть', ICON.extrude, () => cmdFeature('extrude', 'add'), { pressed: on('extrude', 'add'), title: 'Вытянутая бобышка (E)', kbd: 'E' }),
       toolBtn('Вырез', ICON.cut, () => cmdFeature('extrude', 'cut'), { pressed: on('extrude', 'cut'), title: 'Вытянутый вырез (X)', kbd: 'X' }),
-      toolBtn('Повернуть', ICON.revolve, () => cmdFeature('revolve', 'add'), { pressed: on('revolve', 'add'), title: 'Повёрнутая бобышка' }),
+      toolBtn('Повернуть', ICON.revolve, () => cmdFeature('revolve', 'add'), { pressed: on('revolve', 'add'), title: 'Повёрнутая бобышка (R)', kbd: 'R' }),
       toolBtn('Вырез пов.', ICON.revolve, () => cmdFeature('revolve', 'cut'), { pressed: on('revolve', 'cut'), title: 'Повёрнутый вырез' }),
       toolBtn('Траектория', ICON.sweep, () => cmdSweep('add'), { pressed: on('sweep'), title: 'По траектории: профиль вдоль линии (вырез — в настройках)' }),
       toolBtn('Сечения', ICON.loft, () => cmdLoft('add'), { pressed: on('loft'), title: 'По сечениям между замкнутыми эскизами (вырез — в настройках)' }),
       h('div', { class: 'sep' }),
-      toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { pressed: on('fillet'), disabled: !S.body, title: 'Скруглить рёбра' }),
-      toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { pressed: on('chamfer'), disabled: !S.body, title: 'Фаска на рёбрах' }),
+      toolBtn('Скругление', ICON.fillet, () => cmdEdgeFeature('fillet'), { pressed: on('fillet'), disabled: !S.body, title: 'Скруглить рёбра (L)', kbd: 'L' }),
+      toolBtn('Фаска', ICON.chamfer, () => cmdEdgeFeature('chamfer'), { pressed: on('chamfer'), disabled: !S.body, title: 'Фаска на рёбрах (C)', kbd: 'C' }),
       toolBtn('Оболочка', ICON.shell, cmdShell, { pressed: on('shell'), disabled: !S.body, title: 'Оболочка: полая деталь с открытыми гранями' }),
       toolBtn('Отверстие', ICON.hole, cmdHole, { pressed: on('hole'), disabled: !S.body, title: 'Отверстие под крепёж: простое, цековка, зенковка, под резьбу' }),
       h('div', { class: 'sep' }),
@@ -7412,11 +7427,18 @@ function moveFeature(id, beforeId) {
   const list = S.doc.features.filter((g) => g.id !== id); const f = featById(id); if (!f) return false;
   let at = beforeId ? list.findIndex((g) => g.id === beforeId) : list.length; if (at < 0) at = list.length; list.splice(at, 0, f);
   for (const g of [...list]) if (g.sketch) { const si = list.findIndex((x) => x.id === g.sketch), gi = list.indexOf(g); if (si > gi) { const [sk] = list.splice(si, 1); list.splice(gi, 0, sk); } }
-  for (let i = 0; i < list.length; i++) for (const d of featDeps(list[i])) { const di = list.findIndex((x) => x.id === d); if (di > i) { toast(`«${list[i].name}» построен на «${list[di].name}», выше него его не поставить`, 'warn'); return false; } }
+  for (let i = 0; i < list.length; i++) for (const d of featDeps(list[i])) { const di = list.findIndex((x) => x.id === d); if (di > i) { toast(list[di] === f ? `«${f.name}» нужен для «${list[i].name}», ниже него его не поставить` : `«${list[i].name}» построен на «${list[di].name}», выше него его не поставить`, 'warn'); return false; } }
   if (list.every((g, i) => g === S.doc.features[i])) return false;
   // The rollback bar stays under the feature it was under; what is dropped below it is rolled back.
   const rb = S.doc.rollback; const anchor = rb ? S.doc.features[rb - 1] : null;
-  S.doc.features = list; if (anchor && anchor !== f) S.doc.rollback = list.indexOf(anchor) + 1; rebuild(); pushUndo(); return true;
+  // A move that leaves a feature unbuildable (a fillet above the boss whose edges it rounds) is taken back whole: the
+  // rebuild after it has already moved references onto whatever was left, and moving the feature back would not
+  // undo that.
+  const saved = JSON.stringify(S.doc.features); const ok0 = new Set(Object.keys(S.errors).filter((k) => S.errors[k]));
+  S.doc.features = list; if (anchor && anchor !== f) S.doc.rollback = list.indexOf(anchor) + 1; rebuild();
+  const broke = S.doc.features.filter((g) => S.errors[g.id] && !ok0.has(g.id));
+  if (broke.length) { const why = String(S.errors[broke[0].id]).replace(/\.$/, ''); S.doc.features = JSON.parse(saved); S.doc.rollback = rb; rebuild(); toast(broke[0] === f ? `Перенос «${f.name}» отменён: на новом месте элемент не строится (${why})` : `Перенос «${f.name}» отменён: после него «${broke[0].name}» не строится (${why})`, 'warn'); return false; }
+  pushUndo(); return true;
 }
 function startFeatDrag(ev, f, row) {
   if (ev.button !== 0) return; const tree = row.parentElement; const y0 = ev.clientY; let on = false, before = null; const line = h('div', { class: 'dropline' });
@@ -7445,7 +7467,11 @@ function startRollDrag(ev) {
 // With the bar up, the menu also takes it one step back down or all the way to the end.
 const rollMore = () => (S.doc.rollback == null ? [] : [['Откатить к предыдущему', () => setRollback(Math.max(0, S.doc.rollback - 1))], ['Откатить до конца', () => setRollback(S.doc.features.length)]]);
 function setRollback(i, live) { S.doc.rollback = i >= S.doc.features.length ? null : i; rebuild(); if (!live) pushUndo(); }
-function editFeature(f) { if (!f) return; if (['extrude', 'revolve', 'sweep'].includes(f.type) && !featById(f.sketch)) { toast(`У «${f.name}» нет эскиза в файле. Элемент можно только удалить`, 'err'); return; } if (f.type === 'stepbody') { const imps = S.project.docs.filter((d) => d.kind === 'import'); const hasOwn = imps.some((d) => d.id === f.doc); if (!imps.length || (hasOwn && imps.length < 2)) { toast(imps.length ? 'Других импортированных моделей в проекте нет' : 'В проекте нет импортированных моделей: импортируйте STEP или STL', 'info'); return; } const r = side.getBoundingClientRect(); openMenu(r.left + 40, r.top + 120, imps.map((d) => [(d.id === f.doc ? '✓ ' : '') + d.name, () => { f.doc = d.id; rebuild(); pushUndo(); renderSide(); }])); return; } if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
+function editFeature(f) { if (!f) return;
+  // A feature under the rollback bar is not built, so its panel would show nothing to edit against: the bar moves to
+  // just under it first.
+  { const i = S.doc.features?.indexOf(f) ?? -1; if (i >= 0 && i >= rollbackIndex()) { S.doc.rollback = i + 1 >= S.doc.features.length ? null : i + 1; rebuild(); renderSide(); toast(`Откат перенесён под «${f.name}»`, 'info'); } }
+  if (['extrude', 'revolve', 'sweep'].includes(f.type) && !featById(f.sketch)) { toast(`У «${f.name}» нет эскиза в файле. Элемент можно только удалить`, 'err'); return; } if (f.type === 'stepbody') { const imps = S.project.docs.filter((d) => d.kind === 'import'); const hasOwn = imps.some((d) => d.id === f.doc); if (!imps.length || (hasOwn && imps.length < 2)) { toast(imps.length ? 'Других импортированных моделей в проекте нет' : 'В проекте нет импортированных моделей: импортируйте STEP или STL', 'info'); return; } const r = side.getBoundingClientRect(); openMenu(r.left + 40, r.top + 120, imps.map((d) => [(d.id === f.doc ? '✓ ' : '') + d.name, () => { f.doc = d.id; rebuild(); pushUndo(); renderSide(); }])); return; } if (f.type === 'loft') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (f.type === 'shell') { openShellPM(clone(f), false); return; } if (f.type === 'hole') { openPM({ kind: 'feature', feature: clone(f), isNew: false }); return; } if (PATTERN_TYPES.has(f.type)) { openPatternPM(clone(f), false); return; } if (f.type === 'sketch') { startSketch(f.plane, f); return; } if (f.type === 'fillet' || f.type === 'chamfer') { openEdgePM(clone(f), false); return; } openPM({ kind: 'feature', feature: clone(f), isNew: false, regionsOf: f.sketch }); }
 function deleteFeature(f) {
   // Sketches and planes built on a deleted reference plane keep where it was.
   if (f.type === 'plane') { const pl = refPlane(f); delete pl.ref; for (const g of S.doc.features) { if (g.planeRef === f.id) delete g.planeRef; if (g.type === 'plane' && g.base?.plane === f.id) g.base = { face: pl }; if (g.type === 'plane' && g.base2?.plane === f.id) g.base2 = { face: pl }; if (g.type === 'mirror' && g.plane?.plane === f.id) g.plane = { face: pl }; } }
@@ -7464,7 +7490,8 @@ function renameFeature(f, redraw = renderTree) {
   const r = side.querySelector(`.row.sel .nm`); if (!r) return; const inp = h('input', { type: 'text', value: f.name, id: 'renameInput', 'aria-label': 'Имя элемента' }); r.replaceWith(inp); inp.focus(); inp.select();
   // Enter and Esc stay in the field (the row behind it would open the feature); the blur that the redraw causes
   // after Esc must not save what was typed.
-  let over = false; const done = (ok) => { if (over) return; over = true; if (ok && inp.value.trim() && inp.value.trim() !== f.name) { f.name = inp.value.trim(); if (f.T) f.userName = true; pushUndo(); } redraw(); };
+  let over = false; const done = (ok) => { if (over) return; over = true; const nm = inp.value.trim(); if (ok && nm && nm !== f.name && (S.doc.features || []).includes(f) && S.doc.features.some((g) => g !== f && g.name === nm)) { toast(`Имя «${nm}» уже есть в дереве`, 'warn'); ok = false; }
+    if (ok && nm && nm !== f.name) { f.name = nm; if (f.T) f.userName = true; pushUndo(); } redraw(); };
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(e.key === 'Enter'); } }); inp.addEventListener('blur', () => done(true));
   for (const ev of ['click', 'dblclick', 'pointerdown']) inp.addEventListener(ev, (e) => e.stopPropagation());
 }
@@ -8180,7 +8207,7 @@ $('modal').addEventListener('keydown', (e) => {
 // F1 or «?»: every keyboard shortcut in one place, grouped by where it works.
 const HELP_KEYS = [
   ['Везде', [['Ctrl+Z / Ctrl+Y', 'Отменить / вернуть'], ['Ctrl+S', 'Сохранить сейчас'], ['F', 'Вписать модель в окно'], ['Стрелки', 'Повернуть вид на 15°, с Shift на 90°'], ['Alt+← / →', 'Повернуть вид вокруг направления взгляда'], ['Enter', 'OK в открытой панели'], ['Esc', 'Отмена: инструмент, выделение, панель'], ['F2', 'Переименовать выделенный элемент или компонент'], ['F1 или ?', 'Эта справка']]],
-  ['Деталь', [['S', 'Эскиз'], ['E', 'Вытянутая бобышка'], ['X', 'Вытянутый вырез'], ['M', 'Рулетка'], ['Delete', 'Удалить выделенный элемент']]],
+  ['Деталь', [['S', 'Эскиз'], ['E', 'Вытянутая бобышка'], ['X', 'Вытянутый вырез'], ['R', 'Повёрнутая бобышка'], ['L', 'Скругление'], ['C', 'Фаска'], ['M', 'Рулетка'], ['Delete', 'Удалить выделенный элемент']]],
   ['Эскиз', [['L / R / C / A / P', 'Линия / прямоугольник / окружность / дуга / точка'], ['T', 'Обрезка'], ['D', 'Размер'], ['G', 'Вспомогательная геометрия'], ['Delete', 'Удалить выделенное'], ['Ctrl+щелчок', 'Добавить к выделению']]],
   ['Взаимосвязи (при выделенной геометрии)', Object.entries({ H: 'Горизонтально', V: 'Вертикально', C: 'Совпадение', P: 'Параллельно', N: 'Перпендикулярно', E: 'Равенство', T: 'Касательно', K: 'Концентрично', M: 'Середина', O: 'На линии / окружности', J: 'Коллинеарно', S: 'Симметрично', F: 'Зафиксировать' })],
   ['Сборка', [['I', 'Вставить компонент'], ['M', 'Сопряжение'], ['Shift+перетаскивание', 'Повернуть компонент'], ['Delete', 'Удалить выделенный компонент или сопряжение']]],
@@ -8490,7 +8517,7 @@ window.addEventListener('keydown', (e) => {
   if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); if (k === 'e' || k === 'x') { if (S.draw) endDrawing(); return cmdFeature('extrude', k === 'e' ? 'add' : 'cut'); } }
   // An open operation panel is not dropped by a command key: what was typed into it would be lost.
   else if (S.pm && ['m', 's', 'e', 'x'].includes(k)) { toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); }
-  else { if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); if (k === 's') return cmdSketch(); if (k === 'e') return cmdFeature('extrude', 'add'); if (k === 'x') return cmdFeature('extrude', 'cut'); }
+  else { if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); if (k === 's') return cmdSketch(); if (k === 'e') return cmdFeature('extrude', 'add'); if (k === 'x') return cmdFeature('extrude', 'cut'); if (k === 'r') return cmdFeature('revolve', 'add'); if (S.body && k === 'l') return cmdEdgeFeature('fillet'); if (S.body && k === 'c') return cmdEdgeFeature('chamfer'); }
 });
 
 // ============================================================================================
