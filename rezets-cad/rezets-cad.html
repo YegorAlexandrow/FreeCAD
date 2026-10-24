@@ -1649,7 +1649,7 @@ function followSketchRefs(f, body, cyls) {
     if (best.d < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
     const d = best.v.clone().sub(o); const x = +d.dot(X).toFixed(6), y = +d.dot(Y).toFixed(6);
     for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && best.c) e.r = best.c.r;
-    { const { home, ...m } = p.mref; const far = !best.home && !best.c; p.x = x; p.y = y; p.mref = { ...m, w: best.v.toArray().map((q) => +q.toFixed(6)), ...(best.c ? { r: best.c.r } : {}), ...(far ? { home: home || p.mref.w } : !best.home && home ? { home } : {}) }; moved = true; }
+    { const { home, ...m } = p.mref; const far = !best.home && !best.c && best.d > 1e-3; p.x = x; p.y = y; p.mref = { ...m, w: best.v.toArray().map((q) => +q.toFixed(6)), ...(best.c ? { r: best.c.r } : {}), ...(far ? { home: home || p.mref.w } : !best.home && home ? { home } : {}) }; moved = true; }
   }
   if (moved) solveSketch(f.sk);
   // What could not be followed still hangs where the model used to be: shown in red, and reattached on request.
