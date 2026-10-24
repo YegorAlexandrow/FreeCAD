@@ -4015,6 +4015,8 @@ function startSketch(plane, existing) {
   S.editing = f.id; S.editBackup = JSON.stringify(f.sk); S.refs = modelRefs(f); S.sel.clear(); S.conflict = new Set(); S.selectedTree = null; showFaceHover(null);
   setTab('sketch'); setTool('select'); if (S.sketchTool) { const t = S.sketchTool; S.sketchTool = null; setTool(t); }
   if (cleanZeroLines(f.sk)) pushUndo(); solveSketch(f.sk); analyze(); rebuild(); renderSide(); renderCorner(); pushUndo();
+  // Editing a sketch that already has features on it: leaving it turns the view back the way it was (A18).
+  S.camBefore = existing && S.doc.features.some((g) => g.sketch === f.id) ? camState() : null;
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
 function exitSketch() {
@@ -4025,6 +4027,7 @@ function exitSketch() {
   const empty = !Object.values(f.sk.ents).some((e) => !e.ext) && !Object.values(f.sk.pts).some((p) => !p.fixed);
   if (empty && !S.doc.features.some((g) => g !== f && JSON.stringify(g).includes(`"${f.id}"`))) { const i = S.doc.features.indexOf(f); if (i >= 0) { S.doc.features.splice(i, 1); if (S.doc.rollback != null && S.doc.rollback > i) S.doc.rollback--; } S.afterSketch = null; S.selectedTree = null; setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo(); toast('Пустой эскиз не сохранён', 'info', [{ label: 'Отменить', act: undo }]); return; }
   setTool('select'); setTab('feat'); rebuild(); renderSide(); renderCorner(); pushUndo();
+  { const cb = S.camBefore; S.camBefore = null; if (cb && featById(f.id)) setView(cb.pos.clone().sub(cb.target), cb.up.clone(), false); }
   // Leaving the points of a hole being set up goes back to its panel with everything chosen there (the hole was lost).
   if (S.resumePM) { const pm = S.resumePM; S.resumePM = null; if (featById(f.id)) { openPM(pm); return; } }
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
