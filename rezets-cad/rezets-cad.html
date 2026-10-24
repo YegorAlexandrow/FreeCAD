@@ -1257,11 +1257,21 @@ function fromManifold(m) {
   for (let i = 0; i < tv.length; i++) { const v = tv[i] * np; out[3 * i] = vp[v]; out[3 * i + 1] = vp[v + 1]; out[3 * i + 2] = vp[v + 2]; }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(out, 3)); g.computeVertexNormals(); return g;
 }
+// A boolean's result keeps its Manifold, so the next operation on it starts from there instead of rebuilding it from
+// the triangles (that was a sixth of a rebuild of BASE). It is valid while the positions are the same buffer at the
+// same version, and is freed with the geometry.
+const mfFree = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry((m) => { try { m.delete(); } catch { /* already gone */ } }) : null;
+function cachedManifold(g) { const c = g.userData.mf; const pos = g.getAttribute('position'); return c && c.attr === pos && c.ver === pos.version ? c.m : null; }
 function mfBoolean(a, b, op) {
-  if (!MF) return null; let A, B, R;
-  try { A = toManifold(a); B = toManifold(b); R = op === SUBTRACTION ? A.subtract(B) : op === ADDITION ? A.add(B) : A.intersect(B); return fromManifold(R); }
+  if (!MF) return null; let A, B, R; let ownA = true, ownB = true;
+  try {
+    A = cachedManifold(a); if (A) ownA = false; else A = toManifold(a); B = cachedManifold(b); if (B) ownB = false; else B = toManifold(b);
+    R = op === SUBTRACTION ? A.subtract(B) : op === ADDITION ? A.add(B) : A.intersect(B); const out = fromManifold(R);
+    if (mfFree) { const pos = out.getAttribute('position'); out.userData.mf = { m: R, attr: pos, ver: pos.version }; mfFree.register(out, R); R = null; }
+    return out;
+  }
   catch (e) { console.warn('manifold: falling back to CSG', e?.message || e); return null; }
-  finally { A?.delete(); B?.delete(); R?.delete(); }
+  finally { if (ownA) A?.delete(); if (ownB) B?.delete(); R?.delete(); }
 }
 function boolean(a, b, op) {
   const mr = mfBoolean(a, b, op); if (mr) return mr;
@@ -1558,8 +1568,18 @@ function followOtherSketches(f, features) {
 }
 function followSketchRefs(f, body, cyls) {
   S.dangling.delete(f.id); const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.free && !p.mref?.sk); if (!pts.length) return;
-  const T = edgeTopology(body, cyls); const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
+  const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
   const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3; const world = (p) => o.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y);
+  // Nothing moved: each point is still on a vertex of the body, or on the axis of a hole made by the same operation
+  // with the same radius. Then the edges of the model are not worked out at all (they cost most of a rebuild of a
+  // part with many sketches on faces, BASE: 0.9 of 4.2 s).
+  if (pts.every((p) => p.mref && !p.lost)) {
+    const pos = body.getAttribute('position'); const q = 1e5; const key = (x, y, z) => Math.round(x * q) + ',' + Math.round(y * q) + ',' + Math.round(z * q);
+    let vset = null; const onVertex = (w) => { if (!vset) { vset = new Set(); for (let i = 0; i < pos.count; i++) vset.add(key(pos.getX(i), pos.getY(i), pos.getZ(i))); } return vset.has(key(w.x, w.y, w.z)); };
+    const onHole = (p, w) => (cyls || []).some((c) => (!p.mref.src || c.src === p.mref.src) && (p.mref.r == null || Math.abs(c.r - p.mref.r) < 1e-6) && w.clone().sub(c.p).cross(V3(c.dir).normalize()).length() < 1e-6);
+    if (pts.every((p) => { const w = world(p); return p.mref.circle || !p.mref.ns?.length ? onHole(p, w) : onVertex(w); })) return;
+  }
+  const T = edgeTopology(body, cyls);
   // Corners where a straight edge meets a curved face are not vertices of the topology, only ends of its lines.
   const verts = [...T.verts.filter(on)]; for (const [a, b2] of T.lines) for (const q of [a, b2]) if (on(q) && !verts.some((v) => v.distanceTo(q) < 1e-6)) verts.push(q);
   const circles = T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6);
@@ -1967,8 +1987,18 @@ const hemi = new THREE.HemisphereLight(0xffffff, 0x8a94a3, 1.05); scene.add(hemi
 const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(0.6, 1.0, 1.4); camera.add(key);
 const fill = new THREE.DirectionalLight(0xffffff, 0.45); fill.position.set(-1, -0.4, 0.5); camera.add(fill);
 const groups = { planes: new THREE.Group(), body: new THREE.Group(), sketch: new THREE.Group(), regions: new THREE.Group(), hover: new THREE.Group(), measure: new THREE.Group() };
+// Groups redrawn all the time give back the GPU buffers of what they drop: without it every mouse move in a sketch
+// left its lines and points behind (hundreds of geometries after a short drag). Shared geometry is kept, and materials
+// are left to the garbage collector: disposing them released their shader program, recompiled on the next frame.
+function freeOnClear(g) {
+  g.clear = function () { this.traverse((o) => { if (o === this) return; if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose(); for (const m of [o.material].flat()) m?.map?.dispose?.(); }); return THREE.Group.prototype.clear.call(this); };
+  return g;
+}
+for (const g of Object.values(groups)) freeOnClear(g);
 Object.values(groups).forEach((g) => scene.add(g));
-const lineMats = []; const lineMat = (color, width = 2, opts = {}) => { const m = new LineMaterial({ color, linewidth: width, worldUnits: false, dashed: !!opts.dashed, dashSize: opts.dashSize || 3, gapSize: opts.gapSize || 2, depthTest: opts.depthTest ?? true, transparent: !!opts.opacity, opacity: opts.opacity ?? 1 }); m.resolution.set(view.clientWidth, view.clientHeight); lineMats.push(m); return m; };
+// All line materials read one shared resolution, set on resize: the list of every material ever made grew with each
+// mouse move in a sketch and was walked on every resize.
+const LINE_RES = new THREE.Vector2(1, 1); const lineMats = { length: 0 }; const lineMat = (color, width = 2, opts = {}) => { const m = new LineMaterial({ color, linewidth: width, worldUnits: false, dashed: !!opts.dashed, dashSize: opts.dashSize || 3, gapSize: opts.gapSize || 2, depthTest: opts.depthTest ?? true, transparent: !!opts.opacity, opacity: opts.opacity ?? 1 }); m.uniforms.resolution.value = LINE_RES; return m; };
 const segLines = (arr, mat) => { const g = new LineSegmentsGeometry(); g.setPositions(arr); const l = new LineSegments2(g, mat); l.computeLineDistances(); return l; };
 const colors = {}; const readColors = () => { for (const k of ['geo-ext', 'geo-under', 'geo-full', 'geo-constr', 'geo-sel', 'geo-hover', 'geo-bad', 'dim', 'body', 'edge', 'region', 'accent', 'warn']) colors[k] = new THREE.Color(css('--' + k) || '#888'); };
 readColors();
@@ -2077,7 +2107,7 @@ function fitDepth() {
 function requestRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; updateSilhouette(); clipHighlights(); fitDepth(); renderer.render(scene, camera); viewCube.draw(); drawTriad(); markViewbar(); layoutOverlay(); }); }
 // Outlines of curved faces as seen from here (a cylinder's sides, a fillet's edge on the skyline), redrawn as the
 // view turns, as SolidWorks draws them: without them a shaft seen from the side was a flat grey band.
-const silGroup = new THREE.Group(); let silState = { geo: null, dir: null, obj: null };
+const silGroup = freeOnClear(new THREE.Group()); let silState = { geo: null, dir: null, obj: null };
 function updateSilhouette() {
   const geo = (S.mode === 'part' || S.mode === 'import') && groups.body.visible ? S.body : null;
   if (!geo || geo.getAttribute('position').count > 300000) { if (silState.obj) { silGroup.clear(); silState = { geo: null, dir: null, obj: null }; } return; }
@@ -2090,7 +2120,7 @@ function updateSilhouette() {
 function resize() {
   const w = view.clientWidth, hgt = view.clientHeight; renderer.setSize(w, hgt, false);
   const half = 160; const asp = w / Math.max(hgt, 1); camera.left = -half * asp; camera.right = half * asp; camera.top = half; camera.bottom = -half; camera.updateProjectionMatrix();
-  for (const m of lineMats) m.resolution.set(w, hgt);
+  LINE_RES.set(w, hgt);
   // A model just fitted stays fitted when the window changes size; one zoomed or turned by hand stays as it was.
   if (S.fitted && S.mode && S.mode !== 'drw') fitView(); requestRender();
 }
@@ -2211,7 +2241,7 @@ function faceCreator(face, steps = solidSteps()) {
   while (k > 0 && onSurface(steps[k - 1].body, sm.p, sm.n)) k--;
   return (face.creator = steps[k].f.id);
 }
-const originGroup = new THREE.Group(); scene.add(originGroup);
+const originGroup = freeOnClear(new THREE.Group()); scene.add(originGroup);
 // Faces of the part that were not on it before the open operation: what the operation adds or cuts.
 function showPreviewFaces(base) {
   originGroup.clear(); if (!S.body || S.mode !== 'part') return; const pos = S.body.getAttribute('position'); const arr = [];
@@ -2231,7 +2261,7 @@ function showFeatureFaces(fid) {
 }
 function faceForTriangle(t) { return faceIndex.find((f) => f.tris.includes(t)); }
 // The face picked on the part stays shown in the selection colour (only the tree row and the hint said it before).
-const selFaceGroup = new THREE.Group(); scene.add(selFaceGroup);
+const selFaceGroup = freeOnClear(new THREE.Group()); scene.add(selFaceGroup);
 function showFaceSel(face) {
   selFaceGroup.clear(); S.selFace = face || null; if (!face || !S.body) { requestRender(); return; }
   showFaceHover(face, selFaceGroup, colors['geo-sel'], 0.45);
@@ -4436,7 +4466,7 @@ function edgeSegs(e) {
   return out;
 }
 // Edges selected on the part outside any command, shown in the selection colour.
-const selEdgeGroup = new THREE.Group(); scene.add(selEdgeGroup);
+const selEdgeGroup = freeOnClear(new THREE.Group()); scene.add(selEdgeGroup);
 function drawSelEdges() {
   selEdgeGroup.clear(); const list = S.mode === 'part' && !S.pm ? S.selEdges || [] : []; const segs = list.flatMap(edgeSegs);
   if (segs.length) { const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(colors['geo-sel'], 3, { depthTest: false })); l.renderOrder = 20; selEdgeGroup.add(l); }
@@ -4482,7 +4512,7 @@ function openEdgePM(f, isNew) {
 // Section view: a clipping plane through the part or assembly, the cut faces filled by the
 // stencil technique (inside of a solid = more back faces than front faces behind the plane).
 // ============================================================================================
-const secPlane = new THREE.Plane(); const secGroup = new THREE.Group(); scene.add(secGroup);
+const secPlane = new THREE.Plane(); const secGroup = freeOnClear(new THREE.Group()); scene.add(secGroup);
 function secBounds() { const box = new THREE.Box3(); for (const g of [S.mode === 'asm' ? asmGroup : groups.body]) g.traverse((o) => { if (o.isMesh && !o.userData.sec) box.expandByObject(o); }); return box; }
 function updateSecPlane() {
   const sc = S.section; if (!sc) return; const pl = PLANES[sc.plane] || PLANES.front; const n = V3(pl.n).multiplyScalar(sc.flip ? 1 : -1);
@@ -6438,7 +6468,7 @@ function asmRefresh(reanalyze) {
 // A suppressed component stays in the tree but is out of the model: not drawn, not solved, not counted.
 function toggleCompSuppressed(c) { if (c.suppressed) delete c.suppressed; else { c.suppressed = true; if (S.asmSel === c.id) S.asmSel = null; } asmRefresh(true); pushUndo(); toast(c.suppressed ? `«${c.name}» погашен: его сопряжения не действуют` : `«${c.name}» высвечен`, 'info'); }
 function toggleCompHidden(c) { if (c.hidden) delete c.hidden; else { c.hidden = true; if (S.asmSel === c.id) S.asmSel = null; } asmRefresh(); pushUndo(); }
-const shadedCache = new WeakMap(); function shadedGeo(g) { if (!shadedCache.has(g)) shadedCache.set(g, toCreasedNormals(g.clone(), 30 * Math.PI / 180)); return shadedCache.get(g); }
+const shadedCache = new WeakMap(); function shadedGeo(g) { if (!shadedCache.has(g)) { const sg = toCreasedNormals(g.clone(), 30 * Math.PI / 180); sg.userData.shared = true; shadedCache.set(g, sg); } return shadedCache.get(g); }
 // Vertices and edges of components near the cursor, for mates (in component coordinates).
 function asmEdgePick(ev) {
   const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; const cands = [];
@@ -8448,5 +8478,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
