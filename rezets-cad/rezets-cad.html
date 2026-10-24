@@ -1582,7 +1582,8 @@ function followSketchRefs(f, body, cyls) {
   // Nothing moved: each point is still on a vertex of the body, or on the axis of a hole made by the same operation
   // with the same radius. Then the edges of the model are not worked out at all (they cost most of a rebuild of a
   // part with many sketches on faces, BASE: 0.9 of 4.2 s).
-  if (pts.every((p) => p.mref && !p.lost)) {
+  // A circle reference that does not know its hole yet (older files) goes the long way once, to learn it there.
+  if (pts.every((p) => p.mref && !p.lost && (!p.mref.circle || p.mref.src))) {
     const pos = body.getAttribute('position'); const q = 1e5; const key = (x, y, z) => Math.round(x * q) + ',' + Math.round(y * q) + ',' + Math.round(z * q);
     let vset = null; const onVertex = (w) => { if (!vset) { vset = new Set(); for (let i = 0; i < pos.count; i++) vset.add(key(pos.getX(i), pos.getY(i), pos.getZ(i))); } return vset.has(key(w.x, w.y, w.z)); };
     const onHole = (p, w) => (cyls || []).some((c) => (!p.mref.src || c.src === p.mref.src) && (p.mref.r == null || Math.abs(c.r - p.mref.r) < 1e-6) && w.clone().sub(c.p).cross(V3(c.dir).normalize()).length() < 1e-6);
@@ -1749,12 +1750,20 @@ function followPlane(pl, body, steps) {
   if (!best || Math.abs(best.d - fc.d) < 1e-9) return pl;
   const o = V3(pl.o).addScaledVector(n, best.d - fc.d); return { ...pl, o: o.toArray().map((v) => +v.toFixed(6)), face: { ...fc, d: best.d } };
 }
+const followMemo = new WeakMap();
 function computeBody(features) {
   let body = null; const errors = {}; const key = []; let cyls = [];
   for (const f of features) if (f.type === 'sketch' && f.planeRef) { const pf = features.find((g) => g.id === f.planeRef); if (pf) { const pl = refPlane(pf, features); f.plane = { ...pl, label: pf.name }; } }
   const steps = []; let lastSolid = null; let nBodies = 1;
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
+    // The following of references (faces, edges, points on the model) is skipped when this feature meets the same
+    // body object as last time and has not changed since: a cached step gives the very same body, and each pass over
+    // the tree used to redo it all (a click on a face of BASE walked the tree once per feature).
+    // Sketches it takes points from count too: a sketch follows another one even when the body stays the same.
+    const deps = f.type === 'sketch' ? [...new Set(Object.values(f.sk?.pts || {}).map((q) => q.mref?.sk).filter(Boolean))].map((id) => JSON.stringify(features.find((x) => x.id === id)?.sk?.pts || null)).join('|') : '';
+    const fm = followMemo.get(f); const fj = JSON.stringify(f) + deps; const same = fm && fm.body === body && fm.json === fj;
+    if (!same) {
     if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
     if (f.type === 'sketch' && !f.suppressed && !body) S.dangling.delete(f.id);
     if (f.type === 'sketch' && !f.suppressed && !body) followOtherSketches(f, features);
@@ -1763,9 +1772,12 @@ function computeBody(features) {
     else if (f.type === 'sketch' && !body && !f.suppressed && f.plane?.face) S.offFace.add(f.id);
     if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
+    followMemo.set(f, { body, json: JSON.stringify(f) + deps }); }
     // A circular pattern's axis taken from a hole or boss stays on that hole when a dimension moves it.
     if (body && (f.type === 'cpattern' || f.type === 'lpattern') && !f.suppressed) for (const key of ['axis', 'dir', 'dir2']) { const e = f[key]?.edge; if (e?.t !== 'circle' || !e.src) continue; const c = edgeTopology(body, cyls).circles.filter((q) => q.src === e.src).sort((p, q) => p.c.distanceTo(V3(e.c)) - q.c.distanceTo(V3(e.c)))[0]; if (c && c.c.distanceTo(V3(e.c)) > 1e-9) f[key] = { ...f[key], edge: { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r } }; }
-    key.push(JSON.stringify(f));
+    // Where a region pick is remembered (points, entity names) does not change the solid: it stays out of the key, so the
+    // build after the first one (which fills them in) still finds its steps in the cache.
+    key.push(JSON.stringify(f, (k2, v) => (k2 === 'regionPts' || k2 === 'regionSigs' ? undefined : v)));
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
     const k = key.join('\n');
@@ -1797,7 +1809,8 @@ function computeBody(features) {
   }
   // Least recently used entries go first, down to what two builds of this part need (each one adds a body per feature).
   const cap = Math.max(80, 2 * features.length); while (S.cache.size > cap) S.cache.delete(S.cache.keys().next().value);
-  return { body, errors, cyls };
+  if (lastSolid) steps.push({ id: lastSolid, body });
+  return { body, errors, cyls, steps };
 }
 function sketchRegions(f) {
   // A feature whose sketch is missing (a hand-edited or foreign file) shows its error instead of breaking the page.
@@ -2232,7 +2245,9 @@ function updateBodyMesh0() {
 const bvhCache = new WeakMap(); const bvhOf = (g) => { if (!bvhCache.has(g)) bvhCache.set(g, new MeshBVH(g, { indirect: true })); return bvhCache.get(g); };
 function solidSteps() {
   const feats = S.doc.features.slice(0, rollbackIndex()); const out = [];
-  feats.forEach((f, i) => { if (f.suppressed || f.type === 'sketch' || f.type === 'plane') return; const r = computeBody(feats.slice(0, i + 1)); if (r.body && !r.errors[f.id]) out.push({ f, body: r.body }); });
+  // One pass gives the body after each feature (it used to build every prefix of the tree separately).
+  const r = computeBody(feats); const byId = new Map(feats.map((f) => [f.id, f]));
+  for (const st of r.steps) { const f = byId.get(st.id); if (f && st.body && !r.errors[f.id]) out.push({ f, body: st.body }); }
   return out;
 }
 function onSurface(g, p, n) {
