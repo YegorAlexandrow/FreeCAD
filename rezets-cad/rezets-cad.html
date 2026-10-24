@@ -7886,7 +7886,7 @@ function leaveCurrentDoc() {
   // Notes about the document being left go with it; ones with a button (Undo of a deletion and the like) stay.
   for (const t of [...($('toasts')?.children || [])]) if (!t.querySelector('.acts')) t.remove();
   // Each document keeps its view and the sketch that was open, for when it is opened again.
-  { const ent0 = activeEntry(); if (ent0 && S.mode) Object.defineProperty(ent0, '_view', { value: { cam: camState(), editing: S.editing || null, section: S.section ? { ...S.section } : null }, configurable: true, writable: true, enumerable: false }); }
+  { const ent0 = activeEntry(); if (ent0 && S.mode) Object.defineProperty(ent0, '_view', { value: { cam: camState(), editing: S.editing || null, section: S.section ? { ...S.section } : null, asmSel: S.mode === 'asm' ? S.asmSel : null }, configurable: true, writable: true, enumerable: false }); }
   if (S.editing) exitSketch(); if (S.measure) closeMeasure(); if (S.pm) closePM(true);
   const ent = activeEntry(); if (ent) { if (S.mode !== 'import') ent.data = S.doc; Object.defineProperty(ent, '_hist', { value: { undo: S.undo, redo: S.redo, last: lastSaved }, configurable: true, writable: true, enumerable: false }); }
 }
@@ -7911,7 +7911,7 @@ function enterDoc() {
   else if (ent.kind === 'import') { asmLeave(); setTab('feat'); setTool('select'); rebuild(); refreshAll(); }
   else { asmEnter(); if (!lastSaved) pushUndo(); }
   renderDocTabs(); fitView(); renderSectionBar(); applySection(); renderRepairBar();
-  const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
+  const v = ent._view; if (v) { setCamState(v.cam); if (ent.kind === 'asm' && v.asmSel && S.doc.comps?.some((c) => c.id === v.asmSel && !c.hidden && !c.suppressed)) { S.asmSel = v.asmSel; asmRefresh(); } if (ent.kind === 'part' && v.editing) { const f = S.doc.features.find((x) => x.id === v.editing); if (f) { startSketch(f.plane, f); setCamState(v.cam); } } }
 }
 function openProject(p) { docGen++; S.project = p; if (!docEntry(p.active)) p.active = p.docs[0]?.id; S.mode = null; enterDoc(); }
 function addDoc(kind, name, data, open = true) {
