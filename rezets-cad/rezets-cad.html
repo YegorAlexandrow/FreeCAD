@@ -376,6 +376,7 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { toCreasedNormals, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { zlibSync, unzlibSync } from 'three/addons/libs/fflate.module.js';
 import { Brush, Evaluator, ADDITION, SUBTRACTION, INTERSECTION } from 'three-bvh-csg';
 // Manifold (WASM) for booleans; when it cannot load, the page still works on three-bvh-csg.
 let MF = null;
@@ -5200,7 +5201,7 @@ const CLOUD = { db: null, uid: null, state: 'local', meta: null, unreadable: new
 const CHUNK = 90000; const KEEP_REVS = 3;
 const hashStr = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ':' + s.length; };
 const docToStore = (d) => ({ id: d.id, kind: d.kind, name: d.name, data: d.kind === 'import' ? { ...d.data, pos: b64.enc(d.data.pos), nrm: d.data.nrm ? b64.enc(d.data.nrm) : null } : d.data });
-const docFromStore = (o) => ({ ...o, data: o.kind === 'import' ? { ...o.data, pos: b64.dec(o.data.pos, Float32Array), nrm: o.data.nrm ? b64.dec(o.data.nrm, Float32Array) : null } : o.data });
+const docFromStore = (o) => ({ ...o, data: o.kind === 'import' ? { ...o.data, pos: typeof o.data.pos === 'string' ? b64.dec(o.data.pos, Float32Array) : o.data.pos, nrm: typeof o.data.nrm === 'string' ? b64.dec(o.data.nrm, Float32Array) : o.data.nrm || null } : o.data });
 function setCloudState(st, note) {
   CLOUD.state = st; const el = $('saveState'); if (!el) return;
   if (st === 'saved') CLOUD.savedAt = new Date();
@@ -5230,7 +5231,7 @@ async function loadRev(docMeta, rev) {
   const get = async (id) => { for (let k = 0; ; k++) { try { return await dbCall(chunkCol().doc(id).get()); } catch (e) { if (k >= 2) throw e; await new Promise((r) => setTimeout(r, 500 * 2 ** k)); } } };
   const read = async (prefix, n, hash) => { const parts = []; for (let i = 0; i < n; i++) { const s = await get(`${prefix}~${i}`); if (!s.exists) throw new Error('нет части ' + i); parts.push(s.data().s); } const json = parts.join(''); if (hash && hashStr(json) !== hash) throw new Error('контрольная сумма'); return JSON.parse(json); };
   const o = await read(`${docMeta.id}~${rev.rev}`, rev.chunks, rev.hash);
-  if (rev.geo) { const g = await read(geoPrefix(docMeta.id, rev.geo.key), rev.geo.chunks, rev.geo.key); delete o.data.geo; o.data.pos = g.pos; o.data.nrm = g.nrm; }
+  if (rev.geo) { const g = await read(geoPrefix(docMeta.id, rev.geo.key), rev.geo.chunks, rev.geo.key); delete o.data.geo; const u = g.v === 2 ? unpackGeo(g.z) : g; o.data.pos = u.pos; o.data.nrm = u.nrm; }
   return o;
 }
 // The project as stored in the cloud; a damaged revision falls back to the previous one.
@@ -5254,19 +5255,55 @@ const dbCall = (p, ms = 30000) => Promise.race([p, new Promise((_, rej) => setTi
 // An imported model is stored in two parts: its triangles (megabytes of base64, kept under a name made from their
 // hash and shared by every revision that has the same ones) and the rest, a few kilobytes. Renaming or rescaling
 // the model then saves only the small part. The triangles are encoded and hashed once per array and orientation.
-const geoCache = new WeakMap(), legacyCache = new WeakMap();
+const geoCache = new WeakMap();
 const geoPrefix = (docId, key) => `${docId}~g${key.replace(/[^A-Za-z0-9]/g, '_')}`;
+// An imported model's triangles are stored packed (v2): each distinct corner (position and normal) once, positions as
+// they are (float32), normals in two int16 (octahedral, ~0.01°), triangles as indices, all deflated. The plain form
+// repeated every shared corner with its normal as float32 and took 96 bytes a triangle in base64; the packed one is
+// several times smaller. It is used only when it decodes back to the very same positions.
+const octEnc = (x, y, z) => { const l = Math.abs(x) + Math.abs(y) + Math.abs(z) || 1; let u = x / l, v = y / l; if (z < 0) { const pu = u; u = (1 - Math.abs(v)) * Math.sign(pu || 1); v = (1 - Math.abs(pu)) * Math.sign(v || 1); } return [Math.round(u * 32767), Math.round(v * 32767)]; };
+const octDec = (a, b) => { let u = a / 32767, v = b / 32767; const z = 1 - Math.abs(u) - Math.abs(v); if (z < 0) { const pu = u; u = (1 - Math.abs(v)) * Math.sign(pu || 1); v = (1 - Math.abs(pu)) * Math.sign(v || 1); } const l = Math.hypot(u, v, z) || 1; return [u / l, v / l, z / l]; };
+function packGeo(pos, nrm) {
+  // Corners are matched by their bits in an open-addressed table (string keys in a Map took 5 s for 400k triangles).
+  const n = pos.length / 3; const pb = new Uint32Array(pos.buffer, pos.byteOffset, pos.length); const idx = new Uint32Array(n);
+  const VP = new Float32Array(n * 3), VB = new Uint32Array(n * 3), VN = new Int16Array(n * 2); let nv = 0;
+  let cap = 1; while (cap < n * 2) cap <<= 1; const tab = new Int32Array(cap).fill(-1); const mask = cap - 1;
+  for (let i = 0; i < n; i++) {
+    const o = nrm ? octEnc(nrm[3 * i], nrm[3 * i + 1], nrm[3 * i + 2]) : [0, 0]; const x = pb[3 * i], y = pb[3 * i + 1], z = pb[3 * i + 2];
+    let h = Math.imul(x ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(y + 0x7f4a7c15, 0xc2b2ae35) ^ Math.imul(z ^ 0x165667b1, 0x27d4eb2f) ^ Math.imul((o[0] & 0xffff) | (o[1] << 16), 0x9e3779b1); h ^= h >>> 15;
+    let k = h & mask, j;
+    for (;;) { j = tab[k]; if (j < 0) { j = nv++; tab[k] = j; VB[3 * j] = x; VB[3 * j + 1] = y; VB[3 * j + 2] = z; VP[3 * j] = pos[3 * i]; VP[3 * j + 1] = pos[3 * i + 1]; VP[3 * j + 2] = pos[3 * i + 2]; VN[2 * j] = o[0]; VN[2 * j + 1] = o[1]; break; }
+      if (VB[3 * j] === x && VB[3 * j + 1] === y && VB[3 * j + 2] === z && VN[2 * j] === o[0] && VN[2 * j + 1] === o[1]) break; k = (k + 1) & mask; }
+    idx[i] = j; }
+  const P = VP.slice(0, nv * 3), N = nrm ? VN.slice(0, nv * 2) : new Int16Array(0); const I = nv < 65536 ? Uint16Array.from(idx) : idx;
+  const head = new Uint32Array([2, n, nv, nrm ? 1 : 0, I.BYTES_PER_ELEMENT]); const parts = [head, P, N, I].map((a) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength));
+  const all = new Uint8Array(parts.reduce((t, a) => t + a.length + ((4 - (a.length % 4)) % 4), 0)); let off = 0; for (const a of parts) { all.set(a, off); off += a.length + ((4 - (a.length % 4)) % 4); }
+  return b64.enc(zlibSync(all, { level: 1 }));
+}
+function unpackGeo(str) {
+  const all = unzlibSync(b64.dec(str, Uint8Array)); const buf = all.buffer.slice(all.byteOffset, all.byteOffset + all.byteLength); const head = new Uint32Array(buf, 0, 5); const [, n, nv, hasN, ib] = head; let off = 20;
+  const take = (Type, len) => { const a = new Type(buf, off, len); off += len * Type.BYTES_PER_ELEMENT; off += (4 - (off % 4)) % 4; return a; };
+  const P = take(Float32Array, nv * 3), N = take(Int16Array, hasN ? nv * 2 : 0), I = take(ib === 2 ? Uint16Array : Uint32Array, n);
+  const pos = new Float32Array(n * 3), nrm = hasN ? new Float32Array(n * 3) : null; const dn = hasN ? new Float32Array(nv * 3) : null;
+  if (hasN) for (let j = 0; j < nv; j++) { const d = octDec(N[2 * j], N[2 * j + 1]); dn[3 * j] = d[0]; dn[3 * j + 1] = d[1]; dn[3 * j + 2] = d[2]; }
+  for (let i = 0; i < n; i++) { const j = I[i]; pos[3 * i] = P[3 * j]; pos[3 * i + 1] = P[3 * j + 1]; pos[3 * i + 2] = P[3 * j + 2]; if (nrm) { nrm[3 * i] = dn[3 * j]; nrm[3 * i + 1] = dn[3 * j + 1]; nrm[3 * i + 2] = dn[3 * j + 2]; } }
+  return { pos, nrm };
+}
 function storedGeo(data) {
   const c = geoCache.get(data.pos); if (c && c.zup === !!data.zup) return c;
-  const json = JSON.stringify({ pos: b64.enc(data.pos), nrm: data.nrm ? b64.enc(data.nrm) : null }); const v = { json, key: hashStr(json), zup: !!data.zup }; geoCache.set(data.pos, v); return v;
+  let json = null;
+  try { const z = packGeo(data.pos, data.nrm); const back = unpackGeo(z); const a = new Uint32Array(data.pos.buffer, data.pos.byteOffset, data.pos.length), b = new Uint32Array(back.pos.buffer);
+    let ok = a.length === b.length; for (let i = 0; ok && i < a.length; i++) if (a[i] !== b[i]) ok = false;
+    if (ok && data.nrm) for (let i = 0; ok && i < data.nrm.length; i += 3) { const l = Math.hypot(data.nrm[i], data.nrm[i + 1], data.nrm[i + 2]); if (l > 1e-6 && (data.nrm[i] * back.nrm[i] + data.nrm[i + 1] * back.nrm[i + 1] + data.nrm[i + 2] * back.nrm[i + 2]) / l < 0.9999) ok = false; }
+    if (ok) json = JSON.stringify({ v: 2, z }); } catch (e) { console.warn('packed model storage failed, plain kept', e); }
+  if (!json) json = JSON.stringify({ pos: b64.enc(data.pos), nrm: data.nrm ? b64.enc(data.nrm) : null });
+  const v = { json, key: hashStr(json), zup: !!data.zup }; geoCache.set(data.pos, v); return v;
 }
 function storedJson(d) {
   if (d.kind !== 'import') { const json = JSON.stringify(docToStore(d)); return { json, hash: hashStr(json) }; }
   const geo = storedGeo(d.data); const { pos, nrm, ...rest } = d.data; void pos; void nrm;
   const json = JSON.stringify({ id: d.id, kind: d.kind, name: d.name, data: { ...rest, geo: geo.key } });
-  // Hash of the whole document as versions before the split stored it: an unchanged model is not uploaded again.
-  const legacy = () => { const c = legacyCache.get(d.data); if (c?.json === json) return c.hash; const v = { json, hash: hashStr(JSON.stringify(docToStore(d))) }; legacyCache.set(d.data, v); return v.hash; };
-  return { json, hash: hashStr(json), geo, legacy };
+  return { json, hash: hashStr(json), geo };
 }
 async function cloudSave() {
   if (!CLOUD.db || CLOUD.conflict || CLOUD.blocked) return; if (CLOUD.saving) { CLOUD.again = true; return; }
@@ -5282,18 +5319,21 @@ async function cloudSave() {
     const used = new Set(); for (const dm of curMeta?.docs || []) for (const r of dm.revs || []) { used.add(`${dm.id}~${r.rev}`); if (r.geo) used.add(geoPrefix(dm.id, r.geo.key)); }
     // A model's triangles half uploaded when the cloud asked to slow down are kept and finished, not removed: a big
     // model under the rate limit otherwise started from zero every time and never got stored.
+    // Packing a model takes a moment (a second for 400k triangles): one model at a time, with the page free in between.
+    for (const d of S.project.docs) if (d.kind === 'import' && !(geoCache.get(d.data.pos)?.zup === !!d.data.zup)) { storedGeo(d.data); await new Promise((r) => setTimeout(r, 30)); }
     const want = new Set(); for (const d of S.project.docs) if (d.kind === 'import') want.add(geoPrefix(d.id, storedJson(d).geo.key));
     // Only a save that started minutes ago is abandoned: another tab may be writing these parts right now, and removing
     // them left its finished revision pointing at nothing (BASE lost a version that way).
     for (const p of curMeta?.pending || []) if (!used.has(p.prefix) && !want.has(p.prefix) && Date.now() - (p.at || 0) > 120000) for (let i = 0; i < p.n; i++) { CLOUD.written.delete(`${p.prefix}~${i}`); await chunkCol().doc(`${p.prefix}~${i}`).delete().catch(() => {}); }
     for (const d of S.project.docs) {
       const st = storedJson(d); const { json, hash } = st; const old = prev.get(d.id); const top = old?.revs?.[0];
-      if (top && (top.hash === hash || (!top.geo && st.legacy && top.hash === st.legacy()))) { docs.push({ ...old, name: d.name, kind: d.kind }); continue; }
+      // A model still stored whole in the old way (before triangles were split off) is stored again once, packed.
+      if (top && top.hash === hash) { docs.push({ ...old, name: d.name, kind: d.kind }); continue; }
       const rev = Date.now().toString(36) + Math.random().toString(36).slice(2, 5); const n = Math.max(1, Math.ceil(json.length / CHUNK));
       const entry = { rev, chunks: n, hash, savedAt: Date.now(), size: json.length }; puts.push({ prefix: `${d.id}~${rev}`, n, json });
       if (st.geo) {
         const had = (old?.revs || []).find((r) => r.geo?.key === st.geo.key); const gn = had ? had.geo.chunks : Math.max(1, Math.ceil(st.geo.json.length / CHUNK));
-        entry.geo = { key: st.geo.key, chunks: gn }; entry.size += st.geo.json.length; if (!had) puts.push({ prefix: geoPrefix(d.id, st.geo.key), n: gn, json: st.geo.json, geo: true });
+        entry.geo = { key: st.geo.key, chunks: gn, bytes: st.geo.json.length, ...(st.geo.json.startsWith('{"v":2') ? { v: 2 } : {}) }; entry.size += st.geo.json.length; if (!had) puts.push({ prefix: geoPrefix(d.id, st.geo.key), n: gn, json: st.geo.json, geo: true });
       }
       // Earlier revisions of a model are kept only while they share its triangles: another copy of them costs megabytes.
       const older = (old?.revs || []).filter((r) => !st.geo || r.geo?.key === st.geo.key); for (const r of old?.revs || []) if (!older.includes(r)) drop.push([d.id, r]);
@@ -8085,7 +8125,26 @@ function mergeProject(p) {
   toast(`Добавлено документов: ${p.docs.length}`, 'info');
 }
 // The tab strip scrolls; the full list is one click away, and file commands live in one menu.
-$('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP / STL…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()], null, ['Оформление…', () => themeMenu(r)]]); };
+$('bFile').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, [['Открыть проект…', () => $('bImport').click()], ['Сохранить проект…', () => $('bExport').click()], null, ['Импорт STEP / STL…', () => $('stepIn').click()], ['Экспорт STL…', () => $('bStl').click()], null, ['Место в облаке…', () => openStorage()], ['Оформление…', () => themeMenu(r)]]); };
+// What each document takes in the cloud, biggest first, with a way to remove the ones not needed. A model's triangles
+// shared by its versions count once; a model still stored the old plain way says that its next save packs it.
+function openStorage() {
+  const box = $('projBox'); $('projModal').hidden = false; box.textContent = '';
+  const mb = (n) => (n >= 1e6 ? fmt(n / 1e6, 1) + ' МБ' : fmt(n / 1e3, 0) + ' КБ'); const metaDocs = new Map((CLOUD.meta?.docs || []).map((d) => [d.id, d]));
+  const rows = S.project.docs.map((d) => { const dm = metaDocs.get(d.id); let size = 0, plain = false, revs = 0;
+    if (dm) { const geo = new Map(); for (const r of dm.revs || []) { revs++; const gl = r.geo ? r.geo.bytes ?? r.geo.chunks * CHUNK : 0; size += Math.max(0, (r.size || 0) - gl); if (r.geo) geo.set(r.geo.key, gl); } for (const v of geo.values()) size += v;
+      if (d.kind === 'import') plain = dm.revs?.[0]?.geo?.v !== 2; }
+    else size = d.kind === 'import' ? (geoCache.get(d.data.pos)?.json.length ?? Math.round(d.data.pos.byteLength * 2.7)) : storedJson(d).json.length;
+    return { d, size, plain, revs }; }).sort((a, b) => b.size - a.size);
+  const total = rows.reduce((t, r) => t + r.size, 0); const waiting = rows.filter((r) => r.plain).length;
+  box.append(h('div', { class: 'proj-h' }, h('h2', {}, 'Место в облаке'), h('span', { class: 'note' }, `${mb(total)} в ${rows.length} ${plural(rows.length, 'документе', 'документах', 'документах')}` + (waiting ? `. ${waiting} ${plural(waiting, 'модель упакуется', 'модели упакуются', 'моделей упакуются')} при следующем сохранении, в несколько раз меньше` : '')),
+    h('div', { class: 'acts' }, h('button', { class: 'ghost-btn', onclick: () => { $('projModal').hidden = true; } }, 'Закрыть'))));
+  const tbl = h('div', { class: 'proj-list' });
+  for (const r of rows) { const kind = { part: 'деталь', asm: 'сборка', drw: 'чертёж', import: 'модель' }[r.d.kind] || r.d.kind;
+    tbl.append(h('div', { class: 'proj-row' + (r.d.id === S.project.active ? ' cur' : '') }, h('span', { class: 'nm' }, r.d.name), h('span', { class: 'meta' }, kind + (r.revs > 1 ? `, версий ${r.revs}` : '')), h('span', { class: 'meta' }, mb(r.size) + (r.plain ? ', не упакована' : '')),
+      h('div', { class: 'acts' }, h('button', { class: 'chip', title: 'Удалить документ из проекта', onclick: () => { $('projModal').hidden = true; deleteDoc(r.d); } }, 'Удалить')))); }
+  box.append(tbl);
+}
 // Light, dark or as the system says; kept in this browser.
 const THEMES = [['', 'Как в системе'], ['light', 'Светлое'], ['dark', 'Тёмное']];
 function applyTheme(t) { if (t) document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme'); try { localStorage.setItem('rezets-theme', t); } catch { /* not kept */ } }
@@ -8604,5 +8663,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
