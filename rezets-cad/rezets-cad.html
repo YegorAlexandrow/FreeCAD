@@ -1604,8 +1604,11 @@ function followSketchRefs(f, body, cyls) {
   const verts = [...T.verts.filter(on)]; for (const [a, b2] of T.lines) for (const q of [a, b2]) if (on(q) && !verts.some((v) => v.distanceTo(q) < 1e-6)) verts.push(q);
   const circles = T.circles.filter((c) => on(c.c) && Math.abs(Math.abs(c.n.dot(N)) - 1) < 1e-6);
   let moved = false;
+  // How far the points followed so far moved: of two corners as like as each other (a groove's edge next to the
+  // lever's), the one that keeps the profile moving together wins over the nearer one (ARM3 cover, 0.75 against 1).
+  const shift = new THREE.Vector3(); let nShift = 0;
   for (const p of pts) {
-    const w = world(p);
+    const w = world(p); const wp = nShift ? w.clone().addScaledVector(shift, 1 / nShift) : w;
     // Older sketches stored only the coordinates: a point that sits on the model now starts following it from here.
     if (!p.mref) { const v = verts.find((q) => q.distanceTo(w) < 1e-3); const c = !v && circles.find((q) => q.c.distanceTo(w) < 1e-3); if (v) p.mref = vertRef(body, v); else if (c) p.mref = circleRef(c); continue; }
     // A circle reference from before holes were told apart learns which one it is while it still sits on it.
@@ -1633,7 +1636,7 @@ function followSketchRefs(f, body, cyls) {
         const d = v.distanceTo(w); if (d < 1e-6) { best = { d, v }; break; }
         const has = vertNormals(body, v); const score = want.filter((n) => has.some((m) => m.dot(n) > 0.999)).length;
         if (score < Math.min(2, want.length)) continue;
-        if (!best || score > best.score || (score === best.score && d < best.d)) best = { d, v, score };
+        const dp = v.distanceTo(wp); if (!best || score > best.score || (score === best.score && dp < best.dp)) best = { d, dp, v, score };
       }
       // A vertex where only some of the same faces meet is another corner: following it carried points and the whole
       // profile hundreds of millimetres away (BASE, Эскиз8). Only a corner of all the same faces is followed; a near
@@ -1651,6 +1654,7 @@ function followSketchRefs(f, body, cyls) {
     }
     if (!best) continue;
     if (best.d < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
+    if (!best.c) { shift.add(best.v.clone().sub(w)); nShift++; }
     const d = best.v.clone().sub(o); const x = +d.dot(X).toFixed(6), y = +d.dot(Y).toFixed(6);
     for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && best.c) e.r = best.c.r;
     { const { home, ...m } = p.mref; const far = !best.home && !best.c && best.d > 1e-3; p.x = x; p.y = y; p.mref = { ...m, w: best.v.toArray().map((q) => +q.toFixed(6)), ...(best.c ? { r: best.c.r } : {}), ...(far ? { home: home || p.mref.w } : !best.home && home ? { home } : {}) }; moved = true; }
