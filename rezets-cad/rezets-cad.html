@@ -6147,15 +6147,15 @@ function stlFaces(tri) {
 function backToAssembly() { const back = S.insertBack; S.insertBack = null; if (!back || !docEntry(back)) return; const id = activeEntry().id; switchDoc(back); asmInsert(id); }
 // The same model added again (same name and the same triangles) opens the one already there instead of a silent
 // duplicate; a copy is one click away.
-// A model with the same name is compared whole (a sample of every 97th number took an edited model for the old one and
-// opened that). The same triangles open the one there; other triangles under the same name are most often a new
-// version of it: it can replace the old one in place, so the assemblies and parts that use it get the new shape.
+// A model with the same name is compared whole (a sample of every 97th number took an edited model for the old one).
+// Other triangles under the same name are most often a new version of it: it can replace the old one in place, so the
+// assemblies and parts that use it get the new shape.
 function addImport(data) {
   const same = (d) => d.data.pos?.length === data.pos.length && d.data.pos.every((v, i) => v === data.pos[i]);
   const named = S.project.docs.filter((d) => d.kind === 'import' && d.name.replace(/ \(\d+\)$/, '') === data.name);
   const twin = named.find(same);
-  if (twin) { if (twin.id !== S.project.active) switchDoc(twin.id); toast(`Модель «${data.name}» уже есть в проекте такой же, она открыта`, 'info', [{ label: 'Добавить копию', act: () => { addDoc('import', data.name, data); backToAssembly(); } }]); return; }
-  const old = named[0];
+  // The very same model is simply added again: several copies are wanted as often as not.
+  const old = !twin && named[0];
   if (old) { const users = docUsers(old);
     showModal(`«${data.name}» уже есть в проекте`, `Новый файл отличается от загруженного раньше.${users.length ? ` Модель используется: ${users.map((u) => '«' + u.name + '»').join(', ')}.` : ''} Заменить её новой или добавить отдельной моделью?`, null, [
       ['Заменить', () => { closeModal(); replaceImport(old, data); }], ['Добавить отдельно', () => { closeModal(); addDoc('import', data.name, data); backToAssembly(); }], ['Закрыть', closeModal]]);

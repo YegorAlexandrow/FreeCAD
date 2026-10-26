@@ -1,4 +1,4 @@
-// M44: the same STL added twice opens the import already there (no silent duplicate); «Добавить копию» adds it.
+// The same STL added twice is added twice (the user loads several of one model): no «уже есть», no question.
 const open = require('./harness.js');
 (async () => { const { b, p, logs } = await open(); await p.waitForTimeout(800);
   await p.evaluate(async () => { const R = window.__rezets; const v = [[0, 0, 0], [10, 0, 0], [10, 10, 0], [0, 10, 0], [0, 0, 10], [10, 0, 10], [10, 10, 10], [0, 10, 10]];
@@ -7,6 +7,6 @@ const open = require('./harness.js');
     t += 'endsolid box\n'; await R.importStlFile(new File([t], 'open.stl')); const n1 = R.S.project.docs.filter((d) => d.kind === 'import').length; await R.importStlFile(new File([t], 'open.stl')); window.__n = [n1, R.S.project.docs.filter((d) => d.kind === 'import').length]; });
   await p.waitForTimeout(500);
   const n = await p.evaluate(() => window.__n); const note = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((e) => e.textContent).find((x) => x.includes('уже есть')) || null);
-  await p.click('.toast .acts button >> text=Добавить копию'); await p.waitForTimeout(300); const n3 = await p.evaluate(() => window.__rezets.S.project.docs.filter((d) => d.kind === 'import').length);
-  console.log(JSON.stringify({ n, note, n3 })); console.log('expect n [1,1], a note «уже есть», n3 2');
+  const modal = await p.evaluate(() => !document.getElementById('modal').hidden);
+  console.log(JSON.stringify({ n, note, modal })); console.log('expect n [1,2], note null, modal false');
   console.log(logs.join('\n')); await b.close(); })();
