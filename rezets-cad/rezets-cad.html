@@ -500,7 +500,10 @@ const isRefPt = (id) => id in REF_PTS;
 const newSketchData = () => ({ pts: {}, ents: {}, cons: {}, nid: 1 });
 const gp = (sk, id) => sk.pts[id] || REF_PTS[id];
 const ge = (sk, id) => sk.ents[id] || REF_ENTS[id];
-const nid = (sk) => String(sk.nid++);
+const nid = (sk) => {
+  if (!Number.isFinite(sk.nid)) sk.nid = 1 + Math.max(0, ...[sk.pts, sk.ents, sk.cons].flatMap((o) => Object.keys(o || {}).map(Number)).filter(Number.isFinite));
+  return String(sk.nid++);
+};
 // Splines interpolate their points (centripetal Catmull-Rom); ellipses have a centre, a point at
 // the end of the major axis (p1) and the minor radius (r).
 const entPts = (e) => [e.p1, e.p2, e.c, ...(e.pts || [])].filter(Boolean);
