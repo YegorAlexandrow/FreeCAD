@@ -4511,15 +4511,25 @@ function followEdges(f, body, cyls) {
     // An edge a cut shortened keeps its old ends and gets them back once they are on the body again (the cut undone).
     if (e.was) { const [wa, wb] = e.was.map(V3); const back = topo.lines.some(([a, b]) => { const d = b.clone().sub(a); const L2 = d.lengthSq(); const on = (P) => { const t = P.clone().sub(a).dot(d) / L2; return L2 > 1e-12 && t > -1e-4 && t < 1 + 1e-4 && P.clone().sub(a).addScaledVector(d, -t).length() < tol; }; return on(wa) && on(wb); });
       if (back) { const { was, ...rest } = e; return { ...rest, a: was[0], b: was[1] }; } }
-    if (topo.lines.some(within)) return e.sig ? e : { ...e, sig: sig(A, B) };
+    // Still on the body: as a piece of a longer edge (a box made taller by a variable) the whole edge is taken, the
+    // fillet ran over only the old length before.
+    { const L = topo.lines.find(within); if (L) { const full = L[0].distanceTo(L[1]) > len + 1e-6 && !e.was; const out = full ? { ...e, a: L[0].toArray(), b: L[1].toArray() } : e; return out.sig ? out : { ...out, sig: sig(V3(out.a), V3(out.b)) }; } }
     let par = topo.lines.filter((l, i) => !held.has(i)).filter(([a, b]) => { const d = b.clone().sub(a); return d.length() > 1e-9 && Math.abs(d.clone().normalize().dot(dir)) > 1 - 1e-6; });
     if (e.sig) { const same = par.filter(([a, b]) => sig(a, b) === e.sig); if (same.length) par = same; }
     const near = (list) => list.sort((p, q) => p[0].clone().add(p[1]).multiplyScalar(0.5).distanceTo(M) - q[0].clone().add(q[1]).multiplyScalar(0.5).distanceTo(M))[0];
     // A piece of the same line overlapping the old edge first (a cut shortened it): an edge of the same length elsewhere
     // took the fillet across the part before, and the revert then left it there.
     const along = ([a]) => a.clone().sub(A).cross(dir).length() < tol; const span = ([a, b]) => { const s = a.clone().sub(A).dot(dir), t = b.clone().sub(A).dot(dir); return Math.min(Math.max(s, t), len) - Math.max(Math.min(s, t), 0); };
-    const overlap = par.filter((l) => along(l) && span(l) > tol).sort((p, q) => span(q) - span(p))[0];
-    const hit = overlap || near(par.filter(([a, b]) => Math.abs(a.distanceTo(b) - len) < tol)) || near(par.filter(along));
+    let overlap = par.filter((l) => along(l) && span(l) > tol).sort((p, q) => span(q) - span(p))[0];
+    // Pieces of the same line that meet end to end (a wall and the plate above it, built by different features) are
+    // one edge: the piece found grows over its neighbours on the line.
+    if (overlap) { const s0 = sig(overlap[0], overlap[1]); const pos = (v) => v.clone().sub(A).dot(dir); let lo = Math.min(pos(overlap[0]), pos(overlap[1])), hi = Math.max(pos(overlap[0]), pos(overlap[1])); let grew = true;
+      while (grew) { grew = false; for (const l of topo.lines) { if (!along(l) || Math.abs(Math.abs(l[1].clone().sub(l[0]).normalize().dot(dir)) - 1) > 1e-6 || sig(l[0], l[1]) !== s0) continue; const a = Math.min(pos(l[0]), pos(l[1])), b = Math.max(pos(l[0]), pos(l[1])); if (a < lo - tol && Math.abs(b - lo) < tol) { lo = a; grew = true; } if (b > hi + tol && Math.abs(a - hi) < tol) { hi = b; grew = true; } } }
+      const P = (t) => A.clone().addScaledVector(dir, t); if (hi - lo > overlap[0].distanceTo(overlap[1]) + tol) overlap = [P(lo), P(hi)]; }
+    // Moved and resized at once (a wall made thicker and the box taller): the nearest edge between the same faces, if it
+    // is near enough to be the same one.
+    const close = (l) => l && l[0].clone().add(l[1]).multiplyScalar(0.5).distanceTo(M) < Math.max(3, 0.3 * len) ? l : null;
+    const hit = overlap || near(par.filter(([a, b]) => Math.abs(a.distanceTo(b) - len) < tol)) || near(par.filter(along)) || (e.sig && par.length && par.every(([a, b]) => sig(a, b) === e.sig) ? close(near(par)) : null);
     if (!hit) return e; held.add(topo.lines.indexOf(hit)); const { was, ...rest } = e;
     return { ...rest, a: hit[0].toArray(), b: hit[1].toArray(), ...(hit === overlap ? { was: was || [e.a, e.b] } : {}) };
   });
