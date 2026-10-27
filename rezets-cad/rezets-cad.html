@@ -507,6 +507,25 @@ const nid = (sk) => {
 // Splines interpolate their points (centripetal Catmull-Rom); ellipses have a centre, a point at
 // the end of the major axis (p1) and the minor radius (r).
 const entPts = (e) => [e.p1, e.p2, e.c, ...(e.pts || [])].filter(Boolean);
+// Ends of lines and arcs that meet nothing: why a profile does not close. Ends at one place count as joined (a
+// line drawn to the end of an arc without the point being shared).
+function openEnds(sk) {
+  const ends = []; for (const e of Object.values(sk.ents)) { if (e.constr || e.ext || e.closed || !e.p1 || !e.p2 || e.t === 'ellipse') continue; for (const id of [e.p1, e.p2]) { const q = gp(sk, id); if (q) ends.push({ id, x: q.x, y: q.y }); } }
+  return ends.filter((a) => ends.filter((b) => Math.hypot(a.x - b.x, a.y - b.y) < 1e-5).length === 1);
+}
+// Open ends in pairs, nearest first: the gaps a profile has.
+function sketchGaps(sk, max = Infinity) {
+  const ends = openEnds(sk); const pairs = []; for (let i = 0; i < ends.length; i++) for (let j = i + 1; j < ends.length; j++) pairs.push([ends[i], ends[j], Math.hypot(ends[i].x - ends[j].x, ends[i].y - ends[j].y)]);
+  pairs.sort((u, v) => u[2] - v[2]); const used = new Set(), out = []; for (const [a, b, d] of pairs) { if (used.has(a.id) || used.has(b.id) || d > max) continue; used.add(a.id); used.add(b.id); out.push({ a, b, d }); } return { ends, gaps: out };
+}
+const gapNote = (sk) => { const { ends, gaps } = sketchGaps(sk); if (!ends.length) return ''; const g = gaps[0];
+  return g ? ` Разрыв ${fmt(g.d)} мм у точки (${fmt(g.a.x)}; ${fmt(g.a.y)})${ends.length > 2 ? `, свободных концов ${ends.length}` : ''}. В эскизе они отмечены красным, кнопка «Замкнуть разрывы» соединит их` : ` Свободный конец у точки (${fmt(ends[0].x)}; ${fmt(ends[0].y)}), в эскизе он отмечен красным`; };
+// Ends free to move are joined; ends held in place (on corners of the model, by dimensions) get a line between them:
+// Деталь 12 traced a step of the model 0.75 mm high, and its two corners can never be one point.
+function closeGaps() { const sk = editSk(); if (!sk) return; const { gaps } = sketchGaps(sk, 5); let joined = 0, bridged = 0;
+  for (const g of gaps) { const c = { id: nid(sk), t: 'coincident', refs: [g.a.id, g.b.id] }; const r = tryAddConstraint(sk, c, { quiet: true }); if (r.status === 'ok') { joined++; continue; }
+    if (sk.cons[c.id]) delete sk.cons[c.id]; const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: g.a.id, p2: g.b.id }; bridged++; }
+  commitSketch(); toast([joined && `соединено концов: ${joined}`, bridged && `достроено отрезков: ${bridged}`].filter(Boolean).join(', ').replace(/^./, (m) => m.toUpperCase()) || 'Разрывов ближе 5 мм нет', 'ok'); }
 function curvePts(sk, e, per = 20) {
   if (e.t === 'ellipse') { const c = gp(sk, e.c), a = gp(sk, e.p1); const ax = a.x - c.x, ay = a.y - c.y; const A = Math.hypot(ax, ay) || 1e-9; const ux = ax / A, uy = ay / A; const N = Math.min(720, Math.max(96, Math.ceil(Math.PI / Math.acos(Math.max(-1, 1 - 0.002 / Math.max(A, e.r, 1e-6)))))); const out = [];
     for (let i = 0; i <= N; i++) { const t = 2 * Math.PI * i / N; const x = A * Math.cos(t), y = e.r * Math.sin(t); out.push({ x: c.x + ux * x - uy * y, y: c.y + uy * x + ux * y }); } return out; }
@@ -1908,7 +1927,7 @@ function isInside(body, p) {
 }
 function buildTool(f, body, cyls = []) {
   const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
-  const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров');
+  const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров.' + gapNote(sf.sk));
   const st = {}; const selIds = selectedRegionIds(f, reg, st); const loops0 = profileLoops(reg, selIds); if (!loops0.length) throw new Error('Не выбрано ни одной области');
   if (Array.isArray(f.regions) && f.regions.length && st.sure) { const ids = [...selIds]; const pts = ids.map((i) => reg.faces[i].sample.map((v) => +v.toFixed(6))); const sigs = ids.map((i) => reg.faces[i].sig); if (JSON.stringify([ids, pts, sigs]) !== JSON.stringify([f.regions, f.regionPts, f.regionSigs])) { f.regions = ids; f.regionPts = pts; f.regionSigs = sigs; } }
   // Areas that meet only at a corner leave the part there zero thick (in the cut, pieces joined by a point; in a
@@ -2625,6 +2644,9 @@ function drawSketchObjects(f, active) {
   }
   const pg = new THREE.BufferGeometry(); pg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)); pg.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
   const pm = new THREE.Points(pg, new THREE.PointsMaterial({ size: 7, sizeAttenuation: false, vertexColors: true, map: dotTex, alphaTest: 0.5, depthTest: false, transparent: true })); pm.renderOrder = 12; groups.sketch.add(pm);
+  // Ends that meet nothing, in a red ring under their point: where the profile is open.
+  { const oe = openEnds(sk); if (oe.length) { const og = new THREE.BufferGeometry(); og.setAttribute('position', new THREE.Float32BufferAttribute(oe.flatMap((q) => W(q.x, q.y).toArray()), 3));
+    const om = new THREE.Points(og, new THREE.PointsMaterial({ size: 15, sizeAttenuation: false, color: colors['geo-bad'], map: dotTex, alphaTest: 0.5, depthTest: false, transparent: true, opacity: 0.55 })); om.renderOrder = 11; groups.sketch.add(om); } }
   // Dimension graphics.
   const dimArr = [];
   for (const c of [...Object.values(sk.cons), ...(S.dimPreview ? [S.dimPreview] : [])]) if (DIM_TYPES.has(c.t)) for (const s of dimGeometry(sk, c).lines) dimArr.push(...W(s[0], s[1]).toArray(), ...W(s[2], s[3]).toArray());
@@ -4051,7 +4073,7 @@ function exitSketch() {
   // Leaving the points of a hole being set up goes back to its panel with everything chosen there (the hole was lost).
   if (S.resumePM) { const pm = S.resumePM; S.resumePM = null; if (featById(f.id)) { openPM(pm); return; } }
   if (S.afterSketch === 'hole') { S.afterSketch = null; if (holePointsCount(f)) { S.selectedTree = 'feat:' + f.id; cmdHole(); return; } toast('В эскизе нет точек центров, отверстие не создано. Поставьте точки инструментом «Точка»', 'warn'); }
-  if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана. Проверьте, что концы линий соединены`, 'warn'); }
+  if (S.afterSketch?.type) { const q = S.afterSketch; S.afterSketch = null; if (sketchRegions(f).faces.length) { S.selectedTree = 'feat:' + f.id; cmdFeature(q.type, q.mode); return; } if (Object.keys(f.sk.ents).length) toast(`В «${f.name}» нет замкнутого контура, операция не создана.${gapNote(f.sk) || ' Проверьте, что концы линий соединены'}`, 'warn'); }
   if (featById(f.id)) { S.selectedTree = 'feat:' + f.id; renderTree(); }
   const reg = sketchRegions(f); if (reg.faces.length && !S.doc.features.some((g) => g.sketch === f.id)) setHint(`Эскиз готов: ${reg.faces.length} ${plural(reg.faces.length, 'замкнутая область', 'замкнутые области', 'замкнутых областей')}. ${f.plane?.face || f.plane?.label === 'Грань' ? 'Нажмите «Вытянуть» (E) или «Вырез» (X)' : 'Нажмите «Вытянуть» (E) или «Повернуть» (R)'}`);
 }
@@ -4076,7 +4098,7 @@ function cmdFeature(type, mode) {
     S.pickSketch = { type, mode }; S.selectedTree = null; updateSketchVisuals(); renderSide(); setHint('Щёлкните эскиз в дереве или его линии в окне, либо плоскую грань для нового эскиза. Esc: отмена'); requestRender(); return;
   }
   S.pickSketch = null;
-  const reg = sketchRegions(sf); if (!reg.faces.length) { toast(`В «${sf.name}» нет замкнутых контуров. Проверьте, что концы линий соединены.`, 'warn'); return; }
+  const reg = sketchRegions(sf); if (!reg.faces.length) { toast(`В «${sf.name}» нет замкнутых контуров.${gapNote(sf.sk) || ' Проверьте, что концы линий соединены'}`, 'warn'); return; }
   const f = type === 'extrude'
     ? { id: fid(), type: 'extrude', name: nextName(mode === 'cut' ? 'Вырез' : 'Бобышка'), sketch: sf.id, mode, end: mode === 'cut' ? 'through' : 'blind', depth: 10, dir: 1, regions: null }
     : { id: fid(), type: 'revolve', name: nextName(mode === 'cut' ? 'ВырезПоворотом' : 'Поворот'), sketch: sf.id, mode, angle: 360, dir: 1, axis: defaultAxis(sf), regions: null };
@@ -7792,7 +7814,10 @@ function renderSketchPanel() {
     ...(a && a.dofMain ? (() => { const ex = explainFree(sk, a); const n = S.allFree ? ex.length : 5;
       return [...ex.slice(0, n).map((t, i) => h('div', { class: 'note', style: 'margin-top:4px;cursor:pointer', title: 'Выделить на эскизе', onclick: () => { S.sel = new Set(ex.keys[i]); refreshSketch(); } }, t)),
         ex.length > n ? h('button', { class: 'chip', style: 'margin-top:4px', onclick: () => { S.allFree = true; renderSide(); } }, `Ещё ${ex.length - n}`) : null]; })() : []),
-    ...(a && a.redundant.size ? redundantList(sk, a) : [])));
+    ...(a && a.redundant.size ? redundantList(sk, a) : []),
+    ...(() => { const { ends, gaps } = sketchGaps(sk); if (!ends.length) return []; const near = gaps.filter((g) => g.d <= 5);
+      return [h('div', { class: 'note', style: 'margin-top:6px;color:var(--bad)' }, `Контур не замкнут: свободных концов ${ends.length} (красные кружки)` + (gaps[0] ? `, ближайший разрыв ${fmt(gaps[0].d)} мм` : '')),
+        near.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: closeGaps, title: 'Соединить свободные концы, лежащие ближе 5 мм друг к другу' }, `Замкнуть разрывы (${near.length})`)) : null]; })()));
   const sel = [...S.sel];
   if (sel.length) {
     const grp = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Выделено: ${sel.length}`));
