@@ -1604,10 +1604,107 @@ function followOtherSketches(f, features) {
   if (moved) solveSketch(f.sk);
   if (lost.length) S.dangling.set(f.id, [...new Set([...(S.dangling.get(f.id) || []), ...lost])]);
 }
-function followSketchRefs(f, body, cyls) {
-  S.dangling.delete(f.id); const pts = Object.values(f.sk.pts).filter((p) => p.fixed && p.free && !p.mref?.sk); if (!pts.length) return;
+// A corner of the model a sketch is tied to is first of all a point of an earlier sketch, carried by its extrusion: the
+// point itself on a parallel plane, or the end of its edge along the extrusion on a plane across it. Tied to that
+// source, the corner is worked out from the sketch, exactly, whatever moved; looking for a corner that looks the
+// same (the same faces meeting there) on the rebuilt model went to another corner 26 mm away (Деталь 12, Эскиз5)
+// and stayed there after the change was undone.
+const SRC_TOL = 1e-3, REF_REACH = 3;
+const uniqVerts = (body) => { const pos = body.getAttribute('position'); const seen = new Map(); for (let i = 0; i < pos.count; i++) { const k = Math.round(pos.getX(i) * 1e4) + ',' + Math.round(pos.getY(i) * 1e4) + ',' + Math.round(pos.getZ(i) * 1e4); if (!seen.has(k)) seen.set(k, new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i))); } return [...seen.values()]; };
+// Corners of the body on the line through a source point along its extrusion, in the plane of the sketch, in order.
+function cornersAlong(body, pl, ws, n) { const o = V3(pl.o), N = V3(pl.n); return uniqVerts(body).filter((v) => Math.abs(v.clone().sub(o).dot(N)) < SRC_TOL && v.clone().sub(ws).addScaledVector(n, -v.clone().sub(ws).dot(n)).length() < SRC_TOL).sort((a, b) => a.clone().sub(ws).dot(n) - b.clone().sub(ws).dot(n)); }
+// Normals of the side faces an extruded line or arc makes at one of its ends.
+function sideNormals(s, e, id) { const P = (q) => toWorld(s.plane, q.x, q.y); const q = gp(s.sk, id); if (!q) return [];
+  if (e.t === 'line') { const a = P(gp(s.sk, e.p1)), b = P(gp(s.sk, e.p2)); return [b.sub(a).normalize().cross(V3(s.plane.n))]; }
+  if ((e.t === 'arc' || e.t === 'circle') && e.c) return [P(q).sub(P(gp(s.sk, e.c))).normalize()]; return []; }
+// A corner where an edge of one extrusion crosses an edge of another (no sketch point there): the crossing of the two
+// sketch curves as they lie in the plane of the sketch. A curve of a sketch on a parallel plane lies in it as it is; a
+// line of a sketch across it, extruded along the plane, leaves a straight line in it.
+function curveIn(pl, sf, e) {
+  const N = V3(pl.n), n = V3(sf.plane.n), o = V3(pl.o), X = V3(pl.x), Y = V3(pl.y); const to2 = (w) => { const d = w.clone().sub(o); return [d.dot(X), d.dot(Y)]; };
+  const par = Math.abs(Math.abs(n.dot(N)) - 1) < 1e-9, across = Math.abs(n.dot(N)) < 1e-9; const P = (id) => { const q = gp(sf.sk, id); return q && toWorld(sf.plane, q.x, q.y); };
+  if (e.constr || e.ext) return null;
+  if (par && e.t === 'line') { const a = P(e.p1), b = P(e.p2); if (!a || !b) return null; const A = to2(a), B = to2(b); return { line: true, p: A, d: [B[0] - A[0], B[1] - A[1]] }; }
+  if (par && (e.t === 'arc' || e.t === 'circle')) { const c = P(e.c); return c ? { circle: true, c: to2(c), r: e.r } : null; }
+  if (across && e.t === 'line') { const a = P(e.p1), b = P(e.p2); if (!a || !b) return null; const da = a.clone().sub(o).dot(N), db = b.clone().sub(o).dot(N); if (Math.abs(da - db) < 1e-9) return null;
+    const q = a.clone().lerp(b, da / (da - db)); const dn = [n.dot(X), n.dot(Y)]; return { line: true, p: to2(q), d: dn }; }
+  return null;
+}
+const curveDist = (c, w) => { if (c.line) { const L = Math.hypot(c.d[0], c.d[1]) || 1; return Math.abs((w[0] - c.p[0]) * c.d[1] - (w[1] - c.p[1]) * c.d[0]) / L; } return Math.abs(Math.hypot(w[0] - c.c[0], w[1] - c.c[1]) - c.r); };
+function crossings(a, b) {
+  if (a.circle && b.line) [a, b] = [b, a];
+  if (a.line && b.line) { const den = a.d[0] * b.d[1] - a.d[1] * b.d[0]; const La = Math.hypot(...a.d), Lb = Math.hypot(...b.d); if (Math.abs(den) < 1e-3 * La * Lb) return []; const t = ((b.p[0] - a.p[0]) * b.d[1] - (b.p[1] - a.p[1]) * b.d[0]) / den; return [[a.p[0] + a.d[0] * t, a.p[1] + a.d[1] * t]]; }
+  if (a.line && b.circle) { const L = Math.hypot(...a.d); const u = [a.d[0] / L, a.d[1] / L]; const f = [a.p[0] - b.c[0], a.p[1] - b.c[1]]; const B = f[0] * u[0] + f[1] * u[1], C = f[0] * f[0] + f[1] * f[1] - b.r * b.r; const D = B * B - C; if (D < -1e-9) return []; const s = Math.sqrt(Math.max(0, D)); return [-B - s, -B + s].map((t) => [a.p[0] + u[0] * t, a.p[1] + u[1] * t]); }
+  const dx = b.c[0] - a.c[0], dy = b.c[1] - a.c[1], d = Math.hypot(dx, dy); if (d < 1e-9 || d > a.r + b.r + 1e-9 || d < Math.abs(a.r - b.r) - 1e-9) return []; const l = (a.r * a.r - b.r * b.r + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a.r * a.r - l * l)); const m = [a.c[0] + dx * l / d, a.c[1] + dy * l / d];
+  return [[m[0] - dy * h / d, m[1] + dx * h / d], [m[0] + dy * h / d, m[1] - dx * h / d]];
+}
+function findCrossing(f, w2, features) {
+  const idx = features.indexOf(f); const cands = [];
+  for (const g of features.slice(0, idx)) { if (g.type !== 'extrude' || g.suppressed) continue; const sf = features.find((x) => x.id === g.sketch); if (!sf?.sk) continue;
+    for (const e of Object.values(sf.sk.ents)) { const c = curveIn(f.plane, sf, e); if (c && curveDist(c, w2) < SRC_TOL) cands.push({ g, sf, e, c }); } }
+  // The latest pair whose crossing is the corner, from two different curves that do cross there.
+  for (let i = cands.length - 1; i >= 0; i--) for (let j = i - 1; j >= 0; j--) { const A = cands[i], B = cands[j]; if (A.sf === B.sf && A.e === B.e) continue; const xs = crossings(A.c, B.c); const k = xs.findIndex((q) => Math.hypot(q[0] - w2[0], q[1] - w2[1]) < SRC_TOL); if (k >= 0) return { x: [{ sk: A.sf.id, ent: A.e.id, by: A.g.id }, { sk: B.sf.id, ent: B.e.id, by: B.g.id }], k }; }
+  return null;
+}
+function findSource(f, p, features, body) {
+  const idx = features.indexOf(f); const N = V3(f.plane.n); const w = toWorld(f.plane, p.x, p.y); const want = (p.mref.ns || []).map((n) => V3(n)); const cands = [];
+  for (const g of features.slice(0, idx)) {
+    if (g.type !== 'extrude' || g.suppressed) continue; const sf = features.find((x) => x.id === g.sketch); if (!sf?.sk) continue;
+    const n = V3(sf.plane.n); const par = Math.abs(Math.abs(n.dot(N)) - 1) < 1e-9, across = Math.abs(n.dot(N)) < 1e-9; if (!par && !across) continue;
+    const at = new Map(); for (const e of Object.values(sf.sk.ents)) if (!e.constr) for (const id of [e.p1, e.p2].filter(Boolean)) { if (!at.has(id)) at.set(id, []); at.get(id).push(e); }
+    for (const [id, ents] of at) {
+      const q = sf.sk.pts[id]; if (!q) continue; const ws = toWorld(sf.plane, q.x, q.y); const d = w.clone().sub(ws); const axis = par ? N : n;
+      if (d.clone().addScaledVector(axis, -d.dot(axis)).length() > SRC_TOL) continue;
+      const has = ents.flatMap((e) => sideNormals(sf, e, id)); const score = want.filter((m) => has.some((h) => Math.abs(h.dot(m)) > 0.999)).length;
+      // A point that only happens to project onto the corner (a hole's centre, another part's outline) makes none of
+      // the faces meeting there: not a source.
+      if (want.length && !score) continue;
+      cands.push({ g, sf, id, par, score, ws, n });
+    }
+  }
+  if (!cands.length) return findCrossing(f, [p.x, p.y], features);
+  const rank = (c) => [c.score, c.g.id === f.plane?.face?.by ? 1 : 0, features.indexOf(c.g)];
+  cands.sort((a, b) => { const ra = rank(a), rb = rank(b); for (let i = 0; i < 3; i++) if (ra[i] !== rb[i]) return rb[i] - ra[i]; return 0; });
+  const c = cands[0]; const src = { sk: c.sf.id, pt: c.id, by: c.g.id };
+  if (!c.par) { const on = cornersAlong(body, f.plane, c.ws, c.n); const k = on.findIndex((v) => v.distanceTo(w) < SRC_TOL); if (k < 0) return null; src.k = k < on.length / 2 ? k : k - on.length; }
+  return src;
+}
+// Where a tied corner is now; null when its source is gone (the sketch point deleted, the extrusion switched off).
+function resolveSource(f, p, features, body) {
+  const src = p.mref.from;
+  if (src.x) { const cs = src.x.map((r) => { const g = features.find((x) => x.id === r.by); const sf = g && features.find((x) => x.id === r.sk); const e = sf?.sk?.ents[r.ent]; return g && !g.suppressed && e && features.indexOf(g) < features.indexOf(f) ? curveIn(f.plane, sf, e) : null; });
+    if (cs.some((c) => !c)) return null; const xs = crossings(cs[0], cs[1]); const q = xs[src.k] || (xs.length === 1 ? xs[0] : null); if (!q) return null; return { x: +q[0].toFixed(6), y: +q[1].toFixed(6), w: toWorld(f.plane, q[0], q[1]) }; }
+  const g = features.find((x) => x.id === src.by); const sf = g && features.find((x) => x.id === g.sketch); const q = sf?.sk?.pts[src.pt];
+  if (!g || g.suppressed || !q || features.indexOf(g) > features.indexOf(f)) return null;
+  const ws = toWorld(sf.plane, q.x, q.y); let v = ws;
+  if (src.k != null) { const on = cornersAlong(body, f.plane, ws, V3(sf.plane.n)); const i = src.k >= 0 ? src.k : on.length + src.k; if (i < 0 || i >= on.length) return null; v = on[i]; }
+  const d = v.clone().sub(V3(f.plane.o)); const x = +d.dot(V3(f.plane.x)).toFixed(6), y = +d.dot(V3(f.plane.y)).toFixed(6); return { x, y, w: toWorld(f.plane, x, y) };
+}
+// The sketch as its author left it (sketch.home): every rebuild solves it from there, not from what the last rebuild
+// made of it. A rebuild is then a function of the document alone, and a change undone gives back exactly what was:
+// solved from the previous result, a lip tied to a moved edge by an equal length came back mirrored (ARM3, 2.2 mm off).
+const homeOf = (sk) => ({ p: Object.fromEntries(Object.values(sk.pts).map((q) => [q.id, [q.x, q.y]])), r: Object.fromEntries(Object.values(sk.ents).filter((e) => e.r != null).map((e) => [e.id, e.r])) });
+function setHome(sk) { if (sk) sk.home = homeOf(sk); }
+// What the last rebuild left in the sketch (kept in memory, not in the file): a sketch that differs from it was changed
+// since by the user, in whatever way (dragged in the window, a dimension typed in a panel, a variable), and that change
+// is the new home.
+const outOf = (sk) => JSON.stringify(homeOf(sk)); const lastOut = new WeakMap();
+// Returns whether anything went back: only then the sketch is solved again (a sketch left as it is stays as the user
+// had it, even where it does not quite meet its own dimensions).
+function restoreHome(sk) { const prev = lastOut.get(sk); if (!sk.home || (prev && outOf(sk) !== prev)) { setHome(sk); return false; } let moved = false;
+  for (const [id, [x, y]] of Object.entries(sk.home.p)) { const q = sk.pts[id]; if (q && (q.x !== x || q.y !== y)) { q.x = x; q.y = y; moved = true; } }
+  for (const [id, r] of Object.entries(sk.home.r || {})) { const e = sk.ents[id]; if (e && e.r !== r) { e.r = r; moved = true; } } return moved; }
+function followSketchRefs(f, body, cyls, features = S.doc.features) {
+  S.dangling.delete(f.id); const all = Object.values(f.sk.pts).filter((p) => p.fixed && p.free && !p.mref?.sk); if (!all.length) return;
+  const srcLost = []; let srcMoved = false;
+  for (const p of all) { if (!p.mref?.from) continue; const r = resolveSource(f, p, features, body); if (!r) { srcLost.push(p.id); continue; }
+    if (Math.abs(r.x - p.x) > 1e-9 || Math.abs(r.y - p.y) > 1e-9) { p.x = r.x; p.y = r.y; srcMoved = true; } p.mref.w = r.w.toArray().map((v) => +v.toFixed(6)); }
+  const flagSrc = () => { for (const p of all) if (p.mref?.from) { if (srcLost.includes(p.id)) p.lost = true; else delete p.lost; } if (srcLost.length) S.dangling.set(f.id, [...new Set([...(S.dangling.get(f.id) || []), ...srcLost.filter((id) => usedPt(f.sk, id))])]); };
+  const pts = all.filter((p) => !p.mref?.from); if (!pts.length) { if (srcMoved) solveSketch(f.sk); flagSrc(); return; }
   const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
   const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3; const world = (p) => o.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y);
+  // Where each point on a corner is now, for what reads it (a point put back home leaves no stale place behind).
+  const seen = () => { for (const p of pts) if (p.mref && !p.mref.circle && !p.lost && !p.mref.from) p.mref.w = world(p).toArray().map((v) => +v.toFixed(6)); };
   // Nothing moved: each point is still on a vertex of the body, or on the axis of a hole made by the same operation
   // with the same radius. Then the edges of the model are not worked out at all (they cost most of a rebuild of a
   // part with many sketches on faces, BASE: 0.9 of 4.2 s).
@@ -1616,7 +1713,16 @@ function followSketchRefs(f, body, cyls) {
     const pos = body.getAttribute('position'); const q = 1e5; const key = (x, y, z) => Math.round(x * q) + ',' + Math.round(y * q) + ',' + Math.round(z * q);
     let vset = null; const onVertex = (w) => { if (!vset) { vset = new Set(); for (let i = 0; i < pos.count; i++) vset.add(key(pos.getX(i), pos.getY(i), pos.getZ(i))); } return vset.has(key(w.x, w.y, w.z)); };
     const onHole = (p, w) => (cyls || []).some((c) => (!p.mref.src || c.src === p.mref.src) && (p.mref.r == null || Math.abs(c.r - p.mref.r) < 1e-6) && w.clone().sub(c.p).cross(V3(c.dir).normalize()).length() < 1e-6);
-    if (pts.every((p) => { const w = world(p); return p.mref.circle || !p.mref.ns?.length ? onHole(p, w) : onVertex(w); })) return;
+    // A point on its corner that has no source yet gets one now, and the place it is tied to (its anchor) is
+    // remembered: each point on its own (one point off its corner by 0.0002 kept a whole sketch of ARM2 without).
+    let near = null; const nearVertex = (w) => { if (!near) near = uniqVerts(body); return near.some((v) => v.distanceTo(w) < SRC_TOL); };
+    for (const p of pts) { if (p.mref.circle || !p.mref.ns?.length || p.mref.nosrc || p.mref.from || p.lost || !nearVertex(world(p))) continue; if (!p.mref.a0) p.mref.a0 = world(p).toArray().map((v) => +v.toFixed(6));
+      const src = findSource(f, p, features, body); if (src) { p.mref.from = src; delete p.mref.a0;
+        // Straight onto the exact point of its source (the mesh keeps corners to float precision, 46.259998 for 46.26).
+        const r = resolveSource(f, p, features, body); if (r && (Math.abs(r.x - p.x) > 1e-12 || Math.abs(r.y - p.y) > 1e-12)) { p.x = r.x; p.y = r.y; p.mref.w = r.w.toArray().map((v) => +v.toFixed(6)); srcMoved = true; } } else p.mref.nosrc = 1; }
+    if (pts.every((p) => { const w = world(p); return p.mref.from || (p.mref.circle || !p.mref.ns?.length ? onHole(p, w) : onVertex(w)); })) {
+      if (srcMoved) solveSketch(f.sk); seen(); flagSrc(); return;
+    }
   }
   const T = edgeTopology(body, cyls);
   // Corners where a straight edge meets a curved face are not vertices of the topology, only ends of its lines.
@@ -1627,7 +1733,9 @@ function followSketchRefs(f, body, cyls) {
   // lever's), the one that keeps the profile moving together wins over the nearer one (ARM3 cover, 0.75 against 1).
   const shift = new THREE.Vector3(); let nShift = 0;
   for (const p of pts) {
-    const w = world(p); const wp = nShift ? w.clone().addScaledVector(shift, 1 / nShift) : w;
+    // Searched from where the point was tied, not from where the last rebuild left it: undoing a change brings the
+    // sketch back exactly, and a wrong guess cannot stay.
+    const w = p.mref?.a0 ? V3(p.mref.a0) : world(p); const wp = nShift ? w.clone().addScaledVector(shift, 1 / nShift) : w;
     // Older sketches stored only the coordinates: a point that sits on the model now starts following it from here.
     if (!p.mref) { const v = verts.find((q) => q.distanceTo(w) < 1e-3); const c = !v && circles.find((q) => q.c.distanceTo(w) < 1e-3); if (v) p.mref = vertRef(body, v); else if (c) p.mref = circleRef(c); continue; }
     // A circle reference from before holes were told apart learns which one it is while it still sits on it.
@@ -1671,8 +1779,10 @@ function followSketchRefs(f, body, cyls) {
         }
       }
     }
+    // A corner farther than a millimetre from where the point was tied is another corner, however alike.
+    if (best && !best.c && !p.mref.circle && best.v.distanceTo(w) > REF_REACH) best = null;
     if (!best) continue;
-    if (best.d < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
+    if (best.d < 1e-6 && world(p).distanceTo(best.v) < 1e-6) { if (best.c && p.mref.r != null && Math.abs(best.c.r - p.mref.r) > 1e-9) { for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id) e.r = best.c.r; p.mref = { ...p.mref, r: best.c.r }; moved = true; } continue; }
     if (!best.c) { shift.add(best.v.clone().sub(w)); nShift++; }
     const d = best.v.clone().sub(o); const x = +d.dot(X).toFixed(6), y = +d.dot(Y).toFixed(6);
     for (const e of Object.values(f.sk.ents)) if (e.ext && e.t === 'circle' && e.c === p.id && best.c) e.r = best.c.r;
@@ -1682,7 +1792,8 @@ function followSketchRefs(f, body, cyls) {
   // What could not be followed still hangs where the model used to be: shown in red, and reattached on request.
   const lost = pts.filter((p) => usedPt(f.sk, p.id)).filter((p) => { const w = world(p); return !verts.some((v) => v.distanceTo(w) < 1e-3) && !circles.some((c) => c.c.distanceTo(w) < 1e-3); }).map((p) => p.id);
   for (const p of pts) { if (lost.includes(p.id)) p.lost = true; else delete p.lost; }
-  if (lost.length) { S.dangling.set(f.id, lost); solveSketch(f.sk); }
+  if (lost.length) { S.dangling.set(f.id, lost); solveSketch(f.sk); } else if (srcMoved) solveSketch(f.sk);
+  seen(); flagSrc();
 }
 const usedPt = (sk, id) => Object.values(sk.ents).some((e) => e.p1 === id || e.p2 === id || e.c === id || e.pts?.includes(id)) || Object.values(sk.cons).some((c) => c.refs.includes(id));
 // Puts every hanging reference point of the sketch being edited on the nearest point of the model as it is now;
@@ -1778,9 +1889,23 @@ function refPlane(f, features = S.doc.features, depth = 0) {
 function followFace(f, body, steps) { f.plane = followPlane(f.plane, body, steps); }
 // Any plane taken from a face (a sketch's, an extrude's «до грани» or «от грани», a mirror plane, a
 // reference plane's base) remembers the operation that made the face and follows it the same way.
+// Faces and edges taken from the model are followed the same way: from what the user picked (key + 'Home'), every
+// rebuild, never from what the last rebuild left. Picked again in a panel, the new pick becomes the home: what the
+// rebuild wrote last time (kept in memory) is how a pick by the user is told from a result of following.
+// BASE: a fillet's edge went 1 mm along with a dimension and stayed there when the dimension came back.
+const followedOut = new WeakMap();
+function followFromHome(obj, key, follow) {
+  const strip = (v) => JSON.stringify(v, (k, x) => (k === 'was' ? undefined : x)); const cur = obj[key]; if (cur == null) return;
+  const hk = key + 'Home'; if (!followedOut.has(obj)) followedOut.set(obj, {}); const outs = followedOut.get(obj);
+  if (!obj[hk] || (outs[key] && strip(cur) !== outs[key])) obj[hk] = JSON.parse(strip(cur));
+  obj[key] = JSON.parse(JSON.stringify(obj[hk])); follow(); outs[key] = strip(obj[key]);
+  // What following learns about who an edge is (the side of the rim the material is on, the operation that made the
+  // hole, the faces meeting at it) stays with the pick; where it is does not.
+  if (Array.isArray(obj[hk]) && Array.isArray(obj[key])) obj[hk].forEach((h, i) => { const o = obj[key][i]; if (o) for (const k of ['side', 'src', 'sig']) if (h[k] == null && o[k] != null) h[k] = o[k]; });
+}
 function followRefs(f, body, steps) {
   const fp = (pl) => (pl?.face?.by ? followPlane(pl, body, steps) : pl);
-  if (f.target) f.target = fp(f.target); if (f.fromTarget) f.fromTarget = fp(f.fromTarget);
+  if (f.target?.face?.by) followFromHome(f, 'target', () => { f.target = fp(f.target); }); if (f.fromTarget?.face?.by) followFromHome(f, 'fromTarget', () => { f.fromTarget = fp(f.fromTarget); });
   if (f.type === 'mirror' && f.plane?.face) f.plane = { ...f.plane, face: fp(f.plane.face) };
   if (f.type === 'plane') { if (f.base?.face) f.base = { ...f.base, face: fp(f.base.face) }; if (f.base2?.face) f.base2 = { ...f.base2, face: fp(f.base2.face) }; }
 }
@@ -1818,14 +1943,17 @@ function computeBody(features) {
     const deps = f.type === 'sketch' ? [...new Set(Object.values(f.sk?.pts || {}).map((q) => q.mref?.sk).filter(Boolean))].map((id) => JSON.stringify(features.find((x) => x.id === id)?.sk?.pts || null)).join('|') : '';
     const fm = followMemo.get(f); const fj = JSON.stringify(f) + deps; const same = frozen || (fm && fm.body === body && fm.json === fj);
     if (!same) {
-    if (f.type === 'sketch' && f.plane?.face?.by && body) followFace(f, body, steps);
+    if (f.type === 'sketch' && f.sk && f.id !== S.editing && restoreHome(f.sk)) solveSketch(f.sk);
+    if (f.type === 'sketch' && f.sk && f.id === S.editing) setHome(f.sk);
+    if (f.type === 'sketch' && f.plane?.face?.by && body) followFromHome(f, 'plane', () => followFace(f, body, steps));
     if (f.type === 'sketch' && !f.suppressed && !body) S.dangling.delete(f.id);
     if (f.type === 'sketch' && !f.suppressed && !body) followOtherSketches(f, features);
-    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
+    if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls, features); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
     // A sketch on a face of a body that is no longer there (its boss deleted) hangs in the air just the same.
     else if (f.type === 'sketch' && !body && !f.suppressed && f.plane?.face) S.offFace.add(f.id);
-    if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followEdges(f, body, cyls);
+    if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followFromHome(f, 'edges', () => followEdges(f, body, cyls));
     if (body && f.type !== 'sketch') followRefs(f, body, steps);
+    if (f.type === 'sketch' && f.sk) lastOut.set(f.sk, outOf(f.sk));
     followMemo.set(f, { body, json: JSON.stringify(f) + deps }); }
     // A circular pattern's axis taken from a hole or boss stays on that hole when a dimension moves it.
     if (body && (f.type === 'cpattern' || f.type === 'lpattern') && !f.suppressed) for (const key of ['axis', 'dir', 'dir2']) { const e = f[key]?.edge; if (e?.t !== 'circle' || !e.src) continue; const c = edgeTopology(body, cyls).circles.filter((q) => q.src === e.src).sort((p, q) => p.c.distanceTo(V3(e.c)) - q.c.distanceTo(V3(e.c)))[0]; if (c && c.c.distanceTo(V3(e.c)) > 1e-9) f[key] = { ...f[key], edge: { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r } }; }
@@ -4062,7 +4190,7 @@ function startSketch(plane, existing) {
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
 function exitSketch() {
-  if (!S.editing) return; const f = editF();
+  if (!S.editing) return; const f = editF(); setHome(f.sk);
   // Model points brought in only to be clicked at, and left unused, would hang in the sketch for good.
   for (const [id, p] of Object.entries(f.sk.pts)) if (p.fixed && p.free && !p.hole && !usedPt(f.sk, id)) delete f.sk.pts[id]; S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
   // A sketch left with nothing drawn in it is not kept (SolidWorks does not make one either); Ctrl+Z brings it back.
@@ -8085,7 +8213,10 @@ const thumbs = (() => {
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; } };
   const save = (k, v) => { try { const all = load(); if (v) all[k] = v; else delete all[k]; localStorage.setItem(KEY, JSON.stringify(all)); } catch { /* storage full or blocked: thumbnails stay in memory */ } };
   const dataOf = (d) => (d.id === S.project.active && S.mode === d.kind ? S.doc : d.data);
-  const sig = (d) => { const x = dataOf(d); return d.kind === 'part' ? hashStr(JSON.stringify([x.features, x.rollback, x.vars, x.color, x.faceColors])) : d.kind === 'asm' ? hashStr(JSON.stringify([x.comps, x.explode?.on])) : d.kind === 'import' ? hashStr(JSON.stringify([x.name, x.zup, x.scale, x.pos?.length])) : null; };
+  // What rebuilds write down for themselves (where the user put things, the sources of references) is not a change
+  // of the part: the picture stays.
+  const own = (k, v) => (k === 'home' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
+  const sig = (d) => { const x = dataOf(d); return d.kind === 'part' ? hashStr(JSON.stringify([x.features, x.rollback, x.vars, x.color, x.faceColors], own)) : d.kind === 'asm' ? hashStr(JSON.stringify([x.comps, x.explode?.on])) : d.kind === 'import' ? hashStr(JSON.stringify([x.name, x.zup, x.scale, x.pos?.length])) : null; };
   const items = (d) => {
     const active = d.id === S.project.active && S.mode === d.kind;
     if (d.kind === 'asm') { if (!active) return null; const out = []; asmGroup.updateMatrixWorld(true); asmGroup.traverse((o) => { if (o.isMesh && o.visible && o.geometry && !o.userData.sec) out.push({ geo: o.geometry, matrix: o.matrixWorld.clone(), color: o.material?.color || colors.body }); }); return out; }
@@ -8280,7 +8411,7 @@ function updateSketchVisuals() {
   updateRelBar(); requestRender();
 }
 function refreshSketch(keepDraw) { if (!keepDraw && S.tool !== 'select' && S.tool !== 'dim') { /* keep tool */ } analyze(); updateSketchVisuals(); renderSide(); setHint(); }
-function commitSketch(keepDraw, merge) { const sk = editSk(); if (sk) { if (cleanZeroLines(sk)) pushUndo(merge); solveSketch(sk); } analyze(); updateSketchVisuals(); renderSide(); setHint(); pushUndo(merge); void keepDraw; }
+function commitSketch(keepDraw, merge) { const sk = editSk(); if (sk) { if (cleanZeroLines(sk)) pushUndo(merge); solveSketch(sk); setHome(sk); } analyze(); updateSketchVisuals(); renderSide(); setHint(); pushUndo(merge); void keepDraw; }
 // The body's mesh is redone only when the body changed (or colours did): refreshAll() right after a rebuild built it
 // twice, 7 s of a 17 s import of a 400k-triangle STL.
 let meshOf = null;
