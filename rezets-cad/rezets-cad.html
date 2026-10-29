@@ -774,7 +774,7 @@ function solveLinear(A, b) {
 const maxAbs = (F) => F.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
 // Weighted minimum-norm Gauss-Newton: keeps unconstrained geometry where it is and moves the
 // variables with a low weight (e.g. a dragged point) as little as possible.
-function solveSystem(sys, X, weights, tol = 1e-10) {
+function solveSystem(sys, X, weights, tol = 1e-10, scaled = false) {
   const n = X.length; if (!sys.eqs.length) return true;
   const D = new Float64Array(n).fill(1); if (weights) for (const [i, w] of weights) D[i] = w;
   let F = residual(sys, X);
@@ -783,15 +783,16 @@ function solveSystem(sys, X, weights, tol = 1e-10) {
   // not help, the damping grows a hundredfold and the same point is tried again (Levenberg-Marquardt).
   // Rows that repeat others (a tangency also held by a touching point) are left out of the step: their combination
   // with the rest is singular, and the solve then returns noise. They are still checked in the residual.
-  // Each row is scaled to unit length for the step: one relation whose derivatives are a million times the rest (a
-  // tangency between two circles that are one and the same, Деталь 12, Эскиз8) made the damping, set from their
-  // average, a million times too strong, and a point held only by a dimension would not move («недостижимо»).
+  // Scaled (a second try when the plain one fails): each row to unit length for the step. One relation whose
+  // derivatives are a million times the rest (a tangency between two circles that are one and the same, Деталь 12,
+  // Эскиз8) made the damping, set from their average, a million times too strong, and a point held only by a
+  // dimension would not move («недостижимо»). Plain first: scaling changes the path where it was never needed.
   let damp = 1e-11, J = null, A0 = null, tr = 0, keep = null, sc = null;
   for (let it = 0; it < 80; it++) {
     const err = maxAbs(F); if (err < tol) break;
     if (!J) {
       const rows = jacobian(sys, X); const dep = new Set(eliminate(rows, n, 1e-9).dependent.map((d) => d.ri)); keep = rows.map((_, i) => i).filter((i) => !dep.has(i));
-      sc = keep.map((i) => { const r = rows[i].row; let s2 = 0; for (let k = 0; k < n; k++) if (r[k]) s2 += r[k] * r[k] * D[k]; return s2 > 1e-300 ? 1 / Math.sqrt(s2) : 1; });
+      sc = keep.map((i) => { const r = rows[i].row; let s2 = 0; for (let k = 0; k < n; k++) if (r[k]) s2 += r[k] * r[k] * D[k]; return scaled && s2 > 1e-300 ? 1 / Math.sqrt(s2) : 1; });
       J = keep.map((i, j) => { const r = rows[i].row; const o = new Float64Array(n); for (let k = 0; k < n; k++) if (r[k]) o[k] = r[k] * sc[j]; return o; }); A0 = Array.from({ length: J.length }, () => new Float64Array(J.length)); tr = 0;
       for (let i = 0; i < J.length; i++) for (let j = i; j < J.length; j++) { let s = 0; const a = J[i], b = J[j]; for (let k = 0; k < n; k++) if (a[k] && b[k]) s += a[k] * D[k] * b[k]; A0[i][j] = A0[j][i] = s; if (i === j) tr += s; }
     }
@@ -818,7 +819,8 @@ function writeBack(sk, sys, X) {
 function solveSketch(sk, weights) {
   upgradeFillets(sk);
   const sys = buildSystem(sk); const X = Float64Array.from(sys.X);
-  const ok = solveSystem(sys, X, weights ? weights(sys) : null);
+  let ok = solveSystem(sys, X, weights ? weights(sys) : null);
+  if (!ok) { X.set(sys.X); ok = solveSystem(sys, X, weights ? weights(sys) : null, 1e-10, true); }
   if (ok) { writeBack(sk, sys, X); minorFillets(sk); }
   return ok;
 }
