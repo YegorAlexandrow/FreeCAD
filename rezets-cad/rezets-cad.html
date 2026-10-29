@@ -509,9 +509,15 @@ const nid = (sk) => {
 const entPts = (e) => [e.p1, e.p2, e.c, ...(e.pts || [])].filter(Boolean);
 // Ends of lines and arcs that meet nothing: why a profile does not close. Ends at one place count as joined (a
 // line drawn to the end of an arc without the point being shared).
+// An end on another line or arc (a T, Деталь 12, Эскиз8) meets it: the profile is closed there.
 function openEnds(sk) {
-  const ends = []; for (const e of Object.values(sk.ents)) { if (e.constr || e.ext || e.closed || !e.p1 || !e.p2 || e.t === 'ellipse') continue; for (const id of [e.p1, e.p2]) { const q = gp(sk, id); if (q) ends.push({ id, x: q.x, y: q.y }); } }
-  return ends.filter((a) => ends.filter((b) => Math.hypot(a.x - b.x, a.y - b.y) < 1e-5).length === 1);
+  const ends = []; for (const e of Object.values(sk.ents)) { if (e.constr || e.ext || e.closed || !e.p1 || !e.p2 || e.t === 'ellipse') continue; for (const id of [e.p1, e.p2]) { const q = gp(sk, id); if (q) ends.push({ id, x: q.x, y: q.y, e }); } }
+  const onCurve = (q, e) => { if (e === q.e || e.constr) return false;
+    if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); if (!a || !b) return false; const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy; if (L2 < 1e-18) return false; const t = ((q.x - a.x) * dx + (q.y - a.y) * dy) / L2; return t > -1e-9 && t < 1 + 1e-9 && Math.abs((q.x - a.x) * dy - (q.y - a.y) * dx) / Math.sqrt(L2) < 1e-5; }
+    if ((e.t === 'arc' || e.t === 'circle') && e.c) { const c = gp(sk, e.c); if (!c || Math.abs(Math.hypot(q.x - c.x, q.y - c.y) - e.r) > 1e-5) return false; if (e.t === 'circle') return true;
+      const a = gp(sk, e.p1), b = gp(sk, e.p2); const ang = (p) => Math.atan2(p.y - c.y, p.x - c.x); let sw = ang(b) - ang(a), t = ang(q) - ang(a); while (sw <= 0) sw += 2 * Math.PI; while (t < 0) t += 2 * Math.PI; return t <= sw + 1e-9; }
+    return false; };
+  return ends.filter((a) => ends.filter((b) => Math.hypot(a.x - b.x, a.y - b.y) < 1e-5).length === 1 && !Object.values(sk.ents).some((e) => onCurve(a, e))).map(({ id, x, y }) => ({ id, x, y }));
 }
 // Open ends in pairs, nearest first: the gaps a profile has.
 function sketchGaps(sk, max = Infinity) {
@@ -777,15 +783,20 @@ function solveSystem(sys, X, weights, tol = 1e-10) {
   // not help, the damping grows a hundredfold and the same point is tried again (Levenberg-Marquardt).
   // Rows that repeat others (a tangency also held by a touching point) are left out of the step: their combination
   // with the rest is singular, and the solve then returns noise. They are still checked in the residual.
-  let damp = 1e-11, J = null, A0 = null, tr = 0, keep = null;
+  // Each row is scaled to unit length for the step: one relation whose derivatives are a million times the rest (a
+  // tangency between two circles that are one and the same, Деталь 12, Эскиз8) made the damping, set from their
+  // average, a million times too strong, and a point held only by a dimension would not move («недостижимо»).
+  let damp = 1e-11, J = null, A0 = null, tr = 0, keep = null, sc = null;
   for (let it = 0; it < 80; it++) {
     const err = maxAbs(F); if (err < tol) break;
     if (!J) {
-      const rows = jacobian(sys, X); const dep = new Set(eliminate(rows, n, 1e-9).dependent.map((d) => d.ri)); keep = rows.map((_, i) => i).filter((i) => !dep.has(i)); J = keep.map((i) => rows[i].row); A0 = Array.from({ length: J.length }, () => new Float64Array(J.length)); tr = 0;
+      const rows = jacobian(sys, X); const dep = new Set(eliminate(rows, n, 1e-9).dependent.map((d) => d.ri)); keep = rows.map((_, i) => i).filter((i) => !dep.has(i));
+      sc = keep.map((i) => { const r = rows[i].row; let s2 = 0; for (let k = 0; k < n; k++) if (r[k]) s2 += r[k] * r[k] * D[k]; return s2 > 1e-300 ? 1 / Math.sqrt(s2) : 1; });
+      J = keep.map((i, j) => { const r = rows[i].row; const o = new Float64Array(n); for (let k = 0; k < n; k++) if (r[k]) o[k] = r[k] * sc[j]; return o; }); A0 = Array.from({ length: J.length }, () => new Float64Array(J.length)); tr = 0;
       for (let i = 0; i < J.length; i++) for (let j = i; j < J.length; j++) { let s = 0; const a = J[i], b = J[j]; for (let k = 0; k < n; k++) if (a[k] && b[k]) s += a[k] * D[k] * b[k]; A0[i][j] = A0[j][i] = s; if (i === j) tr += s; }
     }
     const mJ = J.length; const mu = damp * (tr / Math.max(mJ, 1) + 1e-9); const A = A0.map((r) => Array.from(r)); for (let i = 0; i < mJ; i++) A[i][i] += mu;
-    const y = solveLinear(A, keep.map((i) => -F[i]));
+    const y = solveLinear(A, keep.map((i, j) => -F[i] * sc[j]));
     const dx = new Float64Array(n); for (let i = 0; i < mJ; i++) if (y[i]) for (let k = 0; k < n; k++) if (J[i][k]) dx[k] += D[k] * J[i][k] * y[i];
     let step = 1, improved = false; const X0 = Float64Array.from(X);
     for (let ls = 0; ls < 8; ls++) {
