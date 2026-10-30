@@ -4096,10 +4096,13 @@ function onCurve(sk, e, p, tol = 1e-7) {
   return true;
 }
 // Where other sketch curves cross or touch e, as parameters on e.
+const onSeg = (a, b, p, tol = 1e-9) => { const dx = b.x - a.x, dy = b.y - a.y; const L2 = dx * dx + dy * dy || 1e-30; const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / L2; return t >= -tol && t <= 1 + tol; };
 function cutsOn(sk, e) {
   const cuts = [];
   for (const f of Object.values(sk.ents)) {
-    if (f.id === e.id || isCurve(f)) continue;
+    if (f.id === e.id) continue;
+    // A spline or an ellipse cuts where its polyline crosses (S0-19).
+    if (isCurve(f)) { const P = curvePts(sk, f, 24); for (let i = 0; i + 1 < P.length; i++) for (const p of rawIntersect(geomOf(sk, e), { t: 'line', a: P[i], b: P[i + 1] })) if (onSeg(P[i], P[i + 1], p) && onCurve(sk, e, p)) cuts.push({ t: curveParam(sk, e, p.x, p.y), x: p.x, y: p.y, f }); continue; }
     for (const p of rawIntersect(geomOf(sk, e), geomOf(sk, f))) if (onCurve(sk, e, p) && onCurve(sk, f, p)) cuts.push({ t: curveParam(sk, e, p.x, p.y), x: p.x, y: p.y, f });
   }
   return cuts;
@@ -4117,7 +4120,7 @@ function cutPoint(sk, cut, pending) {
   const f = cut.f;
   for (const id of [f.p1, f.p2, f.c]) { if (!id) continue; const q = gp(sk, id); if (Math.hypot(q.x - cut.x, q.y - cut.y) < 1e-7) return id; }
   for (const [id, q] of Object.entries(sk.pts)) if (Math.hypot(q.x - cut.x, q.y - cut.y) < 1e-9) return id;
-  const id = nid(sk); sk.pts[id] = { id, x: cut.x, y: cut.y }; pending.push({ t: f.t === 'line' ? 'online' : 'oncircle', refs: [id, f.id] }); return id;
+  const id = nid(sk); sk.pts[id] = { id, x: cut.x, y: cut.y }; if (!isCurve(f)) pending.push({ t: f.t === 'line' ? 'online' : 'oncircle', refs: [id, f.id] }); return id;
 }
 // The piece of e between the cuts on either side of parameter tc, the way power trim removes it.
 function trimPiece(sk, e, tc) {
@@ -4134,8 +4137,51 @@ function trimPiece(sk, e, tc) {
   if (!lo && !hi) return { all: true };
   return { lo, hi };
 }
+// A spline or an ellipse as a polyline with its cuts (S0-19): positions along it are polyline indices plus the
+// fraction of the segment, and a spline's own points sit at multiples of PER.
+const TRIM_PER = 24;
+function curveCuts(sk, e, m) {
+  const P = curvePts(sk, e, TRIM_PER); const closed = e.t === 'ellipse' || !!e.closed; const cuts = [];
+  const add = (i, p, f) => { const a = P[i], b = P[i + 1]; const L = Math.hypot(b.x - a.x, b.y - a.y) || 1e-30; const s = i + Math.min(1, Math.max(0, Math.hypot(p.x - a.x, p.y - a.y) / L)); cuts.push({ s, x: p.x, y: p.y, f }); };
+  for (const f of Object.values(sk.ents)) { if (f.id === e.id) continue;
+    if (isCurve(f)) { const Q = curvePts(sk, f, TRIM_PER); for (let i = 0; i + 1 < P.length; i++) for (let j = 0; j + 1 < Q.length; j++) for (const p of rawIntersect({ t: 'line', a: P[i], b: P[i + 1] }, { t: 'line', a: Q[j], b: Q[j + 1] })) if (onSeg(P[i], P[i + 1], p) && onSeg(Q[j], Q[j + 1], p)) add(i, p, f); continue; }
+    for (let i = 0; i + 1 < P.length; i++) for (const p of rawIntersect({ t: 'line', a: P[i], b: P[i + 1] }, geomOf(sk, f))) if (onSeg(P[i], P[i + 1], p) && onCurve(sk, f, p)) add(i, p, f); }
+  // Where the click is along it.
+  let tc = 0, bd = Infinity; for (let i = 0; i + 1 < P.length; i++) { const a = P[i], b = P[i + 1]; const dx = b.x - a.x, dy = b.y - a.y; const t = Math.max(0, Math.min(1, ((m.u - a.x) * dx + (m.v - a.y) * dy) / (dx * dx + dy * dy || 1e-30))); const d = Math.hypot(a.x + dx * t - m.u, a.y + dy * t - m.v); if (d < bd) { bd = d; tc = i + t; } }
+  const end = P.length - 1; const ts = [...new Map(cuts.map((c) => [Math.round(c.s * 1e6), c])).values()].filter((c) => closed || (c.s > 1e-6 && c.s < end - 1e-6)).sort((a, b) => a.s - b.s);
+  let lo, hi; if (closed) { if (ts.length < 2) return { P, closed, end, all: true }; lo = [...ts].reverse().find((c) => c.s < tc) || ts[ts.length - 1]; hi = ts.find((c) => c.s > tc) || ts[0]; }
+  else { lo = [...ts].reverse().find((c) => c.s < tc) || null; hi = ts.find((c) => c.s > tc) || null; if (!lo && !hi) return { P, closed, end, all: true }; }
+  return { P, closed, end, lo, hi };
+}
+const polyAt = (P, s) => { const i = Math.min(P.length - 2, Math.max(0, Math.floor(s))); const t = s - i; return { x: P[i].x + (P[i + 1].x - P[i].x) * t, y: P[i].y + (P[i + 1].y - P[i].y) * t }; };
+// Polyline points from s0 to s1 (going round on a closed curve when s1 < s0).
+function polyRange(P, s0, s1, closed) { const end = P.length - 1; const out = [polyAt(P, s0)]; const run = (a, b) => { for (let i = Math.floor(a) + 1; i < b; i++) out.push(P[i]); };
+  if (closed && s1 <= s0) { run(s0, end); out.push(P[end]); run(0, s1); } else run(s0, s1); out.push(polyAt(P, s1)); return out; }
+function trimCurve(sk, e, m) {
+  const cc = curveCuts(sk, e, m); if (cc.all) { delete sk.ents[e.id]; cleanupSketch(sk); return; }
+  const { P, closed, end, lo, hi } = cc; const pending = [];
+  // What stays, as stretches of the curve between positions.
+  const keep = closed ? [[hi.s, lo.s, hi, lo]] : [lo ? [0, lo.s, null, lo] : null, hi ? [hi.s, end, hi, null] : null].filter(Boolean);
+  const pieces = keep.map(([s0, s1, c0, c1]) => {
+    let ids;
+    if (e.t === 'spline') { const n = e.pts.length; const own = (k) => k * TRIM_PER; const inner = [];
+      // The spline's own points inside the stretch stay the points it runs through; the cut ends are added.
+      const order = closed ? [...Array(n).keys()].map((k) => (k + Math.ceil(s0 / TRIM_PER)) % n) : [...Array(n).keys()];
+      for (const k of order) { const sk0 = own(k); const inside = closed ? (s1 > s0 ? sk0 > s0 + 1e-6 && sk0 < s1 - 1e-6 : sk0 > s0 + 1e-6 || sk0 < s1 - 1e-6) : sk0 > s0 + 1e-6 && sk0 < s1 - 1e-6; if (inside) inner.push(e.pts[k]); }
+      ids = inner; }
+    else { // An ellipse's piece becomes a spline through points on it, about every 20°.
+      const run = polyRange(P, s0, s1, closed); const want = Math.max(3, Math.round((closed && s1 <= s0 ? end - s0 + s1 : s1 - s0) / end * 18)); ids = [];
+      for (let k = 1; k < want; k++) { const q = run[Math.round(k / want * (run.length - 1))]; const id = nid(sk); sk.pts[id] = { id, x: q.x, y: q.y }; ids.push(id); } }
+    const a = c0 ? cutPoint(sk, c0, pending) : e.t === 'spline' ? e.pts[0] : null; const b = c1 ? cutPoint(sk, c1, pending) : e.t === 'spline' ? e.pts[e.pts.length - 1] : null;
+    return [a, ...ids.filter((x) => x !== a && x !== b), b].filter(Boolean);
+  });
+  const mk = (pts, id) => ({ id, t: 'spline', pts, p1: pts[0], p2: pts[pts.length - 1], closed: false, ...(e.constr ? { constr: true } : {}) });
+  if (e.t === 'ellipse') { delete sk.ents[e.id]; for (const pts of pieces) { const id = nid(sk); sk.ents[id] = mk(pts, id); } toast('Остаток эллипса стал сплайном: размеры эллипса к нему не применяются', 'info'); }
+  else { sk.ents[e.id] = mk(pieces[0], e.id); for (const pts of pieces.slice(1)) { const id = nid(sk); sk.ents[id] = mk(pts, id); } }
+  cleanupSketch(sk); addRelations(sk, pending);
+}
 function trimPreview(sk, e, m) {
-  if (isCurve(e)) return [];
+  if (isCurve(e)) { const cc = curveCuts(sk, e, m); const run = cc.all ? cc.P : polyRange(cc.P, cc.lo ? cc.lo.s : 0, cc.hi ? cc.hi.s : cc.end, cc.closed); const out = []; for (let i = 0; i + 1 < run.length; i++) out.push([run[i].x, run[i].y, run[i + 1].x, run[i + 1].y]); return out; }
   const tc = curveParam(sk, e, m.u, m.v); const pc = trimPiece(sk, e, tc);
   if (pc.all) return e.t === 'line' ? curveSegs(sk, e, 0, 1) : e.t === 'arc' ? curveSegs(sk, e, 0, arcSpan(sk, e).sw) : curveSegs(sk, e, 0, TAU);
   if (e.t === 'circle') { const t0 = pc.lo.t, t1 = pc.hi.t > pc.lo.t ? pc.hi.t : pc.hi.t + TAU; return curveSegs(sk, e, t0, t1); }
@@ -4166,7 +4212,7 @@ function trimAt(sk, e, m) {
   return r;
 }
 function trimAt0(sk, e, m) {
-  if (isCurve(e)) { toast('Сплайн и эллипс пока не обрезаются', 'info'); return; }
+  if (isCurve(e)) return trimCurve(sk, e, m);
   const tc = curveParam(sk, e, m.u, m.v); const pc = trimPiece(sk, e, tc); const pending = [];
   if (pc.all) { delete sk.ents[e.id]; cleanupSketch(sk); return; }
   // A point held at the middle of a line that gets shorter would run to the middle of what is left, taking whatever
