@@ -2523,12 +2523,25 @@ function applyDisplay() {
   requestRender();
 }
 function displayMenu(btn) { const r = btn.getBoundingClientRect(); const cur = S.display || 'shaded'; openMenu(r.left, r.bottom + 4, [['shaded', 'Тонированный с рёбрами'], ['hlr', 'Без невидимых линий'], ['wire', 'Каркас']].map(([k, l]) => [(k === cur ? '✓ ' : '') + l, () => { S.display = k; applyDisplay(); }])); }
+const bodyMeshMemo = new WeakMap();
 function updateBodyMesh0() {
   if (S.measure) { S.measure.picks = []; S.measure.result = null; groups.measure.clear(); }
   groups.body.clear(); bodyMeshObj = null; faceIndex = []; originGroup.clear(); meshOf = S.body;
   if (!S.body) { buildPlanes(); return; }
   // A dense mesh (a scanned or fine STL) is shown with its facets' own normals: smoothing 400k triangles took 3 s and
   // its facets are too small to see anyway.
+  // The shading normals and the faces for picking depend on the body alone, and a rebuild that changes nothing in the
+  // part (a sketch edited, a feature renamed, a click in the tree) gives the very same body object back from the cache:
+  // they are worked out once per body (BASE: 160 of 185 ms of every rebuild).
+  const cylKey = (S.cyls || []).map((c) => c.r + ':' + c.p.x + ',' + c.p.y + ',' + c.p.z).join('|'); const memo = bodyMeshMemo.get(S.body);
+  if (memo && memo.cylKey === cylKey) {
+    const shaded = S.body.clone(); shaded.setAttribute('normal', new THREE.BufferAttribute(memo.normal.slice(), 3));
+    const base = partColor(S.doc) || ('#' + colors.body.getHexString()); const vc = bodyColors(S.body, S.doc, S.cyls, base); if (vc) shaded.setAttribute('color', new THREE.BufferAttribute(vc, 3));
+    const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : base, vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
+    bodyMeshObj = new THREE.Mesh(shaded, mat); groups.body.add(bodyMeshObj);
+    groups.body.add(segLines(edgeTopology(S.body, S.cyls).display, lineMat(colors.edge, 1.4))); applyDisplay();
+    faceIndex = memo.faceIndex; buildPlanes(); return;
+  }
   const dense = S.body.getAttribute('position').count > 600000; const shaded = dense ? (() => { const g = S.body.clone(); g.computeVertexNormals(); return g; })() : toCreasedNormals(S.body.clone(), 30 * Math.PI / 180);
   const base = partColor(S.doc) || ('#' + colors.body.getHexString()); const vc = bodyColors(S.body, S.doc, S.cyls, base); if (vc) shaded.setAttribute('color', new THREE.BufferAttribute(vc, 3));
   const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : base, vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
@@ -2564,6 +2577,7 @@ function updateBodyMesh0() {
     if (comps.size < 2) continue; map.delete(k); let n = 0; for (const tris of comps.values()) map.set(k + '#' + n++, { ...v, tris });
   }
   for (const v of map.values()) { let area = 0; for (const t of v.tris) { const a = new THREE.Vector3().fromBufferAttribute(pos, 3 * t), b = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 1), c = new THREE.Vector3().fromBufferAttribute(pos, 3 * t + 2); area += new THREE.Vector3().crossVectors(b.sub(a), c.sub(a)).length() / 2; } v.area = area; if (area > 1e-3) faceIndex.push(v); }
+  if (!shaded.index && shaded.getAttribute('position').count === pos.count) bodyMeshMemo.set(S.body, { cylKey, normal: shaded.getAttribute('normal').array.slice(), faceIndex });
   buildPlanes();
 }
 // ---------------- which operation made which face ----------------
@@ -2931,9 +2945,16 @@ function dimText(sk, c) {
   const s = dia ? '⌀' + fmt(v) : c.t === 'rad' ? 'R' + fmt(v) : c.t === 'angle' ? fmt(v, 1) + '°' : fmt(v);
   return c.driven ? '(' + s + ')' : s;
 }
+// Where a dimension's label is placed is kept against what it measures (c.pa, the middle of its geometry when the label
+// was put there): the label moves with the geometry instead of staying behind in the empty sheet (J10).
+function dimAnchor(sk, c) { let x = 0, y = 0, n = 0; const add = (id) => { const q = id && gp(sk, id); if (q) { x += q.x; y += q.y; n++; } };
+  for (const r of c.refs || []) { if (sk.pts[r] || REF_PTS[r]) { add(r); continue; } const e = sk.ents[r] || REF_ENTS[r]; if (!e) continue; if (e.c) add(e.c); else if (e.t === 'line') { add(e.p1); add(e.p2); } else if (e.pts) e.pts.forEach(add); }
+  return n ? [x / n, y / n] : null; }
+function placeDim(sk, c, pos) { c.pos = pos; const a = dimAnchor(sk, c); if (a) c.pa = a.map((v) => +v.toFixed(6)); else delete c.pa; }
+function dimPos(sk, c) { if (!c.pos) return null; const a = dimAnchor(sk, c); if (!a) return { x: c.pos[0], y: c.pos[1] }; if (!c.pa) { c.pa = a.map((v) => +v.toFixed(6)); return { x: c.pos[0], y: c.pos[1] }; } return { x: c.pos[0] + a[0] - c.pa[0], y: c.pos[1] + a[1] - c.pa[1] }; }
 // Dimension lines in sketch coordinates, plus the label position.
 function dimGeometry(sk, c) {
-  const P = (id) => gp(sk, id); const r = c.refs; const lines = []; const pos = c.pos ? { x: c.pos[0], y: c.pos[1] } : null; const ah = 2.2 * unitsPerPx() * 3;
+  const P = (id) => gp(sk, id); const r = c.refs; const lines = []; const pos = dimPos(sk, c); const ah = 2.2 * unitsPerPx() * 3;
   const arrow = (x, y, dx, dy) => { const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l; const nx = -dy, ny = dx; lines.push([x, y, x - dx * ah + nx * ah * 0.4, y - dy * ah + ny * ah * 0.4], [x, y, x - dx * ah - nx * ah * 0.4, y - dy * ah - ny * ah * 0.4]); };
   const linear = (a, b, L) => {
     const dx = b.x - a.x, dy = b.y - a.y; const len = Math.hypot(dx, dy) || 1; const nx = -dy / len, ny = dx / len;
@@ -3089,7 +3110,7 @@ function closeDimEditor() { $('editLayer').textContent = ''; }
 function startDimDrag(ev, c) {
   if (ev.button !== 0) return; ev.stopPropagation(); ev.preventDefault();
   const sk = editSk(); let moved = false; const start = { x: ev.clientX, y: ev.clientY };
-  const mv = (e) => { if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 3) moved = true; if (!moved) return; const m = mouseToSketch(e); c.pos = [m.u, m.v]; requestRender(); updateSketchVisuals(); };
+  const mv = (e) => { if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 3) moved = true; if (!moved) return; const m = mouseToSketch(e); placeDim(sk, c, [m.u, m.v]); requestRender(); updateSketchVisuals(); };
   const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up);
     if (moved) commitSketch(); else { if (!ev.shiftKey && !ev.ctrlKey) S.sel.clear(); S.sel.add('c:' + c.id); refreshSketch(); } };
   window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
@@ -3241,7 +3262,7 @@ function sketchDown(ev) {
       if (!down.shift && !S.sel.has(p.key)) S.sel.clear();
       if (down.shift && S.sel.has(p.key)) S.sel.delete(p.key); else S.sel.add(p.key);
       const ent = p.key.startsWith('e:') ? sk.ents[p.key.slice(2)] : null; const pt = p.key.startsWith('p:') ? sk.pts[p.key.slice(2)] : null;
-      if (!p.key.startsWith('e:H') && !p.key.startsWith('e:V') && !ent?.ext && !pt?.fixed) S.drag = { key: p.key, start: m, snap: snapshotGeo(sk) };
+      if (!p.key.startsWith('e:H') && !p.key.startsWith('e:V') && !ent?.ext && !pt?.fixed) S.drag = { key: p.key, start: m, snap: snapshotGeo(sk), p0: pt ? [pt.x, pt.y] : null };
       // A point whose model corner is gone is repaired by dragging it onto another corner (SolidWorks' dangling repair).
       else if (pt?.lost) { S.drag = { key: p.key, start: m, snap: snapshotGeo(sk), lostPt: pt.id }; setHint('Перетащите точку на вершину модели, к которой её привязать'); }
       refreshSketch();
@@ -3257,8 +3278,8 @@ function sketchDown(ev) {
       if (!first || first === L) { S.filletFirst = L.id; S.sel = new Set(['e:' + L.id]); updateSketchVisuals(); setHint('Щёлкните второй отрезок угла'); return; }
       S.filletFirst = null; S.sel.clear(); const shared = [first.p1, first.p2].find((x) => x === L.p1 || x === L.p2);
       if (!shared) { toast('Эти отрезки не сходятся в одной точке', 'warn'); updateSketchVisuals(); setHint(); return; }
-      const r = filletCorner(sk, shared, S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); updateSketchVisuals(); setHint(); return; } if (r?.arc) (S.toolFillets ||= []).push(r.arc); S.hover = null; commitSketch(); setHint(); return; } }
-    if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
+      const r = filletCorner(sk, shared, S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); updateSketchVisuals(); setHint(); return; } if (r?.arc) { sameFillet(sk, r.arc); (S.toolFillets ||= []).push(r.arc); } S.hover = null; commitSketch(); setHint(); return; } }
+    if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } sameFillet(sk, r2.arc); (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
 function sketchMove(ev) {
@@ -3268,7 +3289,9 @@ function sketchMove(ev) {
   if (S.tool === 'select') {
     if (S.drag?.lostPt && down?.moved) { const q = sk.pts[S.drag.lostPt]; let hit = null; for (const v of S.refs?.verts || []) { const sc = sScreen(v[0], v[1]); const d = Math.hypot(sc.x - m.sx, sc.y - m.sy); if (d < 12 && (!hit || d < hit.d)) hit = { d, v }; }
       S.drag.hit = hit?.v || null; q.x = hit ? hit.v[0] : m.u; q.y = hit ? hit.v[1] : m.v; updateSketchVisuals(); return; }
-    if (S.drag && down?.moved) { dragTo(m); return; }
+    // One solve per frame: a mouse reports two or three moves a frame, each solved and drawn in full, and the point
+    // lagged behind the cursor on a big sketch (S0-8).
+    if (S.drag && down?.moved) { dragPending = dragSnap(sk, S.drag, m); if (!dragRaf) dragRaf = requestAnimationFrame(flushDrag); return; }
     if (S.box && down) { S.box[1] = m; updateSketchVisuals(); return; }
     const p = pick(m); const k = p?.key || null; if (k !== S.hover) { S.hover = k; updateSketchVisuals(); }
     return;
@@ -3278,7 +3301,7 @@ function sketchMove(ev) {
     // Live preview: the dimension follows the cursor until it is placed.
     S.dimPreview = null;
     if (S.dimPick?.length) { const picks = S.dimPick.map((x) => x); const first = picks[0]; const firstIsPoint = first.startsWith('p:') || first === 'e:H' || first === 'e:V';
-      if (!(picks.length === 1 && firstIsPoint)) { const con = makeDim(sk, picks, m); if (con) { con.pos = [m.u, m.v]; initSigns(sk, con); con.v = measure(sk, con); S.dimPreview = con; } } }
+      if (!(picks.length === 1 && firstIsPoint)) { const con = makeDim(sk, picks, m); if (con) { placeDim(sk, con, [m.u, m.v]); initSigns(sk, con); con.v = measure(sk, con); S.dimPreview = con; } } }
     updateSketchVisuals(); return;
   }
   if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; S.draw = e && !e.ext ? { stage: 0, preview: trimPreview(sk, e, m), bad: true } : null; updateSketchVisuals(); return; }
@@ -3291,7 +3314,9 @@ function sketchUp(ev, d) {
     if (d.moved && D.hit && S.refs?.mref) { q.x = D.hit[0]; q.y = D.hit[1]; q.mref = S.refs.mref('p', D.hit); delete q.lost; const f = editF(); const rest = (S.dangling.get(f.id) || []).filter((id) => id !== q.id); if (rest.length) S.dangling.set(f.id, rest); else S.dangling.delete(f.id); solveSketch(sk); commitSketch(); toast('Привязка к модели восстановлена', 'info'); }
     else { restoreGeo(sk, D.snap); refreshSketch(); if (d.moved) toast('Отпустите точку на вершине модели: она привязывается только к ней', 'info'); }
     return; }
-  if (S.drag) { const moved = d.moved; S.drag = null; if (moved) commitSketch(); else updateRelBar(); return; }
+  if (S.drag) { flushDrag(); const moved = d.moved; const onto = S.drag.onto, id = S.drag.key.slice(2); S.drag = null;
+    if (moved && onto && sk.pts[id]) { const r = addRelations(sk, [{ t: 'coincident', refs: [id, onto] }]); solveSketch(sk); void r; }
+    if (moved) commitSketch(); else updateRelBar(); return; }
   if (S.box) {
     const [a, b] = S.box; S.box = null;
     if (d.moved) {
@@ -3307,6 +3332,17 @@ function sketchUp(ev, d) {
     refreshSketch();
   }
 }
+let dragPending = null, dragRaf = 0;
+// A point dragged over another point of the sketch snaps onto it and is joined to it when let go (S0-13), as a line's
+// end is when it is drawn there. Points of its own lines are left out: joined, a line would shrink to nothing.
+function dragSnap(sk, D, m) {
+  D.onto = null; if (!D.key.startsWith('p:')) return m; const id = D.key.slice(2); const q = sk.pts[id]; if (!q || q.fixed) return m;
+  const own = new Set([id]); for (const e of Object.values(sk.ents)) if ([e.p1, e.p2, e.c].includes(id)) for (const k of [e.p1, e.p2, e.c]) if (k) own.add(k);
+  for (const c of Object.values(sk.cons)) if (c.t === 'coincident' && c.refs.includes(id)) c.refs.forEach((k) => own.add(k));
+  let best = null; for (const k of [...Object.keys(sk.pts), 'O']) { if (own.has(k)) continue; const p = gp(sk, k); if (!p) continue; const sc = sScreen(p.x, p.y); const d = Math.hypot(sc.x - m.sx, sc.y - m.sy); if (d < 8 && (!best || d < best.d)) best = { k, d, p }; }
+  if (!best || !D.p0) return m; D.onto = best.k; return { ...m, u: D.start.u + best.p.x - D.p0[0], v: D.start.v + best.p.y - D.p0[1] };
+}
+function flushDrag() { if (dragRaf) cancelAnimationFrame(dragRaf); dragRaf = 0; const m = dragPending; dragPending = null; if (m && S.drag && !S.drag.lostPt) dragTo(m); }
 function dragTo(m) {
   const sk = editSk(); const D = S.drag; restoreGeo(sk, D.snap); const du = m.u - D.start.u, dv = m.v - D.start.v;
   const moveIds = new Set(); let radiusOf = null;
@@ -3342,7 +3378,7 @@ function setTool(t) {
   if (t === 'sfillet' && S.editing && S.sel.size) { const sk = editSk(); const corners = new Set([...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2)));
     const lines = [...S.sel].filter((k) => k.startsWith('e:')).map((k) => sk.ents[k.slice(2)]).filter((e) => e?.t === 'line' && !e.ext);
     for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) for (const q of [lines[i].p1, lines[i].p2]) if (q === lines[j].p1 || q === lines[j].p2) corners.add(q);
-    if (corners.size) { let n = 0; const errs = []; for (const id of corners) { const r = filletCorner(sk, id, S.toolOpt.filletR); if (r?.arc) n++; else if (typeof r === 'string') errs.push(r); } S.sel.clear(); commitSketch(); toast(n ? `Скруглено углов: ${n}${errs.length ? `, не получилось: ${errs.length} (${errs[0]})` : ''}` : errs[0] || 'Нечего скруглять', n ? 'info' : 'warn'); } }
+    if (corners.size) { let n = 0; const errs = []; S.toolFillets = []; for (const id of corners) { const r = filletCorner(sk, id, S.toolOpt.filletR); if (r?.arc) { n++; sameFillet(sk, r.arc); S.toolFillets.push(r.arc); } else if (typeof r === 'string') errs.push(r); } S.sel.clear(); commitSketch(); toast(n ? `Скруглено углов: ${n}${errs.length ? `, не получилось: ${errs.length} (${errs[0]})` : ''}` : errs[0] || 'Нечего скруглять', n ? 'info' : 'warn'); } }
   if (t !== 'select' && t !== 'dim' && t !== 'sfillet' && S.sel.size) { S.sel.clear(); }
   const preDim = t === 'dim' && S.editing ? [...S.sel].filter((k) => k.startsWith('e:') || k.startsWith('p:')).slice(0, 2) : [];
   // A in the middle of a line chain goes on with an arc tangent to the last line, as SolidWorks does.
@@ -3434,6 +3470,9 @@ function drawClick(m) {
     const a = gp(sk, D.start); const sa = sScreen(a.x, a.y), sb = sScreen(sn.u, sn.v); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6 || (sn.kind !== 'pt' && Math.hypot(sa.x - sb.x, sa.y - sb.y) < 4)) return;
     const end = snapToPoint(sk, sn, pending); const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: D.start, p2: end };
     if (D.hv && !sn.kind) pending.push({ t: D.hv, refs: [id] });
+    // Ended on a point that lies level with the start (or straight above it), the line is horizontal (vertical) as
+    // well as joined there, as SolidWorks adds both: the snap used to drop the one for the other (J19).
+    else if (sn.kind) { const b = gp(sk, end); const dx = b.x - a.x, dy = b.y - a.y; const L = Math.hypot(dx, dy); if (L > 1e-9 && Math.abs(dy) < 1e-9 * Math.max(1, L)) pending.push({ t: 'horizontal', refs: [id] }); else if (L > 1e-9 && Math.abs(dx) < 1e-9 * Math.max(1, L)) pending.push({ t: 'vertical', refs: [id] }); }
     addRelations(sk, pending);
     const closed = end === D.first; D.start = end; D.newPts = [end]; D.sn = null; D.chain = [...(D.chain || []), end];
     // The chain ends where it closes on itself or joins other geometry; a lone point it passes through (a centre, a
@@ -3525,7 +3564,7 @@ function dimClick(m) {
   if (picks.length === 1 && firstIsPoint) { setHint('Выберите второй объект для размера'); return; }
   const con = makeDim(sk, picks, m); S.dimPick = null; S.dimPreview = null; S.sel.clear();
   if (!con) { toast('Для этих объектов размер не задаётся', 'warn'); refreshSketch(); return; }
-  con.id = nid(sk); con.pos = [m.u, m.v];
+  con.id = nid(sk); placeDim(sk, con, [m.u, m.v]);
   const r = tryAddConstraint(sk, con); reportAdd(r, con);
   commitSketch(); setHint(); if (r.status === 'ok') { openDimEditor.fresh = true; openDimEditor(sk.cons[con.id]); }
 }
@@ -3647,7 +3686,8 @@ function setRadii(sk, ents, r) {
   for (const e of ents) {
     const c = Object.values(sk.cons).find((k) => (k.t === 'rad' || k.t === 'diam') && k.refs[0] === e.id && !k.driven);
     if (c) { c.v = c.t === 'diam' ? 2 * r : r; delete c.expr; }
-    else { const cc = gp(sk, e.c); const id = nid(sk); sk.cons[id] = { id, t: e.t === 'circle' ? 'diam' : 'rad', refs: [e.id], v: e.t === 'circle' ? 2 * r : r, pos: [cc.x + e.r * 1.3, cc.y + e.r * 0.5] }; }
+    // One held equal to another (fillets of one run) takes the radius from it.
+    else if (!Object.values(sk.cons).some((k) => k.t === 'equal' && k.refs.includes(e.id))) { const cc = gp(sk, e.c); const id = nid(sk); sk.cons[id] = { id, t: e.t === 'circle' ? 'diam' : 'rad', refs: [e.id], v: e.t === 'circle' ? 2 * r : r, pos: [cc.x + e.r * 1.3, cc.y + e.r * 0.5] }; }
   }
   if (!solveSketch(sk) || flippedLine(sk, before)) { sk.cons = JSON.parse(saved); restoreGeo(sk, before); toast(`Радиус ${fmt(r)} недостижим: не помещается на линиях или противоречит взаимосвязям`, 'err'); refreshSketch(); return; }
   commitSketch(); toast(`Радиус ${fmt(r)} мм: ${ents.length} ${plural(ents.length, 'дуга', 'дуги', 'дуг')}`, 'info');
@@ -3982,6 +4022,9 @@ function trimAt0(sk, e, m) {
   if (isCurve(e)) { toast('Сплайн и эллипс пока не обрезаются', 'info'); return; }
   const tc = curveParam(sk, e, m.u, m.v); const pc = trimPiece(sk, e, tc); const pending = [];
   if (pc.all) { delete sk.ents[e.id]; cleanupSketch(sk); return; }
+  // A point held at the middle of a line that gets shorter would run to the middle of what is left, taking whatever
+  // hangs on it along: it stays where it is, on the line (SolidWorks drops the relation too).
+  if (e.t === 'line') for (const c of Object.values(sk.cons)) if (c.t === 'midpoint' && c.refs[1] === e.id) { c.t = 'online'; delete c.v; }
   if (e.t === 'circle') {
     const a = cutPoint(sk, pc.hi, pending), b = cutPoint(sk, pc.lo, pending);
     e.t = 'arc'; e.p1 = a; e.p2 = b;
@@ -3992,6 +4035,13 @@ function trimAt0(sk, e, m) {
   } else if (pc.lo) e.p2 = cutPoint(sk, pc.lo, pending);
   else e.p1 = cutPoint(sk, pc.hi, pending);
   cleanupSketch(sk); addRelations(sk, pending);
+}
+// Fillets put with one run of the tool share one radius dimension, the others are equal to the first, as in SolidWorks
+// (S0-48): a radius changed later is changed once.
+function sameFillet(sk, arc) {
+  const first = (S.toolFillets || []).find((id) => sk.ents[id] && id !== arc); if (!first) return; const own = Object.values(sk.cons).find((c) => c.t === 'rad' && c.refs[0] === arc);
+  if (!own || !Object.values(sk.cons).some((c) => c.t === 'rad' && c.refs[0] === first)) return; delete sk.cons[own.id];
+  const r = addRelations(sk, [{ t: 'equal', refs: [first, arc] }])[0]; if (r?.status !== 'ok') sk.cons[own.id] = own;
 }
 // Fillet at a corner shared by two lines. The corner stays as a point on both lines, like the
 // virtual sharp in SolidWorks, when dimensions or relations use it.
@@ -8348,7 +8398,7 @@ const thumbs = (() => {
   const dataOf = (d) => (d.id === S.project.active && S.mode === d.kind ? S.doc : d.data);
   // What rebuilds write down for themselves (where the user put things, the sources of references) is not a change
   // of the part: the picture stays.
-  const own = (k, v) => (k === 'home' || k === 'gen' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
+  const own = (k, v) => (k === 'home' || k === 'gen' || k === 'pa' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
   const sig = (d) => { const x = dataOf(d); return d.kind === 'part' ? hashStr(JSON.stringify([x.features, x.rollback, x.vars, x.color, x.faceColors], own)) : d.kind === 'asm' ? hashStr(JSON.stringify([x.comps, x.explode?.on])) : d.kind === 'import' ? hashStr(JSON.stringify([x.name, x.zup, x.scale, x.pos?.length])) : null; };
   const items = (d) => {
     const active = d.id === S.project.active && S.mode === d.kind;
@@ -8589,7 +8639,7 @@ function loadDoc(doc, msg) {
   if (!ent) { ent = { id: 'd' + S.project.nid++, kind: 'part', name: doc.name || 'Деталь', data: doc }; S.project.docs.push(ent); }
   S.project.active = ent.id; S.mode = 'part'; S.asmView?.clear?.();
   S.doc = doc; S.editing = null; S.pm = null; S.sel.clear(); S.selectedTree = null; S.cache.clear(); S.undo = []; S.redo = []; lastSaved = null;
-  repairFeatureIds(S.doc); for (const f of S.doc.features) if (f.type === 'sketch') solveSketch(f.sk);
+  repairFeatureIds(S.doc); for (const f of S.doc.features) if (f.type === 'sketch' && f.sk) { for (const c of Object.values(f.sk.cons)) if (c.pos && !c.pa) dimPos(f.sk, c); solveSketch(f.sk); }
   setTab('feat'); setTool('select'); rebuild(); refreshAll(); pushUndo(); setView(new THREE.Vector3(1, 0.85, 1.15), new THREE.Vector3(0, 1, 0));
   renderDocTabs(); if (msg) toast(msg, 'info');
 }
@@ -9011,5 +9061,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
