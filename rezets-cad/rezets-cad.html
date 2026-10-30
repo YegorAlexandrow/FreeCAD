@@ -2698,7 +2698,15 @@ function planeFromFace(face, hitPoint) {
 
 // ---------------- view orientation ----------------
 let anim = null;
+let fitOnly = null; const viewBack = [];
+// Shift+F fits the view to the selected face; Backspace goes back to the view before the last turn or fit (P0-22).
+function fitSelection() { const f = S.selFace; const pts = [];
+  if (f?.tris?.length && S.body) { const pos = S.body.getAttribute('position'); for (const t of f.tris) for (let k = 0; k < 3; k++) pts.push(new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k)); }
+  else if (S.selEdges?.length && S.body) { const topo = edgeTopology(S.body, S.cyls); for (const e of S.selEdges) for (const [a, b] of edgeSegs(e, topo)) pts.push(a, b); }
+  if (!pts.length) { toast('Выберите грань или ребро, чтобы вписать их', 'info'); return; } fitOnly = pts; fitAnimated(); }
+function viewPrevious() { const c = viewBack.pop(); if (!c) { toast('Предыдущего вида нет', 'info'); return; } setCamState(c); }
 function setView(dirVec, upVec, fit = true) {
+  viewBack.push({ pos: camera.position.clone(), target: controls.target.clone(), up: camera.up.clone(), zoom: camera.zoom }); if (viewBack.length > 30) viewBack.shift();
   // Orientation, target and zoom move together in one motion (turning first and fitting after read as two jumps),
   // and the orientation is slerped, so a half turn to the opposite side goes round instead of through a degenerate lerp.
   const dist = 1000; const fromQ = camera.quaternion.clone(), fromT = controls.target.clone(), fromZ = camera.zoom;
@@ -2719,10 +2727,12 @@ function setView(dirVec, upVec, fit = true) {
 // not by the bounding sphere, so a long thin part seen end-on fills the window.
 function fitFrame(q) {
   const pts = []; const box = new THREE.Box3();
+  // Fit to what is selected (P0-22): the points of the picked face only.
+  if (fitOnly) { pts.push(...fitOnly); fitOnly = null; } else {
   if (S.body) { const a = S.body.attributes.position; const step = Math.max(1, Math.floor(a.count / 20000)); for (let i = 0; i < a.count; i += step) pts.push(new THREE.Vector3().fromBufferAttribute(a, i)); }
   if (S.mode === 'asm') { asmGroup.updateMatrixWorld(true); asmGroup.traverse((o) => { if (o.isMesh) box.expandByObject(o); }); }
   for (const f of S.doc.features || []) if (f.type === 'sketch' && (S.editing === f.id || sketchVisible(f))) for (const p of Object.values(f.sk.pts)) pts.push(toWorld(f.plane, p.x, p.y));
-  if (!box.isEmpty()) for (let i = 0; i < 8; i++) pts.push(new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z));
+  if (!box.isEmpty()) for (let i = 0; i < 8; i++) pts.push(new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z)); }
   if (!pts.length) for (const x of [-60, 60]) for (const y of [-60, 60]) for (const z of [-60, 60]) pts.push(new THREE.Vector3(x, y, z));
   const m = new THREE.Matrix4().makeRotationFromQuaternion(q).setPosition(new THREE.Box3().setFromPoints(pts).getCenter(new THREE.Vector3())); const inv = m.clone().invert();
   const vb = new THREE.Box3(); const v = new THREE.Vector3(); for (const p of pts) vb.expandByPoint(v.copy(p).applyMatrix4(inv));
@@ -9476,6 +9486,8 @@ window.addEventListener('keydown', (e) => {
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.editing) { e.preventDefault(); deleteSelection(); return; }
   if (e.key === 'Delete' && S.treeMulti?.size > 1 && !S.pm) { multiMenu()[2][1](); return; }
   if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:') && !S.pm) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
+  if (k === 'f' && e.shiftKey) return fitSelection();
+  if (e.key === 'Backspace' && !S.pm && S.mode !== 'drw') { e.preventDefault(); return viewPrevious(); }
   if (k === 'f') return fitAnimated();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
   if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase() && (t !== 'fix' || [...S.sel].every((x) => x.startsWith('p:')))); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
