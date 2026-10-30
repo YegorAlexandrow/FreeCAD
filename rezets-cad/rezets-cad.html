@@ -3278,7 +3278,10 @@ function partClick(ev) {
   if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.shell) { shellClick(ev); return; }
   if (S.pm?.pickFrom) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.fromTarget = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.fromTarget = planeByKey(p.plane); else return; S.pm.pickFrom = false; showFaceHover(null); renderSide(); schedulePreview(); return; }
-  if (S.pm?.pickTarget) { const p = partPickAt(ev); const f = S.pm.feature; const T = p?.face ? { ...planeFromFace(p.face, p.point), label: 'Грань' } : p?.plane ? planeByKey(p.plane) : null; if (!T) return;
+  if (S.pm?.pickTarget) { const p = partPickAt(ev); const f = S.pm.feature;
+    // A corner of the model near the click: up to the plane through it, across the extrusion (P0-32, «До вершины»).
+    let vtx = null; { const sf0 = featById(f.sketch); const body0 = S.body; if (sf0?.plane && body0) { const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; for (const v of edgeTopology(body0, S.cyls).verts) { const sc = toScreen(v); const d = Math.hypot(sc.x - mx, sc.y - my); if (d < 8 && (!vtx || d < vtx.d)) vtx = { d, v }; } if (vtx) { const n = V3(sf0.plane.n); vtx = { label: 'Вершина', o: vtx.v.toArray().map((q) => +q.toFixed(6)), x: [...sf0.plane.x], y: [...sf0.plane.y], n: n.toArray() }; } } }
+    const T = vtx || (p?.face ? { ...planeFromFace(p.face, p.point), label: 'Грань' } : p?.plane ? planeByKey(p.plane) : null); if (!T) return;
     // A face along the extrusion is never reached (H15): refused at the pick, not later as an error of the operation.
     const sf = featById(f.sketch); if (sf?.plane && T.n && Math.abs(V3(T.n).normalize().dot(V3(sf.plane.n))) < 1e-6) { toast('Эта грань идёт вдоль вытягивания, до неё не дойти: выберите грань поперёк', 'warn'); return; }
     f.target = T; S.pm.pickTarget = false; renderSide(); schedulePreview(); return; }
