@@ -8245,6 +8245,10 @@ function renderTree() {
   if (S.pm || S.editing || S.measure) return;
   side.textContent = '';
   side.append(h('div', { class: 'sec-h' }, h('span', {}, S.doc.name), h('span', { class: 'meta' }, S.body ? 'тело' : 'нет тела')));
+  // «Что неправильно» (P0-35): everything wrong in the part in one list, each with its kind and a way to it.
+  { const probs = whatsWrong(); if (probs.length) { const nErr = probs.filter((q) => q.kind === 'err').length;
+      side.append(h('button', { class: 'whatswrong', style: 'margin:2px 10px 6px;padding:4px 8px;border:1px solid var(--bad,#c33);border-radius:6px;background:none;color:var(--bad,#c33);font:inherit;cursor:pointer;text-align:left', onclick: (ev) => { const r = ev.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, probs.map((q) => [`${q.name}: ${q.text}`, () => q.go()])); } },
+        `Что неправильно: ${nErr ? `${nErr} ${plural(nErr, 'ошибка', 'ошибки', 'ошибок')}` : ''}${nErr && probs.length > nErr ? ', ' : ''}${probs.length > nErr ? `${probs.length - nErr} ${plural(probs.length - nErr, 'предупреждение', 'предупреждения', 'предупреждений')}` : ''}`)); } }
   const tree = h('div', { class: 'tree', role: 'tree' });
   const row = (key, icon, name, opts = {}) => {
     const r = h('div', { class: 'row' + (S.selectedTree === key || (key.startsWith('feat:') && S.treeMulti?.has(key.slice(5))) ? ' sel' : '') + (S.faceOrigin && key === 'feat:' + S.faceOrigin ? ' origin' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
@@ -8295,6 +8299,15 @@ function renderTree() {
 // with it when needed.
 // Suppressing a feature suppresses what is built on it (a sketch on its face, a fillet of its edges, a pattern of it),
 // as SolidWorks does; showing it again brings those back too.
+function whatsWrong() {
+  const out = []; const rb = rollbackIndex();
+  for (const f of S.doc.features.slice(0, rb)) { if (f.suppressed) continue; const go = () => { if (f.type === 'sketch') editFeature(f); else { S.selectedTree = 'feat:' + f.id; renderTree(); editFeature(f); } };
+    if (S.errors[f.id]) out.push({ kind: 'err', name: f.name, text: 'ошибка: ' + S.errors[f.id], go });
+    const nd = S.dangling.get(f.id)?.length; if (nd) out.push({ kind: 'warn', name: f.name, text: `${nd} ${plural(nd, 'привязка', 'привязки', 'привязок')} к модели без опоры`, go });
+    if (S.offFace.has(f.id)) out.push({ kind: 'warn', name: f.name, text: 'плоскость эскиза больше не на грани', go });
+    if (S.warns?.[f.id]) out.push({ kind: 'warn', name: f.name, text: S.warns[f.id], go }); }
+  return out;
+}
 function multiMenu() {
   const fs = () => S.doc.features.filter((f) => S.treeMulti?.has(f.id)); const n = S.treeMulti.size;
   return [[`Погасить выбранные (${n})`, () => { for (const f of fs()) if (!f.suppressed) { f.suppressed = true; } S.treeMulti = null; rebuild(); pushUndo(); }],
