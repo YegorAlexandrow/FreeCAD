@@ -1942,20 +1942,31 @@ function reattachRefs() {
   toast(left.length ? `Привязано ${lost.length - left.length} из ${lost.length}. Остальным рядом нет вершины модели: перетащите каждую красную точку на нужную вершину` : `Привязки к модели обновлены: ${lost.length}`, left.length ? 'warn' : 'info');
 }
 // Brings a model reference into the sketch as fixed (external) geometry and returns its key.
-function materialize(sk, key) {
-  if (!key?.startsWith('r:')) return key; const [, kind, iStr] = key.split(':'); const R = S.refs; const i = +iStr;
-  const fixedPt = (x, y, ref) => { const ex = Object.values(sk.pts).find((p) => p.fixed && Math.hypot(p.x - x, p.y - y) < 1e-6); if (ex) return ex.id; const id = nid(sk); sk.pts[id] = { id, x, y, fixed: true }; if (ref) { sk.pts[id].free = true; sk.pts[id].mref = ref; } return id; };
+// Model edges and corners are brought into the sketch only while something holds on to them (S0-32): a click on one
+// (a miss included) takes it in to be selected, and it goes again as soon as nothing in the sketch uses it: no
+// relation or dimension on it, no line ending on it, not selected. Before, every click left a reference line for good.
+function pruneModelRefs(sk, keep = new Set()) {
+  if (!sk) return; const kept = new Set([...keep].map((k) => k.slice(2))); let gone = true;
+  while (gone) { gone = false;
+    const onCons = new Set(); for (const c of Object.values(sk.cons)) for (const r of c.refs) onCons.add(r);
+    for (const e of Object.values(sk.ents)) if (e.tent) { if (onCons.has(e.id)) delete e.tent; else if (!kept.has(e.id)) { delete sk.ents[e.id]; gone = true; } }
+    const used = new Set(); for (const e of Object.values(sk.ents)) entPts(e).forEach((p) => used.add(p));
+    for (const [id, p] of Object.entries(sk.pts)) if (p.tent) { if (onCons.has(id) || Object.values(sk.ents).some((e) => !e.tent && entPts(e).includes(id))) delete p.tent; else if (!used.has(id) && !kept.has(id)) { delete sk.pts[id]; gone = true; } } }
+}
+function materialize(sk, key, tent) {
+  if (!key?.startsWith('r:')) return key; const [, kind, iStr] = key.split(':'); const R = S.refs; const i = +iStr; const T = tent ? { tent: true } : {};
+  const fixedPt = (x, y, ref) => { const ex = Object.values(sk.pts).find((p) => p.fixed && Math.hypot(p.x - x, p.y - y) < 1e-6); if (ex) return ex.id; const id = nid(sk); sk.pts[id] = { id, x, y, fixed: true, ...T }; if (ref) { sk.pts[id].free = true; sk.pts[id].mref = ref; } return id; };
   const vref = (x, y) => (R.mref ? R.mref('p', [x, y]) : null);
   if (kind === 'v') return 'p:' + fixedPt(...R.verts[i], vref(...R.verts[i]));
   if (kind === 'l') {
     const [x1, y1, x2, y2] = R.lines[i]; const a = fixedPt(x1, y1, vref(x1, y1)), b = fixedPt(x2, y2, vref(x2, y2));
     const ex = Object.values(sk.ents).find((e) => e.ext && e.t === 'line' && ((e.p1 === a && e.p2 === b) || (e.p1 === b && e.p2 === a))); if (ex) return 'e:' + ex.id;
-    const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b, ext: true }; return 'e:' + id;
+    const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b, ext: true, ...T }; return 'e:' + id;
   }
   if (kind === 'c') {
     const c = R.circles[i]; const cp = fixedPt(c.x, c.y, R.mref ? R.mref('c', i) : null);
     const ex = Object.values(sk.ents).find((e) => e.ext && e.t === 'circle' && e.c === cp && Math.abs(e.r - c.r) < 1e-6); if (ex) return 'e:' + ex.id;
-    const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: cp, r: c.r, ext: true }; return 'e:' + id;
+    const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: cp, r: c.r, ext: true, ...T }; return 'e:' + id;
   }
   return null;
 }
@@ -3291,15 +3302,16 @@ function sketchDown(ev) {
   if (S.tool === 'select') {
     const p = pick(m);
     if (p) {
-      if (p.key.startsWith('r:')) { p.key = materialize(sk, p.key); S.drag = null; }
+      if (p.key.startsWith('r:')) { p.key = materialize(sk, p.key, true); S.drag = null; }
       if (!down.shift && !S.sel.has(p.key)) S.sel.clear();
       if (down.shift && S.sel.has(p.key)) S.sel.delete(p.key); else S.sel.add(p.key);
+      pruneModelRefs(sk, S.sel);
       const ent = p.key.startsWith('e:') ? sk.ents[p.key.slice(2)] : null; const pt = p.key.startsWith('p:') ? sk.pts[p.key.slice(2)] : null;
       if (!p.key.startsWith('e:H') && !p.key.startsWith('e:V') && !ent?.ext && !pt?.fixed) S.drag = { key: p.key, start: m, snap: snapshotGeo(sk), p0: pt ? [pt.x, pt.y] : null };
       // A point whose model corner is gone is repaired by dragging it onto another corner (SolidWorks' dangling repair).
       else if (pt?.lost) { S.drag = { key: p.key, start: m, snap: snapshotGeo(sk), lostPt: pt.id }; setHint('Перетащите точку на вершину модели, к которой её привязать'); }
       refreshSketch();
-    } else { if (!down.shift) { S.sel.clear(); S.conflict = new Set(); } S.box = [m, m]; refreshSketch(); }
+    } else { if (!down.shift) { S.sel.clear(); S.conflict = new Set(); pruneModelRefs(sk, S.sel); } S.box = [m, m]; refreshSketch(); }
     return;
   }
   if (S.tool === 'dim') { dimClick(m); return; }
@@ -4530,7 +4542,7 @@ function startSketch(plane, existing) {
   setView(new THREE.Vector3(...f.plane.n), new THREE.Vector3(...f.plane.y), false);
 }
 function exitSketch() {
-  if (!S.editing) return; const f = editF(); setHome(f.sk);
+  if (!S.editing) return; const f = editF(); pruneModelRefs(f.sk); setHome(f.sk);
   // Model points brought in only to be clicked at, and left unused, would hang in the sketch for good.
   for (const [id, p] of Object.entries(f.sk.pts)) if (p.fixed && p.free && !p.hole && !usedPt(f.sk, id)) delete f.sk.pts[id]; S.editing = null; S.refs = null; S.draw = null; S.sel.clear(); S.dimEdit = null; closeDimEditor(); S.conflict = new Set(); S.analysis = null;
   // A sketch left with nothing drawn in it is not kept (SolidWorks does not make one either); Ctrl+Z brings it back.
@@ -8489,12 +8501,12 @@ function typedSize(first) {
 // Right click in a sketch: what can be done with the item under the cursor (picked if it was not), or with the sketch.
 function sketchContext(ev) {
   const sk = editSk(); if (!sk) return; if (S.draw) { endDrawing(); setTool('select'); return; }
-  const m = mouseToSketch(ev); const under = pick(m, { all: true }); const p = pick(m); const p0 = p?.key; if (p?.key.startsWith('r:')) p.key = materialize(sk, p.key);
+  const m = mouseToSketch(ev); const under = pick(m, { all: true }); const p = pick(m); const p0 = p?.key; if (p?.key.startsWith('r:')) p.key = materialize(sk, p.key, true);
   if (p && !S.sel.has(p.key)) { S.sel = new Set([p.key]); refreshSketch(); }
   const items = [];
   // What else is under the cursor (a line under a point, a model edge under a line), as SolidWorks' «Select Other» (S0-47).
   const kind = (k) => { if (k.startsWith('p:')) return 'Точка'; if (k.startsWith('r:v')) return 'Вершина модели'; if (k.startsWith('r:l')) return 'Ребро модели'; if (k.startsWith('r:c')) return 'Кромка модели'; if (k === 'e:H' || k === 'e:V') return 'Ось ' + (k === 'e:H' ? 'X' : 'Y'); const e = sk.ents[k.slice(2)]; return { line: 'Линия', circle: 'Окружность', arc: 'Дуга', spline: 'Сплайн', ellipse: 'Эллипс' }[e?.t] || 'Объект'; };
-  const seen = new Set([p0, p?.key]); let more = 0; for (const c of under) { if (seen.has(c.key) || more >= 3) continue; more++; seen.add(c.key); items.push(['Выбрать другой: ' + kind(c.key) + (sk.ents[c.key.slice(2)]?.constr ? ' (вспомогательная)' : ''), () => { const k = c.key.startsWith('r:') ? materialize(sk, c.key) : c.key; S.sel = new Set([k]); refreshSketch(); }]); }
+  const seen = new Set([p0, p?.key]); let more = 0; for (const c of under) { if (seen.has(c.key) || more >= 3) continue; more++; seen.add(c.key); items.push(['Выбрать другой: ' + kind(c.key) + (sk.ents[c.key.slice(2)]?.constr ? ' (вспомогательная)' : ''), () => { const k = c.key.startsWith('r:') ? materialize(sk, c.key, true) : c.key; S.sel = new Set([k]); pruneModelRefs(sk, S.sel); refreshSketch(); }]); }
   if (S.sel.size) {
     for (const [, l, fn] of relationOptions(sk)) items.push([l, () => applyRelation(fn)]);
     if ([...S.sel].some((k) => k.startsWith('e:') && sk.ents[k.slice(2)])) items.push(['Вспомогательная геометрия (G)', toggleConstruction]);
@@ -8685,7 +8697,7 @@ const thumbs = (() => {
   const dataOf = (d) => (d.id === S.project.active && S.mode === d.kind ? S.doc : d.data);
   // What rebuilds write down for themselves (where the user put things, the sources of references) is not a change
   // of the part: the picture stays.
-  const own = (k, v) => (k === 'home' || k === 'gen' || k === 'pa' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
+  const own = (k, v) => (k === 'home' || k === 'gen' || k === 'pa' || k === 'tent' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
   const sig = (d) => { const x = dataOf(d); return d.kind === 'part' ? hashStr(JSON.stringify([x.features, x.rollback, x.vars, x.color, x.faceColors], own)) : d.kind === 'asm' ? hashStr(JSON.stringify([x.comps, x.explode?.on])) : d.kind === 'import' ? hashStr(JSON.stringify([x.name, x.zup, x.scale, x.pos?.length])) : null; };
   const items = (d) => {
     const active = d.id === S.project.active && S.mode === d.kind;
