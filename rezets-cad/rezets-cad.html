@@ -2361,9 +2361,12 @@ const scene = new THREE.Scene();
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -100000, 100000);
 camera.position.set(300, 240, 300); camera.up.set(0, 1, 0);
 scene.add(camera);
-const hemi = new THREE.HemisphereLight(0xffffff, 0x8a94a3, 1.05); scene.add(hemi);
-const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(0.6, 1.0, 1.4); camera.add(key);
-const fill = new THREE.DirectionalLight(0xffffff, 0.45); fill.position.set(-1, -0.4, 0.5); camera.add(fill);
+// The lights ride with the camera and aim along with it (G40): their targets were left at the world origin, so from a
+// camera far away they shone straight along the view, and the three faces an isometric view shows (turned to the view
+// alike) came out one grey. Light from above and to the side tells a plate's top from its sides.
+const hemi = new THREE.HemisphereLight(0xffffff, 0x6b7380, 0.8); scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 1.9); key.position.set(0.55, 1.0, 1.15); camera.add(key); key.target.position.set(0, 0, -1); camera.add(key.target);
+const fill = new THREE.DirectionalLight(0xffffff, 0.5); fill.position.set(-1, -0.3, 0.6); camera.add(fill); fill.target.position.set(0, 0, -1); camera.add(fill.target);
 const groups = { planes: new THREE.Group(), body: new THREE.Group(), sketch: new THREE.Group(), regions: new THREE.Group(), hover: new THREE.Group(), measure: new THREE.Group() };
 // Groups redrawn all the time give back the GPU buffers of what they drop: without it every mouse move in a sketch
 // left its lines and points behind (hundreds of geometries after a short drag). Shared geometry is kept, and materials
