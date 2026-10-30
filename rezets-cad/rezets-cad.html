@@ -3190,7 +3190,10 @@ canvas.addEventListener('pointerup', (ev) => {
   if (d && d.button === 0 && !d.moved) partClick(ev);
   if (d && d.button === 2 && !d.moved && !S.measure && (S.mode === 'part' || S.mode === 'import')) partContext(ev);
 });
-canvas.addEventListener('dblclick', (ev) => { if (S.editing && S.tool === 'select') { const m = mouseToSketch(ev); const p = pick(m); if (p?.key.startsWith('c:')) openDimEditor(editSk().cons[p.key.slice(2)]); } else if (S.tool === 'line' && S.draw) { endDrawing(); } else if (S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); } });
+canvas.addEventListener('dblclick', (ev) => {
+  // A double click on a face of the part opens the operation that made it, its size ready to type (P0-21).
+  if (S.mode === 'part' && !S.editing && !S.pm) { const p = partPickAt(ev); if (p?.face) { let by = null; try { by = featById(faceCreator(p.face)); } catch { by = null; } if (by) { S.selectedTree = 'feat:' + by.id; editFeature(by); setTimeout(() => { const inp = document.querySelector('#pmDepth, #pmRadius, #pmDist, #pmAngle'); inp?.focus(); inp?.select?.(); }, 0); return; } } }
+  if (S.editing && S.tool === 'select') { const m = mouseToSketch(ev); const p = pick(m); if (p?.key.startsWith('c:')) openDimEditor(editSk().cons[p.key.slice(2)]); } else if (S.tool === 'line' && S.draw) { endDrawing(); } else if (S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); } });
 canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
 // ---------------- part mode ----------------
