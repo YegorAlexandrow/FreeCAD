@@ -5330,7 +5330,7 @@ function openEdgePM(f, isNew) {
 const secPlane = new THREE.Plane(); const secGroup = freeOnClear(new THREE.Group()); scene.add(secGroup);
 function secBounds() { const box = new THREE.Box3(); for (const g of [S.mode === 'asm' ? asmGroup : groups.body]) g.traverse((o) => { if (o.isMesh && !o.userData.sec) box.expandByObject(o); }); return box; }
 function updateSecPlane() {
-  const sc = S.section; if (!sc) return; const pl = PLANES[sc.plane] || PLANES.front; const n = V3(pl.n).multiplyScalar(sc.flip ? 1 : -1);
+  const sc = S.section; if (!sc) return; const pl = sc.custom || PLANES[sc.plane] || PLANES.front; const n = V3(pl.n).multiplyScalar(sc.flip ? 1 : -1);
   const o = V3(pl.o).addScaledVector(V3(pl.n), sc.off); secPlane.setFromNormalAndCoplanarPoint(n, o);
 }
 // Cut faces: the plane crossed with every triangle gives segments, chained into loops, nested
@@ -5388,20 +5388,29 @@ function applySection() {
 }
 function renderSectionBar() {
   const bar = $('sectionBar'); const sc = S.section; bar.hidden = !sc; $('bSection').setAttribute('aria-pressed', String(!!sc)); bar.textContent = ''; if (!sc) return;
-  const pl = PLANES[sc.plane]; const bb = secBounds(); const n = V3(pl.n); let lo = -50, hi = 50;
+  const pl = sc.custom || PLANES[sc.plane]; const bb = secBounds(); const n = V3(pl.n); let lo = -50, hi = 50;
   if (!bb.isEmpty()) { const ds = [bb.min.x, bb.max.x].flatMap((x) => [bb.min.y, bb.max.y].flatMap((y) => [bb.min.z, bb.max.z].map((z) => n.dot(new THREE.Vector3(x, y, z)) - n.dot(V3(pl.o))))); lo = Math.floor(Math.min(...ds)); hi = Math.ceil(Math.max(...ds)); }
   const rng = h('input', { type: 'range', min: String(lo), max: String(hi), step: String(Math.max(0.1, (hi - lo) / 400)), value: String(sc.off), 'aria-label': 'Положение сечения' });
   const num = h('input', { type: 'text', class: 'num', value: fmt(sc.off, 2), 'aria-label': 'Смещение, мм' });
   rng.oninput = () => { sc.off = +rng.value; num.value = fmt(sc.off, 2); applySection(); };
   num.onchange = () => { const v = evalExpr(num.value); if (Number.isFinite(v)) { sc.off = v; rng.value = String(v); applySection(); } else num.value = fmt(sc.off, 2); };
   num.addEventListener('keydown', (e) => e.stopPropagation());
-  bar.append(...Object.entries(PLANES).map(([k, p]) => h('button', { 'aria-pressed': String(sc.plane === k), onclick: () => { sc.plane = k; sc.off = 0; renderSectionBar(); applySection(); } }, p.label)), rng, num, h('span', {}, 'мм'),
+  const sel = selectedPlaneForSection();
+  bar.append(...Object.entries(PLANES).map(([k, p]) => h('button', { 'aria-pressed': String(!sc.custom && sc.plane === k), onclick: () => { sc.plane = k; delete sc.custom; sc.off = 0; renderSectionBar(); applySection(); } }, p.label)),
+    sc.custom ? h('button', { 'aria-pressed': 'true', title: 'Сечение по выбранной грани или плоскости' }, sc.custom.label) : sel ? h('button', { title: 'Сечение по выбранной грани или плоскости', onclick: () => { sc.custom = sel; sc.off = 0; renderSectionBar(); applySection(); } }, 'По выбранной') : null, rng, num, h('span', {}, 'мм'),
     h('span', { id: 'secArea', class: 'num', style: 'width:auto;color:var(--fg-2)' }, sc.area != null ? `S = ${fmt(sc.area, 2)} мм²` : ''),
     h('button', { title: 'Показать другую половину', onclick: () => { sc.flip = !sc.flip; applySection(); } }, '⇄'), h('button', { title: 'Закрыть разрез', onclick: () => toggleSection() }, '✕'));
 }
 // A new section goes through the middle of the part when the plane through the origin would lie on one of its faces
 // (a cut along a face shows nothing useful).
+// A section along any flat face or reference plane (P0-39): the one picked in the view or the tree.
+function selectedPlaneForSection() {
+  if (S.mode === 'part' && S.pickedFace?.n) return { label: 'Грань', o: [...S.pickedFace.o], n: [...S.pickedFace.n] };
+  const f = S.selectedTree?.startsWith('feat:') && featById(S.selectedTree.slice(5)); if (f?.type === 'plane') { const pl = refPlane(f); return { label: f.name, o: [...pl.o], n: [...pl.n] }; }
+  return null;
+}
 function toggleSection() {
+  const sel0 = !S.section && selectedPlaneForSection(); if (sel0) { S.section = { plane: 'front', custom: sel0, off: sel0.label === 'Грань' ? -0.01 : 0, flip: false }; renderSectionBar(); applySection(); return; }
   if (S.section) S.section = null; else { let off = 0; const body = S.mode === 'part' ? S.body : null; const n = PLANES.front.n;
     if (body && onSomeFace(body, { o: [0, 0, 0], n })) { body.computeBoundingBox(); const c = body.boundingBox.getCenter(new THREE.Vector3()); off = +V3(n).dot(c).toFixed(2); if (onSomeFace(body, { o: V3(n).multiplyScalar(off).toArray(), n })) off += 0.01; }
     S.section = { plane: 'front', off, flip: false }; }
