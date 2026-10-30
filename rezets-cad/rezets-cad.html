@@ -6322,6 +6322,10 @@ function drawMassMarker() {
   const segs = [[-d, 0, 0, d, 0, 0], [0, -d, 0, 0, d, 0], [0, 0, -d, 0, 0, d]].flatMap(([x1, y1, z1, x2, y2, z2]) => [com.x + x1, com.y + y1, com.z + z1, com.x + x2, com.y + y2, com.z + z2]);
   const l = segLines(segs, lineMat(colors['geo-bad'], 2.2, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l); requestRender();
 }
+// The material of a component's part, chosen right in the assembly's mass panel (K49).
+function matSelect(x) { const data = x.ent?.data; if (!data || x.ent.kind !== 'part') return h('span', { class: 'note' }, MATERIALS[x.mat][0]);
+  const sel = h('select', { 'aria-label': `Материал: ${x.c.name}`, title: data.material ? 'Материал детали' : 'Материал не задан, считается PLA', style: 'max-width:110px' }, Object.entries(MATERIALS).map(([k, [name]]) => h('option', { value: k, selected: k === x.mat }, name + (k === x.mat && !data.material ? ' (не задан)' : ''))));
+  sel.onchange = () => { data.material = sel.value; saveProjectSoon(); renderSide(); drawMassMarker(); }; return sel; }
 function renderMassPM() {
   const box = h('div', { class: 'pm' }, h('div', { class: 'pm-h' }, svg(ICON.mass), h('span', {}, S.mode === 'asm' ? 'Масса сборки' : 'Свойства массы'), h('div', { class: 'pm-act' }, h('button', { class: 'cancel', title: 'Закрыть (Esc)', onclick: () => closePM() }, svg(ICON.x)))));
   const xyz = (v) => `${fmt(v.x, 2)}; ${fmt(v.y, 2)}; ${fmt(v.z, 2)} мм`;
@@ -6330,8 +6334,8 @@ function renderMassPM() {
     const pm = S.pm; pm.massOff ||= new Set(); const tick = (id, on) => { if (on) pm.massOff.delete(id); else pm.massOff.add(id); renderSide(); drawMassMarker(); };
     const all = r.rows.every((x) => x.on);
     const list = h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Компоненты'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { for (const x of r.rows) tick(x.c.id, e.target.checked); } }), 'Все'),
-      ...r.rows.map((x) => h('div', { class: 'kv' }, h('label', { class: 'chk', style: 'flex:1;min-width:0' }, h('input', { type: 'checkbox', checked: x.on, onchange: (e) => tick(x.c.id, e.target.checked) }), h('span', {}, `${x.c.name}, ${MATERIALS[x.mat][0]}${x.ent?.data?.material ? '' : ' (материал не задан)'}`)), h('b', {}, fmtMass(x.mass)))));
-    box.append(grp, list, h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Материал задаётся в детали: откройте её и нажмите «Масса».')));
+      ...r.rows.map((x) => h('div', { class: 'kv' }, h('label', { class: 'chk', style: 'flex:1;min-width:0' }, h('input', { type: 'checkbox', checked: x.on, onchange: (e) => tick(x.c.id, e.target.checked) }), h('span', { style: 'overflow:hidden;text-overflow:ellipsis' }, x.c.name)), matSelect(x), h('b', {}, fmtMass(x.mass)))));
+    box.append(grp, list, h('div', { class: 'grp' }, h('div', { class: 'note' }, 'Материал задаётся детали целиком: он меняется у всех её экземпляров и в самой детали')));
     side.append(box); return;
   }
   const ent = activeEntry(); const data = ent.data; const mat = matOf(data); const mp = massProps(S.body); const m = mp.vol * MATERIALS[mat][1] / 1000;
@@ -7315,9 +7319,12 @@ function asmAnalyze(asm) {
   const piv = new Set(basis.map((b) => b.piv)); const freeCols = [...Array(sys.n).keys()].filter((k) => !piv.has(k)); const free = new Set(freeCols);
   for (const b of basis) if (freeCols.some((f) => Math.abs(b.vec[f]) > 1e-7)) free.add(b.piv);
   const freeComps = new Set(); for (const [id, i] of sys.idx) for (let k = 0; k < 6; k++) if (free.has(6 * i + k)) { freeComps.add(id); break; }
+  // Each component's own freedoms (E34): the null space seen through its six unknowns, turns and shifts apart.
+  const perComp = new Map(); if (freeComps.size) { const N = nullSpace(rows, sys.n, rankTol(sys)); const rank = (vs) => { const B = []; for (const v of vs) { const w = v.slice(); for (const b of B) { const d = w.reduce((a, x, k) => a + x * b[k], 0); for (let k = 0; k < w.length; k++) w[k] -= d * b[k]; } const l = Math.hypot(...w); if (l > 1e-6) B.push(w.map((x) => x / l)); } return B.length; };
+    for (const id of freeComps) { const i = sys.idx.get(id); const sub = N.map((v) => Array.from(v.slice(6 * i, 6 * i + 6))); { const all = rank(sub), turn = rank(sub.map((v) => v.slice(0, 3))); perComp.set(id, { all, turn, shift: all - turn }); } } }
   // Consistent overlap between mates is normal in assemblies; only unsatisfied mates are errors.
   const { bad, miss } = misses(); void dependent;
-  return { dof: sys.n - basis.length, free: freeComps, redundant: bad, miss };
+  return { dof: sys.n - basis.length, free: freeComps, perComp, redundant: bad, miss };
 }
 const snapPoses = (asm) => asm.comps.map((c) => [c.id, c.T.slice()]);
 const restorePoses = (asm, s) => { for (const [id, T] of s) { const c = asm.comps.find((x) => x.id === id); if (c) c.T = T; } };
@@ -7427,6 +7434,11 @@ function asmRefresh(reanalyze) {
     g.add(edgeLines(inf.edges, lineMat(colors.edge, 1.3)));
     asmGroup.add(g); byComp.set(c.virtual ? 'v:' + c.name : c.id, g);
   });
+  // Explode lines (K40): a dashed trail from where each moved part sits in the assembly to where it is shown.
+  if (asm.explode?.on && asm.explode.steps?.length) { const pos = []; let far = 0;
+    for (const c of asm.comps) { if (c.hidden || c.suppressed) continue; const off = explodeOffset(asm, c); if (off.lengthSq() < 1e-6) continue; const inf = docInfo(c.doc); if (!inf?.geo) continue;
+      inf.geo.computeBoundingBox(); const a = inf.geo.boundingBox.getCenter(new THREE.Vector3()).applyMatrix4(new THREE.Matrix4().fromArray(c.T)); pos.push(...a.toArray(), ...a.clone().add(off).toArray()); far = Math.max(far, off.length()); }
+    if (pos.length) { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); const l = new THREE.LineSegments(g, new THREE.LineDashedMaterial({ color: colors.edge, dashSize: far / 30, gapSize: far / 45, transparent: true, opacity: 0.7 })); l.computeLineDistances(); l.userData.trail = true; asmGroup.add(l); } }
   drawMatePicks(); renderSide(); setHint(); if (S.section || secGroup.children.length) applySection(); requestRender();
 }
 // A hidden component stays in the assembly (its mates, mass and BOM line too); it is only not drawn or picked.
@@ -7628,7 +7640,8 @@ function previewMate() {
 const nextMateName = (asm, t) => { const base = MATE_NAMES[t]; let n = 0; for (const x of asm.mates) { const mm = x.name?.startsWith(base) && /^\d+$/.test(x.name.slice(base.length)) ? +x.name.slice(base.length) : 0; n = Math.max(n, mm); } return base + (n + 1); };
 function okMate() {
   const pm = S.pm; const asm = S.doc;
-  if (!pm.mate) { if (pm.result?.status) toast(mateMessage(pm.result), 'err'); else toast('Выберите две грани или две оси', 'warn'); return; }
+  // The reason is already written in the panel (E25): OK points at it as well as saying it.
+  if (!pm.mate) { if (pm.result?.status) { toast(mateMessage(pm.result), 'err'); const n = side.querySelector('[data-mate-why]'); if (n) { n.scrollIntoView({ block: 'nearest' }); n.style.outline = '2px solid var(--bad)'; setTimeout(() => { n.style.outline = ''; }, 1200); } } else toast('Выберите две грани или две оси', 'warn'); return; }
   restorePoses(asm, pm.before); const m = pm.mate;
   if (pm.edit) { m.id = pm.edit.id; m.name = pm.edit.type === m.type ? pm.edit.name : nextMateName(asm, m.type); m.suppressed = pm.edit.suppressed; }
   else { m.id = 'm' + asm.nid++; m.name = nextMateName(asm, m.type); }
@@ -7697,6 +7710,7 @@ function mateMessage(r) {
   const names = r.group.map((id) => S.doc.mates.find((m) => m.id === id)?.name).filter(Boolean); const q = names.map((n) => `«${n}»`).join(', ');
   return r.status === 'redundant' ? `Это сопряжение ничего не добавляет: положение уже задано${names.length ? ' (' + q + ')' : ''}` : names.length ? `Вместе с ${q} это сопряжение требует невозможного положения (элементы ${names.length > 1 ? 'тех сопряжений' : 'того сопряжения'} подсвечены красным). Погасите одно из них или выберите другие элементы` : 'Сопряжение противоречит существующим';
 }
+const freeText = (f) => (f ? `Свободно: ${f.all} ${plural(f.all, 'степень', 'степени', 'степеней')}${f.turn && f.shift ? `: поворот ${f.turn}, сдвиг ${f.shift}` : f.turn ? ', только повороты' : ', только сдвиги'}` : '');
 // Selects a component's row and scrolls to it; with mates, its folder of mates is opened too (K60).
 function revealComp(c, mates) { S.asmSel = c.id; S.mateSel = null; if (mates) (S.compOpen ||= new Set()).add(c.id); asmRefresh();
   const i = S.doc.comps.indexOf(c); const row = side.querySelectorAll('.tree > .row:not(.child)')[i]; row?.scrollIntoView({ block: 'nearest' }); row?.focus({ preventScroll: true }); }
@@ -7713,12 +7727,12 @@ function renderAsmTree() {
   if (asm.comps.length > 1 && !asm.comps.some((c) => c.fixed)) side.append(h('div', { class: 'note', style: 'color:var(--warn);padding:2px 10px 6px' }, 'Ни один компонент не зафиксирован: перетаскивание двигает всю сборку. Зафиксируйте основание через правый щелчок'));
   const tree = h('div', { class: 'tree', role: 'tree' });
   for (const c of asm.comps) {
-    const ent = docEntry(c.doc); const status = c.fixed ? '(ф)' : an?.free.has(c.id) ? '(−)' : '';
+    const ent = docEntry(c.doc); const status = c.fixed ? '(ф)' : an?.free.has(c.id) ? `(−${an.perComp?.get(c.id)?.all ?? ''})` : '';
     const eye = h('button', { class: 'eye', title: c.hidden ? 'Показать' : 'Скрыть', 'aria-label': c.hidden ? 'Показать' : 'Скрыть', onclick: (e) => { e.stopPropagation(); toggleCompHidden(c); } }, c.hidden ? '◌' : '◉');
     // A component whose part document is gone from the project is marked, not shown as an ordinary one.
     const lostDoc = !S.project.docs.some((d) => d.id === c.doc); const noBody = !lostDoc && docInfo(c.doc)?.empty;
     const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : '') + (c.hidden || c.suppressed ? ' off' : '') + (c.suppressed ? ' supp' : '') + (lostDoc || noBody ? ' warn' : ''), tabindex: '0', role: 'treeitem', title: lostDoc ? 'Документа этой детали больше нет в проекте: компонент пустой. Удалите его или замените' : noBody ? 'У детали сейчас нет тела (ошибка в её дереве или всё откачено): компонент не виден. Откройте деталь' : (c.hidden ? 'Скрыт. ' : '') + (c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён') },
-      svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name), eye);
+      svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta', title: freeText(an?.perComp?.get(c.id)) }, status), h('span', { class: 'nm' }, c.name), eye);
     r.onclick = () => { S.asmSel = c.id; S.mateSel = null; asmRefresh(); };
     // Double-click brings the component into view and stays in the assembly (K61); the part opens from the menu.
     r.ondblclick = () => { S.asmSel = c.id; asmRefresh(); fitSelection(); };
@@ -8087,7 +8101,7 @@ function renderAsmPM() {
       pm.type === 'distance' || pm.type === 'angle' ? numField(pm.type === 'distance' ? 'Расстояние' : 'Угол', 'mateVal', pm.v ?? 0, (v) => { if (v < 0 && pm.type === 'distance') { v = -v; pm.side = -(pm.side || 1); } pm.v = pm.type === 'angle' ? Math.abs(v) : v; previewMate(); return pm.v; }, pm.type === 'angle' ? '°' : 'мм') : null,
       canReverse(a, b, pm.type) ? h('div', { class: 'chips' }, h('button', { class: 'chip', 'data-flip': '1', title: 'Развернуть сопряжённую деталь на другую сторону (R)', onclick: () => { if (sideFlip(a, b, pm.type)) pm.side = -(pm.side || 1); else { pm.flip = !pm.flip; pm.flipTouched = true; } previewMate(); } }, h('b', {}, '⇄'), 'Реверс'), h('span', { class: 'note' }, sideFlip(a, b, pm.type) ? 'с другой стороны грани' : a.kind === 'plane' ? (pm.flip ? 'грани смотрят в одну сторону' : 'грани смотрят друг на друга') : (pm.flip ? 'оси сонаправлены' : 'оси противоположны'))) : null));
   }
-  if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', style: 'color:var(--bad)' }, mateMessage(pm.result)),
+  if (pm.result && pm.result.status !== 'ok') box.append(h('div', { class: 'grp' }, h('div', { class: 'note', 'data-mate-why': '1', style: 'color:var(--bad);outline-offset:2px;border-radius:4px' }, mateMessage(pm.result)),
     pm.suggest ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { const i = pm.picks.findIndex((r) => r.comp === pm.suggest.comp); if (i >= 0) pm.picks[i] = pm.suggest; pm.suggest = null; previewMate(); } }, 'Взять подсвеченную')) : null));
   // The same choices float by the second click, as SolidWorks' mate pop-up: type, turn over, OK or cancel.
   renderMateBar(pm, opts, a, b);
@@ -9256,7 +9270,7 @@ const HELP_KEYS = [
   ['Везде', [['Ctrl+Z / Ctrl+Y', 'Отменить / вернуть'], ['Ctrl+S', 'Сохранить сейчас'], ['F', 'Вписать модель в окно'], ['Стрелки', 'Повернуть вид на 15°, с Shift на 90°'], ['Alt+← / →', 'Повернуть вид вокруг направления взгляда'], ['Enter', 'OK в открытой панели'], ['Esc', 'Отмена: инструмент, выделение, панель'], ['F2', 'Переименовать выделенный элемент или компонент'], ['F1 или ?', 'Эта справка']]],
   ['Деталь', [['S', 'Эскиз'], ['E', 'Вытянутая бобышка'], ['X', 'Вытянутый вырез'], ['R', 'Повёрнутая бобышка'], ['L', 'Скругление'], ['C', 'Фаска'], ['M', 'Рулетка'], ['Delete', 'Удалить выделенный элемент']]],
   ['Эскиз', [['L / R / C / A / P', 'Линия / прямоугольник / окружность / дуга / точка'], ['T', 'Обрезка'], ['D', 'Размер'], ['G', 'Вспомогательная геометрия'], ['Delete', 'Удалить выделенное'], ['Ctrl+щелчок', 'Добавить к выделению']]],
-  ['Взаимосвязи (при выделенной геометрии)', Object.entries({ H: 'Горизонтально', V: 'Вертикально', C: 'Совпадение', P: 'Параллельно', N: 'Перпендикулярно', E: 'Равенство', T: 'Касательно', K: 'Концентрично', M: 'Середина', O: 'На линии / окружности', J: 'Коллинеарно', S: 'Симметрично', F: 'Зафиксировать' })],
+  ['Взаимосвязи (при выделенной геометрии)', Object.entries({ H: 'Горизонтально', V: 'Вертикально', C: 'Совпадение', P: 'Параллельно', N: 'Перпендикулярно', E: 'Равенство', T: 'Касательно', K: 'Концентрично', M: 'Середина', O: 'На линии / окружности', J: 'Коллинеарно', S: 'Симметрично', F: 'Зафиксировать', 'Shift+буква': 'Инструмент, даже когда что-то выделено' })],
   ['Сборка', [['I', 'Вставить компонент'], ['M', 'Сопряжение'], ['Shift+перетаскивание', 'Повернуть компонент'], ['Delete', 'Удалить выделенный компонент или сопряжение']]],
   ['Чертёж', [['D', 'Размер']]],
 ];
@@ -9569,8 +9583,11 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Backspace' && !S.pm && S.mode !== 'drw') { e.preventDefault(); return viewPrevious(); }
   if (k === 'f') return fitAnimated();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
+  // C, P, T, S and E are both (S0-25): with Shift a letter always picks its tool.
+  const SK_TOOLS = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' };
+  if (S.editing && e.shiftKey && SK_TOOLS[k]) { setTool(SK_TOOLS[k]); return; }
   if (S.editing && S.sel.size && S.tool === 'select') { const opt = relationOptions(editSk()).find(([t]) => REL_KEYS[t] === k.toUpperCase() && (t !== 'fix' || [...S.sel].every((x) => x.startsWith('p:')))); if (opt) { e.preventDefault(); applyRelation(opt[2]); return; } }
-  if (S.editing) { const map = { l: 'line', r: 'rect', c: 'circle', a: 'arc', p: 'point', d: 'dim', s: 'select', t: 'trim' }; if (map[k]) { setTool(map[k]); return; } if (k === 'g') return toggleConstruction(); if (k === 'e' || k === 'x') { if (S.draw) endDrawing(); return cmdFeature('extrude', k === 'e' ? 'add' : 'cut'); } }
+  if (S.editing) { if (SK_TOOLS[k]) { setTool(SK_TOOLS[k]); return; } if (k === 'g') return toggleConstruction(); if (k === 'e' || k === 'x') { if (S.draw) endDrawing(); return cmdFeature('extrude', k === 'e' ? 'add' : 'cut'); } }
   // An open operation panel is not dropped by a command key: what was typed into it would be lost.
   else if (S.pm && ['m', 's', 'e', 'x'].includes(k)) { toast('Сначала завершите операцию: Enter применяет, Esc отменяет', 'info'); }
   else { if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); if (k === 's') return cmdSketch(); if (k === 'e') return cmdFeature('extrude', 'add'); if (k === 'x') return cmdFeature('extrude', 'cut'); if (k === 'r') return cmdFeature('revolve', 'add'); if (S.body && k === 'l') return cmdEdgeFeature('fillet'); if (S.body && k === 'c') return cmdEdgeFeature('chamfer'); }
