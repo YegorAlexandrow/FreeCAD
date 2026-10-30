@@ -2744,11 +2744,12 @@ function mouseToSketch(ev) {
 let viewH = 1; const unitsPerPx = () => (camera.top - camera.bottom) / camera.zoom / Math.max(viewH, 1);
 // Nearest sketch item under the cursor, in screen pixels.
 function pick(m, opts = {}) {
-  const sk = editSk(); const tol = opts.tol ?? 9; let best = null;
-  const consider = (key, d, prio = 0) => { if (d <= tol && (!best || d - prio < best.d - best.prio)) best = { key, d, prio }; };
+  const sk = editSk(); const tol = opts.tol ?? 9; let best = null; const all = [];
+  const consider = (key, d, prio = 0) => { if (d <= tol) all.push({ key, d, prio }); if (d <= tol && (!best || d - prio < best.d - best.prio)) best = { key, d, prio }; };
+  const out = () => (opts.all ? all.sort((a, b) => a.d - a.prio - (b.d - b.prio)) : best);
   const ptIds = [...Object.keys(sk.pts), 'O'];
   for (const id of ptIds) { if (opts.excludePts?.has(id)) continue; const p = gp(sk, id); const s = sScreen(p.x, p.y); consider('p:' + id, Math.hypot(s.x - m.sx, s.y - m.sy), 3); }
-  if (opts.pointsOnly) return best;
+  if (opts.pointsOnly) return out();
   for (const e of Object.values(sk.ents)) {
     if (opts.excludeEnts?.has(e.id)) continue;
     if (e.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); const sa = sScreen(a.x, a.y), sb = sScreen(b.x, b.y); consider('e:' + e.id, distSeg(m.sx, m.sy, sa, sb)); }
@@ -2762,7 +2763,7 @@ function pick(m, opts = {}) {
     R.circles.forEach((c, i) => { const ang = Math.atan2(m.v - c.y, m.u - c.x); const s = sScreen(c.x + c.r * Math.cos(ang), c.y + c.r * Math.sin(ang)); consider('r:c:' + i, Math.hypot(s.x - m.sx, s.y - m.sy) + 1); });
   }
   if (!opts.noAxes) for (const id of ['H', 'V']) { const e = REF_ENTS[id]; const a = gp(sk, e.p1), b = gp(sk, e.p2); const sa = sScreen(a.x * 1e4, a.y * 1e4), sb = sScreen(b.x * 1e4, b.y * 1e4); consider('e:' + id, distSeg(m.sx, m.sy, sa, sb) + 2); }
-  return best;
+  return out();
 }
 function distSeg(px, py, a, b) { const dx = b.x - a.x, dy = b.y - a.y; const l = dx * dx + dy * dy || 1; let t = ((px - a.x) * dx + (py - a.y) * dy) / l; t = Math.max(0, Math.min(1, t)); return Math.hypot(px - a.x - t * dx, py - a.y - t * dy); }
 function angleInArc(sk, e, ang) { const c = gp(sk, e.c), p1 = gp(sk, e.p1), p2 = gp(sk, e.p2); const a0 = Math.atan2(p1.y - c.y, p1.x - c.x); let sw = Math.atan2(p2.y - c.y, p2.x - c.x) - a0; while (sw <= 0) sw += 2 * Math.PI; let d = ang - a0; while (d < 0) d += 2 * Math.PI; while (d > 2 * Math.PI) d -= 2 * Math.PI; return d <= sw; }
@@ -3255,6 +3256,7 @@ function partClick(ev) {
 function sketchDown(ev) {
   const m = mouseToSketch(ev); const sk = editSk(); S.lastClick = { x: m.sx, y: m.sy };
   if (S.skOp?.kind === 'offset') { offsetPick(m); return; }
+  if (S.skOp?.kind === 'mirror') { mirrorPick(m); return; }
   if (S.tool === 'select') {
     const p = pick(m);
     if (p) {
@@ -3276,14 +3278,16 @@ function sketchDown(ev) {
     // Two lines clicked one after the other round the corner where they meet.
     if (!p) { const q = pick(m); const L = q?.key.startsWith('e:') && sk.ents[q.key.slice(2)]; if (L?.t === 'line' && !L.ext) { const first = S.filletFirst && sk.ents[S.filletFirst];
       if (!first || first === L) { S.filletFirst = L.id; S.sel = new Set(['e:' + L.id]); updateSketchVisuals(); setHint('Щёлкните второй отрезок угла'); return; }
-      S.filletFirst = null; S.sel.clear(); const shared = [first.p1, first.p2].find((x) => x === L.p1 || x === L.p2);
-      if (!shared) { toast('Эти отрезки не сходятся в одной точке', 'warn'); updateSketchVisuals(); setHint(); return; }
+      S.filletFirst = null; S.sel.clear(); let shared = [first.p1, first.p2].find((x) => x === L.p1 || x === L.p2);
+      // Lines that do not meet are first brought to their corner, the nearer ends extended or cut back to where the lines
+      // cross, as SolidWorks does (J29).
+      if (!shared) { const j = joinAtCorner(sk, first, L); if (j.err) { toast(j.err, 'warn'); updateSketchVisuals(); setHint(); return; } shared = j.id; }
       const r = filletCorner(sk, shared, S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); updateSketchVisuals(); setHint(); return; } if (r?.arc) { sameFillet(sk, r.arc); (S.toolFillets ||= []).push(r.arc); } S.hover = null; commitSketch(); setHint(); return; } }
-    if (!p) { const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } sameFillet(sk, r2.arc); (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) (S.toolFillets ||= []).push(r.arc); if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
+    if (!p) { if (S.toolOpt.chamfer) return; const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } sameFillet(sk, r2.arc); (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) { sameFillet(sk, r.arc); (S.toolFillets ||= []).push(r.arc); } if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
   drawClick(m);
 }
 function sketchMove(ev) {
-  const m = mouseToSketch(ev); const sk = editSk(); $('stXY').textContent = `X ${fmt(m.u, 2)}  Y ${fmt(m.v, 2)}`;
+  const m = mouseToSketch(ev); const sk = editSk(); $('stXY').textContent = `X ${fmt(m.u, 2)}  Y ${fmt(m.v, 2)}`; S.skCursor = m;
   if (S.relHover) { S.relHover = null; updateSketchVisuals(); }
   if (S.skOp?.kind === 'offset' && !down) offsetSide(m);
   if (S.tool === 'select') {
@@ -3547,10 +3551,10 @@ function dimClick(m) {
   const sk = editSk(); S.dimPick = S.dimPick || [];
   const picks = S.dimPick; const first = picks[0];
   const firstIsPoint = first && (first.startsWith('p:') || first === 'e:H' || first === 'e:V');
-  // With one curve picked, a click lands the dimension unless it is right on another item;
-  // the sketch axes only count as a second item when the first one was a point.
+  // With one curve picked, a click lands the dimension unless it is right on another item, a sketch axis included: a
+  // line and an axis give their distance or angle, a circle and an axis the distance of its centre (S0-30).
   let p = null;
-  if (picks.length < 2) p = pick(m, { tol: picks.length ? 6 : 9, noAxes: picks.length > 0 && !firstIsPoint });
+  if (picks.length < 2) p = pick(m, { tol: picks.length ? 6 : 9 });
   if (p && p.key.startsWith('r:')) p.key = materialize(sk, p.key);
   // The first click on an item that was already picked before the tool is taking it, not placing the dimension on it.
   const pre = S.dimPre; S.dimPre = false; if (pre && p && p.key === first && picks.length === 1) { refreshSketch(); setHint('Щёлкните, где поставить размер, или выберите второй объект'); return; }
@@ -4036,6 +4040,30 @@ function trimAt0(sk, e, m) {
   else e.p1 = cutPoint(sk, pc.hi, pending);
   cleanupSketch(sk); addRelations(sk, pending);
 }
+function joinAtCorner(sk, A, B) {
+  const a1 = gp(sk, A.p1), a2 = gp(sk, A.p2), b1 = gp(sk, B.p1), b2 = gp(sk, B.p2); const dA = [a2.x - a1.x, a2.y - a1.y], dB = [b2.x - b1.x, b2.y - b1.y];
+  const den = dA[0] * dB[1] - dA[1] * dB[0]; if (Math.abs(den) < 1e-9 * Math.hypot(...dA) * Math.hypot(...dB)) return { err: 'Эти отрезки не сходятся в одной точке' };
+  const t = ((b1.x - a1.x) * dB[1] - (b1.y - a1.y) * dB[0]) / den; const X = { x: a1.x + dA[0] * t, y: a1.y + dA[1] * t };
+  const near = (e) => { const p = gp(sk, e.p1), q = gp(sk, e.p2); return Math.hypot(p.x - X.x, p.y - X.y) <= Math.hypot(q.x - X.x, q.y - X.y) ? e.p1 : e.p2; };
+  const ea = near(A), eb = near(B); if (sk.pts[ea]?.fixed || sk.pts[eb]?.fixed || isRefPt(ea) || isRefPt(eb)) return { err: 'Конец отрезка привязан к модели: сведите отрезки в угол вручную' };
+  const before = snapshotGeo(sk); sk.pts[ea].x = X.x; sk.pts[ea].y = X.y;
+  for (const e of Object.values(sk.ents)) for (const k of ['p1', 'p2', 'c']) if (e[k] === eb) e[k] = ea;
+  for (const c of Object.values(sk.cons)) c.refs = c.refs.map((r) => (r === eb ? ea : r)); delete sk.pts[eb];
+  for (const c of Object.values(sk.cons)) if (c.t === 'coincident' && c.refs[0] === c.refs[1]) delete sk.cons[c.id];
+  if (!solveSketch(sk)) { restoreGeo(sk, before); return { err: 'Отрезки не свести в угол: этому мешают их взаимосвязи' }; }
+  return { id: ea };
+}
+// A chamfer at a corner (S0-17): the same distance back along both lines, joined by a line. The sharp corner stays as a
+// point on both lines, and the two distances are dimensions from it, as SolidWorks' sketch chamfer «distance-distance».
+function chamferCorner(sk, pid, d, lines, P, u) {
+  if (d >= u[0].l - 1e-6 || d >= u[1].l - 1e-6) return `Фаска ${fmt(d)} не помещается на этих линиях, наибольшая около ${fmt(Math.min(u[0].l, u[1].l) * 0.999, 2)} мм`;
+  const ids = u.map((w) => { const id = nid(sk); sk.pts[id] = { id, x: P.x + w.x * d, y: P.y + w.y * d }; return id; });
+  lines.forEach((e, i) => { if (e.p1 === pid) e.p1 = ids[i]; else e.p2 = ids[i]; });
+  const lid = nid(sk); sk.ents[lid] = { id: lid, t: 'line', p1: ids[0], p2: ids[1] };
+  const at = (i) => [P.x + u[i].x * d * 0.5 + u[1 - i].x * 2, P.y + u[i].y * d * 0.5 + u[1 - i].y * 2];
+  addRelations(sk, [{ t: 'online', refs: [pid, lines[0].id] }, { t: 'online', refs: [pid, lines[1].id] }, { t: 'dist', refs: [pid, ids[0]], v: d, pos: at(0) }, { t: 'dist', refs: [pid, ids[1]], v: d, pos: at(1) }]);
+  return { line: lid };
+}
 // Fillets put with one run of the tool share one radius dimension, the others are equal to the first, as in SolidWorks
 // (S0-48): a radius changed later is changed once.
 function sameFillet(sk, arc) {
@@ -4046,12 +4074,15 @@ function sameFillet(sk, arc) {
 // Fillet at a corner shared by two lines. The corner stays as a point on both lines, like the
 // virtual sharp in SolidWorks, when dimensions or relations use it.
 function filletCorner(sk, pid, r) {
-  const lines = Object.values(sk.ents).filter((e) => e.t === 'line' && !e.ext && (e.p1 === pid || e.p2 === pid));
+  let lines = Object.values(sk.ents).filter((e) => e.t === 'line' && !e.ext && (e.p1 === pid || e.p2 === pid));
+  // A construction line through the corner (a diagonal, a centre line) is not one of the corner's sides (S0-16).
+  if (lines.length > 2) lines = lines.filter((e) => !e.constr);
   if (lines.length !== 2) return 'Скругление ставится в угол, где сходятся ровно две линии';
   const P = gp(sk, pid); const far = lines.map((e) => gp(sk, e.p1 === pid ? e.p2 : e.p1));
   const u = far.map((A) => { const l = Math.hypot(A.x - P.x, A.y - P.y); return { x: (A.x - P.x) / l, y: (A.y - P.y) / l, l }; });
   const cosF = u[0].x * u[1].x + u[0].y * u[1].y; const phi = Math.acos(Math.max(-1, Math.min(1, cosF)));
   if (phi < 1e-3 || phi > Math.PI - 1e-3) return 'Линии в этой точке не образуют угол';
+  if (S.toolOpt.chamfer) return chamferCorner(sk, pid, r, lines, P, u);
   const d = r / Math.tan(phi / 2); if (d >= u[0].l - 1e-6 || d >= u[1].l - 1e-6) return `Радиус ${fmt(r)} не помещается на этих линиях, наибольший около ${fmt(Math.min(u[0].l, u[1].l) * Math.tan(phi / 2) * 0.999, 2)} мм`;
   const T = u.map((w) => ({ x: P.x + w.x * d, y: P.y + w.y * d })); const bl = Math.hypot(u[0].x + u[1].x, u[0].y + u[1].y);
   const C = { x: P.x + (u[0].x + u[1].x) / bl * r / Math.sin(phi / 2), y: P.y + (u[0].y + u[1].y) / bl * r / Math.sin(phi / 2) };
@@ -4062,7 +4093,7 @@ function filletCorner(sk, pid, r) {
   const pending = [{ t: 'tangent', refs: [lines[0].id, aid] }, { t: 'tangent', refs: [lines[1].id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (P.x - C.x) * 1.6, C.y + (P.y - C.y) * 1.6] }];
   // The corner stays as a point on both lines (SolidWorks' virtual sharp) when something refers to it, or when
   // «Сохранять угловую точку» asks for it, to dimension from the sharp corner.
-  const keep = isRefPt(pid) || S.toolOpt.keepCorner || Object.values(sk.cons).some((c) => c.refs.includes(pid));
+  const keep = isRefPt(pid) || S.toolOpt.keepCorner || Object.values(sk.cons).some((c) => c.refs.includes(pid)) || Object.values(sk.ents).some((e) => !lines.includes(e) && [e.p1, e.p2, e.c].includes(pid));
   if (keep) pending.push({ t: 'online', refs: [pid, lines[0].id] }, { t: 'online', refs: [pid, lines[1].id] }); else delete sk.pts[pid];
   addRelations(sk, pending);
   return { arc: aid };
@@ -4225,6 +4256,27 @@ function mirrorEntities(sk, ids, axisId) {
   for (const c of pending) { c.id = nid(sk); if (c.t === 'online') tryAddConstraint(sk, c, { derive: true }); else sk.cons[c.id] = c; }
   return n;
 }
+function sketchSelectAll() { const sk = editSk(); if (!sk) return; if (S.draw) endDrawing(); setTool('select');
+  S.sel = new Set([...Object.values(sk.ents).filter((e) => !e.ext).map((e) => 'e:' + e.id), ...Object.values(sk.pts).filter((q) => q.hole && !q.fixed).map((q) => 'p:' + q.id)]); refreshSketch(); setHint(`Выделено: ${S.sel.size}`); }
+function sketchCopy() {
+  const sk = editSk(); const ents = [...S.sel].filter((k) => k.startsWith('e:')).map((k) => sk.ents[k.slice(2)]).filter((e) => e && !e.ext); const lone = [...S.sel].filter((k) => k.startsWith('p:')).map((k) => sk.pts[k.slice(2)]).filter((q) => q && !q.fixed);
+  if (!ents.length && !lone.length) { toast('Выделите, что скопировать', 'info'); return; }
+  const ids = new Set([...ents.flatMap((e) => entPts(e)), ...lone.map((q) => q.id)]); const eids = new Set(ents.map((e) => e.id)); const all = new Set([...ids, ...eids]);
+  const pts = [...ids].map((id) => sk.pts[id] || (gp(sk, id) && { id, x: gp(sk, id).x, y: gp(sk, id).y })).filter(Boolean); const cx = pts.reduce((a, q) => a + q.x, 0) / pts.length, cy = pts.reduce((a, q) => a + q.y, 0) / pts.length;
+  // Relations among the copied items go along (equal, tangent, a radius); those to anything else stay behind.
+  const cons = Object.values(sk.cons).filter((c) => c.refs.every((r) => all.has(r)));
+  S.skClip = JSON.parse(JSON.stringify({ pts: pts.map((q) => ({ id: q.id, x: q.x, y: q.y, ...(q.hole ? { hole: true, free: true } : {}) })), ents, cons, c: [cx, cy] })); S.skPastes = 0;
+  toast(`Скопировано: ${ents.length + lone.length}`, 'info');
+}
+function sketchPaste() {
+  const sk = editSk(); const C = S.skClip; if (!sk || !C) { toast('Буфер пуст: выделите объекты эскиза и нажмите Ctrl+C', 'info'); return; }
+  const at = S.skCursor; S.skPastes = (S.skPastes || 0) + 1; const dx = at ? at.u - C.c[0] : 5 * S.skPastes, dy = at ? at.v - C.c[1] : 5 * S.skPastes;
+  const map = new Map(); const id = (old) => { if (!map.has(old)) map.set(old, nid(sk)); return map.get(old); };
+  for (const q of C.pts) { const n = id(q.id); sk.pts[n] = { ...q, id: n, x: q.x + dx, y: q.y + dy }; }
+  for (const e of C.ents) { const n = id(e.id); const c = { ...JSON.parse(JSON.stringify(e)), id: n }; for (const k of ['p1', 'p2', 'c']) if (c[k]) c[k] = id(c[k]); if (c.pts) c.pts = c.pts.map(id); sk.ents[n] = c; }
+  for (const c of C.cons) { const n = id(c.id); sk.cons[n] = { ...JSON.parse(JSON.stringify(c)), id: n, refs: c.refs.map(id), ...(c.pos ? { pos: [c.pos[0] + dx, c.pos[1] + dy] } : {}) }; delete sk.cons[n].pa; for (const k of ['m', 'e1', 'e2']) if (typeof sk.cons[n][k] === 'string' && map.has(sk.cons[n][k])) sk.cons[n][k] = map.get(sk.cons[n][k]); }
+  solveSketch(sk); S.sel = new Set(C.ents.map((e) => 'e:' + map.get(e.id))); commitSketch(); refreshSketch(); toast(`Вставлено: ${C.ents.length || C.pts.length}`, 'info');
+}
 function cmdMirror() {
   const sk = editSk(); const ents = [...S.sel].filter((k) => k.startsWith('e:')).map((k) => k.slice(2));
   const lines = ents.filter((id) => ge(sk, id)?.t === 'line');
@@ -4233,8 +4285,19 @@ function cmdMirror() {
   const lenOf = (id) => { const e = ge(sk, id); const a = gp(sk, e.p1), b = gp(sk, e.p2); return Math.hypot(b.x - a.x, b.y - a.y); };
   const axis = lines.find((id) => id === 'H' || id === 'V') || lines.filter((id) => ge(sk, id).constr).sort((a, b) => lenOf(b) - lenOf(a))[0] || lines[lines.length - 1];
   const rest = ents.filter((id) => id !== axis && sk.ents[id]);
-  if (!axis || !rest.length) { toast('Выделите элементы и линию (лучше вспомогательную), относительно которой отразить', 'info'); return; }
-  const n = mirrorEntities(sk, rest, axis); S.sel.clear(); commitSketch(); toast(`Отражено: ${n}`, 'info');
+  // What is mirrored and about which line is shown and can be changed before anything is made (S0-36): the guess is
+  // only a starting point, as SolidWorks' «Mirror Entities» panel with its two boxes.
+  S.skOp = { kind: 'mirror', ids: rest, axis: axis || null, slot: axis ? 'items' : 'axis' }; S.sel = new Set(rest.map((id) => 'e:' + id)); refreshSketch(); renderSide(); setHint();
+}
+function mirrorPick(m) {
+  const op = S.skOp; const sk = editSk(); const p = pick(m, { noRefs: true }); const id = p?.key.startsWith('e:') ? p.key.slice(2) : null; if (!id) return; const e = ge(sk, id);
+  if (op.slot === 'axis') { if (e?.t !== 'line') { toast('Ось зеркала: щёлкните линию или ось', 'info'); return; } op.axis = id; op.ids = op.ids.filter((x) => x !== id); op.slot = 'items'; }
+  else if (id === op.axis || id === 'H' || id === 'V') return; else op.ids = op.ids.includes(id) ? op.ids.filter((x) => x !== id) : [...op.ids, id];
+  S.sel = new Set(op.ids.map((x) => 'e:' + x)); refreshSketch(); renderSide(); setHint();
+}
+function okMirror() {
+  const op = S.skOp; const sk = editSk(); if (!op.axis || !op.ids.length) { toast(op.axis ? 'Выберите, что отразить' : 'Выберите ось зеркала', 'info'); return; }
+  S.skOp = null; const n = mirrorEntities(sk, op.ids, op.axis); S.sel.clear(); commitSketch(); renderSide(); setHint(); toast(`Отражено: ${n}`, 'info');
 }
 function cmdOffset() {
   const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => k.slice(2));
@@ -4280,6 +4343,11 @@ function toolOptionsPanel() {
     inp.addEventListener('change', apply); inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); if (S.skOp?.kind === 'offset') okOffset(); else inp.blur(); } if (e.key === 'Escape') { inp.blur(); if (S.skOp) cancelSkOp(); } });
     return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit));
   };
+  if (S.skOp?.kind === 'mirror') { const op = S.skOp; const sk = editSk(); const name = (id) => (id === 'H' ? 'Ось X' : id === 'V' ? 'Ось Y' : (ge(sk, id)?.constr ? 'Вспомогательная линия ' : 'Линия ') + id);
+    return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Зеркало'),
+      h('button', { class: 'rel pickbox' + (op.slot === 'axis' ? ' on' : ''), onclick: () => { op.slot = 'axis'; renderSide(); setHint(); } }, h('b', {}, '⇹'), op.axis ? 'Относительно: ' + name(op.axis) : 'Относительно: щёлкните линию'),
+      h('button', { class: 'rel pickbox' + (op.slot === 'items' ? ' on' : ''), onclick: () => { op.slot = 'items'; renderSide(); setHint(); } }, h('b', {}, '▱'), `Отразить: ${op.ids.length} ${plural(op.ids.length, 'объект', 'объекта', 'объектов')}`),
+      h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okMirror }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена'))); }
   if (S.skOp?.kind === 'pattern') return patternPanel(S.skOp.opt, (ch) => { if (S.skOp?.kind !== 'pattern') return; Object.assign(S.skOp.opt, ch); renderSide(); previewPattern(); }, okPattern);
   if (S.skOp?.kind === 'offset') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), field('Расстояние', 'opOffset', o.offsetD, (v) => { o.offsetD = v; previewOffset(); }),
     h('label', { class: 'chk' }, h('input', { type: 'checkbox', id: 'opOffFlip', checked: o.offsetFlip, onchange: (e) => { o.offsetFlip = e.target.checked; previewOffset(); } }), 'В другую сторону'),
@@ -4288,7 +4356,8 @@ function toolOptionsPanel() {
     h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okOffset }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')));
   // The radius is for the next fillets and, as in SolidWorks, for the ones already put with the tool this time.
   if (S.tool === 'sfillet') { const sk = editSk(); const made = () => (S.toolFillets || []).map((id) => sk?.ents[id]).filter(Boolean);
-    return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.keepCorner, onchange: (e) => { o.keepCorner = e.target.checked; } }), 'Сохранять угловую точку')); }
+    if (o.chamfer) return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Фаска'), seg([['f', 'Скругление'], ['c', 'Фаска']], 'c', (v) => { o.chamfer = v === 'c'; renderSide(); setHint(); }), field('Расстояние', 'opFillet', o.filletR, (v) => { o.filletR = v; }), h('div', { class: 'note' }, 'Щёлкайте углы: в каждом одинаковое расстояние по обеим линиям'));
+    return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), seg([['f', 'Скругление'], ['c', 'Фаска']], 'f', (v) => { o.chamfer = v === 'c'; renderSide(); setHint(); }), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.keepCorner, onchange: (e) => { o.keepCorner = e.target.checked; } }), 'Сохранять угловую точку')); }
   if (S.tool === 'slot') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Паз'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.slotDims, onchange: (e) => { o.slotDims = e.target.checked; } }), 'Проставить размеры'));
   if (S.tool === 'rect') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Прямоугольник'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.rectDiag, onchange: (e) => { o.rectDiag = e.target.checked; } }), 'Вспомогательные диагонали'));
   if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true), seg([['in', 'Вписанный'], ['out', 'Описанный']], o.polyMode || 'in', (v) => { o.polyMode = v; renderSide(); }));
@@ -8205,9 +8274,12 @@ function typedSize(first) {
 // Right click in a sketch: what can be done with the item under the cursor (picked if it was not), or with the sketch.
 function sketchContext(ev) {
   const sk = editSk(); if (!sk) return; if (S.draw) { endDrawing(); setTool('select'); return; }
-  const p = pick(mouseToSketch(ev)); if (p?.key.startsWith('r:')) p.key = materialize(sk, p.key);
+  const m = mouseToSketch(ev); const under = pick(m, { all: true }); const p = pick(m); const p0 = p?.key; if (p?.key.startsWith('r:')) p.key = materialize(sk, p.key);
   if (p && !S.sel.has(p.key)) { S.sel = new Set([p.key]); refreshSketch(); }
   const items = [];
+  // What else is under the cursor (a line under a point, a model edge under a line), as SolidWorks' «Select Other» (S0-47).
+  const kind = (k) => { if (k.startsWith('p:')) return 'Точка'; if (k.startsWith('r:v')) return 'Вершина модели'; if (k.startsWith('r:l')) return 'Ребро модели'; if (k.startsWith('r:c')) return 'Кромка модели'; if (k === 'e:H' || k === 'e:V') return 'Ось ' + (k === 'e:H' ? 'X' : 'Y'); const e = sk.ents[k.slice(2)]; return { line: 'Линия', circle: 'Окружность', arc: 'Дуга', spline: 'Сплайн', ellipse: 'Эллипс' }[e?.t] || 'Объект'; };
+  const seen = new Set([p0, p?.key]); let more = 0; for (const c of under) { if (seen.has(c.key) || more >= 3) continue; more++; seen.add(c.key); items.push(['Выбрать другой: ' + kind(c.key) + (sk.ents[c.key.slice(2)]?.constr ? ' (вспомогательная)' : ''), () => { const k = c.key.startsWith('r:') ? materialize(sk, c.key) : c.key; S.sel = new Set([k]); refreshSketch(); }]); }
   if (S.sel.size) {
     for (const [, l, fn] of relationOptions(sk)) items.push([l, () => applyRelation(fn)]);
     if ([...S.sel].some((k) => k.startsWith('e:') && sk.ents[k.slice(2)])) items.push(['Вспомогательная геометрия (G)', toggleConstruction]);
@@ -8228,10 +8300,10 @@ function renderCorner() {
   else if (S.measure) c.append(h('button', { class: 'cancel', title: 'Закрыть рулетку', onclick: closeMeasure }, svg(ICON.x)));
 }
 function setHint(text) {
-  const t = text ?? (S.editing && S.skOp ? (S.skOp.kind === 'offset' ? (S.skOp.ids.length ? 'Смещение: ведите курсор в нужную сторону, щёлкните пустое место или Enter. Щелчок по линии добавляет или убирает цепочку' : 'Смещение: щёлкните линию, дугу или окружность') : 'Массив: задайте параметры на панели, затем OK или Enter. Esc отменяет')
+  const t = text ?? (S.editing && S.skOp ? (S.skOp.kind === 'mirror' ? (S.skOp.slot === 'axis' ? 'Зеркало: щёлкните линию, относительно которой отразить' : 'Зеркало: щелчок добавляет или убирает объект, OK или Enter отражает') : S.skOp.kind === 'offset' ? (S.skOp.ids.length ? 'Смещение: ведите курсор в нужную сторону, щёлкните пустое место или Enter. Щелчок по линии добавляет или убирает цепочку' : 'Смещение: щёлкните линию, дугу или окружность') : 'Массив: задайте параметры на панели, затем OK или Enter. Esc отменяет')
     : S.editing ? ({
     select: 'Выбор: щелчок выделяет, перетаскивание двигает недоопределённую геометрию, рамка выделяет область',
-    line: S.draw?.stage === 1 ? 'Щёлкайте следующие точки, число с клавиатуры задаёт длину. Замыкание контура, присоединение к другой линии, двойной щелчок или Esc завершают цепочку' : 'Линия: щёлкните начальную точку',
+    line: S.draw?.stage === 1 ? 'Щёлкайте следующие точки или наберите длину и Enter. Клавиша A рисует дугу по касательной. Цепочку завершают замыкание контура, присоединение к другой линии, двойной щелчок или Esc' : 'Линия: щёлкните начальную точку',
     rect: S.draw?.stage === 1 ? 'Щёлкните противоположный угол' : 'Прямоугольник: щёлкните первый угол',
     circle: S.draw?.stage === 1 ? 'Щёлкните, чтобы задать радиус' : 'Окружность: щёлкните центр',
     arc: S.draw?.stage === 'tan' ? 'Касательная дуга: щёлкните конечную точку, потом цепочка продолжится отрезками' : S.draw?.stage === 2 ? 'Ведите по дуге и щёлкните конечную точку' : S.draw?.stage === 1 ? 'Щёлкните начальную точку дуги' : 'Дуга: щёлкните центр',
@@ -8944,6 +9016,8 @@ window.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && S.mode === 'asm' && !S.pm && k === 'c') { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) { S.asmClip = c.doc; S.asmClipT = c.T.slice(); toast(`«${c.name}» скопирован: Ctrl+V вставит ещё один`, 'info'); } return; }
   if ((e.ctrlKey || e.metaKey) && S.mode === 'asm' && !S.pm && k === 'v' && S.asmClip) { e.preventDefault(); if (!docEntry(S.asmClip)) return; asmInsert(S.asmClip); const c = S.doc.comps.at(-1); if (c && S.asmClipT) { const inf = docInfo(c.doc); inf.geo.computeBoundingBox(); const w = inf.geo.boundingBox.getSize(new THREE.Vector3()).length() * 0.6; const T = S.asmClipT.slice(); T[12] += w; T[13] += w * 0.3; c.T = T; c.fixed = false; S.asmSel = c.id; asmRefresh(true); pushUndo(true); } return; }
   // Ctrl+O: the document switcher with pictures (the browser would offer to open a file).
+  // In a sketch, as in any editor (S0-38): select all, copy what is selected, paste it at the cursor.
+  if ((e.ctrlKey || e.metaKey) && S.editing && S.mode === 'part' && ['a', 'c', 'v'].includes(k)) { e.preventDefault(); if (k === 'a') sketchSelectAll(); else if (k === 'c') sketchCopy(); else sketchPaste(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'o') { e.preventDefault(); const b = document.querySelector('#docTabs .doccur'); if (b) openDocList(b); return; }
   if ((e.ctrlKey || e.metaKey) && /^[1-8]$/.test(e.key) && S.mode !== 'drw') { e.preventDefault(); viewCmd(VIEW_KEYS[+e.key - 1]); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -8984,6 +9058,7 @@ window.addEventListener('keydown', (e) => {
   // Z zooms out and Shift+Z in, as in SolidWorks.
   if (k === 'z' && !e.ctrlKey && !e.metaKey && !e.altKey) { camera.zoom = Math.min(1e4, Math.max(1e-4, camera.zoom * (e.shiftKey ? 1.25 : 0.8))); camera.updateProjectionMatrix(); controls.dispatchEvent({ type: 'change' }); requestRender(); return; }
   if (e.key === 'Enter' && S.editing && S.skOp?.kind === 'offset') { okOffset(); return; }
+  if (e.key === 'Enter' && S.editing && S.skOp?.kind === 'mirror') { okMirror(); return; }
   if (e.key === 'Enter' && S.pm) { okPM(); return; }
   if (e.key === 'Enter' && S.mode === 'part' && !S.editing && !S.measure && !S.pickSketch && S.lastCmd) { e.preventDefault(); setHint(`Повтор: ${S.lastCmd.label}`); S.lastCmd.fn(); return; }
   if (e.key === 'Enter' && S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
@@ -9061,5 +9136,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>

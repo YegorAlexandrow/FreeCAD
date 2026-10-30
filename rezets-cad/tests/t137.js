@@ -8,7 +8,7 @@ const open = require('./harness.js'); const fs = require('fs');
     let t = performance.now(); R.editFeature(f); const tEnter = performance.now() - t; const sk = f.sk; const n0 = Object.keys(sk.ents).length;
     t = performance.now(); const a0 = R.analyzeSketch(sk); const tAn = performance.now() - t;
     S.sel.clear(); for (const id of Object.keys(sk.ents)) S.sel.add('e:' + id);
-    t = performance.now(); R.cmdMirror(); const tMirror = performance.now() - t;
+    t = performance.now(); R.cmdMirror(); R.okMirror(); const tMirror = performance.now() - t;
     const a = R.analyzeSketch(sk); const axisLike = Object.values(sk.cons).filter((c) => c.t === 'symmetric').map((c) => c.refs[2]);
     const red = [...a.redundant].map((cid) => [cid, sk.cons[cid]?.t, (sk.cons[cid]?.refs || []).map((r) => sk.ents[r]?.t || 'p').join(), [...(a.repeats.get(cid) || [])].map((x) => sk.cons[x]?.t || x).join()]); return { red, tEnter: Math.round(tEnter), tAn: Math.round(tAn), dof0: a0.dof, tMirror: Math.round(tMirror), ents: [n0, Object.keys(sk.ents).length], axes: [...new Set(axisLike)], redundant: a.redundant.size, dof: a.dof, err: JSON.stringify(S.errors) }; }, doc);
   console.log(JSON.stringify(out));
