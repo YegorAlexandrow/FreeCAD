@@ -7401,6 +7401,10 @@ function renderAsmTree() {
   const asm = S.doc; const an = S.asmAnalysis; side.textContent = '';
   side.append(h('div', { class: 'sec-h' }, h('span', {}, activeEntry().name), h('span', { class: 'meta' }, !asm.comps.length ? 'пустая' : an ? (an.dof ? `свободно: ${an.dof}` : 'определена') : '')));
   // Without a fixed base everything floats: a drag moves the whole assembly instead of one part against the rest.
+  // A part left rolled back shows in the assembly as it is above its rollback bar (as in SolidWorks), which is easy to
+  // forget once the part is closed: said here (A25).
+  { const rolled = [...new Set(asm.comps.map((c) => c.doc))].map((id) => docEntry(id)).filter((e) => e?.kind === 'part' && e.data.rollback != null && e.data.rollback < e.data.features.length);
+    for (const e of rolled) { const n = e.data.features.length - e.data.rollback; side.append(h('div', { class: 'note', style: 'color:var(--warn);padding:2px 10px 6px' }, `«${e.name}» показан в откате: без ${n} ${plural(n, 'последней операции', 'последних операций', 'последних операций')}. Откройте деталь и опустите черту отката`)); } }
   if (asm.comps.length > 1 && !asm.comps.some((c) => c.fixed)) side.append(h('div', { class: 'note', style: 'color:var(--warn);padding:2px 10px 6px' }, 'Ни один компонент не зафиксирован: перетаскивание двигает всю сборку. Зафиксируйте основание через правый щелчок'));
   const tree = h('div', { class: 'tree', role: 'tree' });
   for (const c of asm.comps) {
