@@ -3070,6 +3070,7 @@ function layoutOverlay() {
         const el = h('div', { class: 'dimlbl' + (c.driven ? ' driven' : '') + (S.sel.has('c:' + c.id) ? ' sel' : '') + (S.conflict.has(c.id) || S.analysis?.redundant.has(c.id) ? ' bad' : ''), style: `left:${s.x}px;top:${s.y}px`, title: conName(sk, c) + (c.driven ? ' (справочный)' : '') }, dimText(sk, c));
         el.addEventListener('pointerdown', (ev) => startDimDrag(ev, c));
         el.addEventListener('dblclick', (ev) => { ev.stopPropagation(); openDimEditor(c); });
+        el.addEventListener('contextmenu', (ev) => { ev.preventDefault(); ev.stopPropagation(); openMenu(ev.clientX, ev.clientY, dimMenu(sk, c)); });
         overlay.append(el);
       } else if (S.showRel !== false && CON_GLYPH[c.t] && !c.pat) {
         const at = glyphAnchor(sk, c); if (!at) continue; const s = sScreen(at.x, at.y);
@@ -8539,6 +8540,14 @@ function typedSize(first) {
   inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); done(true); } if (e.key === 'Escape') { e.preventDefault(); done(false); } });
   inp.addEventListener('blur', () => setTimeout(() => inp.isConnected && inp.remove(), 0));
   $('editLayer').append(inp); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length);
+}
+// A dimension's own menu (S0-29): radius or diameter of a circle or arc, driving or driven, edit, delete.
+function dimMenu(sk, c) {
+  const items = [['Изменить значение', () => openDimEditor(c)]]; const e = (c.t === 'rad' || c.t === 'diam') && ge(sk, c.refs[0]);
+  if (e && e.t !== 'ellipse') items.push([c.t === 'rad' ? 'Показать диаметр' : 'Показать радиус', () => { const k = editSk(); const cc = k?.cons[c.id]; if (!cc) return; if (cc.t === 'rad') { cc.t = 'diam'; cc.v *= 2; } else { cc.t = 'rad'; cc.v /= 2; } delete cc.expr; commitSketch(); refreshSketch(); }]);
+  items.push([c.driven ? 'Сделать управляющим' : 'Сделать справочным', () => { const k = editSk(); const cc = k?.cons[c.id]; if (!cc) return; if (cc.driven) { delete cc.driven; const r = tryAddConstraint(k, (delete k.cons[cc.id], cc)); if (r.status !== 'ok') { cc.driven = true; k.cons[cc.id] = cc; toast('Размер противоречит другим: остаётся справочным', 'warn'); } } else cc.driven = true; solveSketch(k); commitSketch(); refreshSketch(); }]);
+  items.push(['Удалить', () => { const k = editSk(); if (!k?.cons[c.id]) return; delete k.cons[c.id]; solveSketch(k); commitSketch(); refreshSketch(); }]);
+  return items;
 }
 // Right click in a sketch: what can be done with the item under the cursor (picked if it was not), or with the sketch.
 function sketchContext(ev) {
