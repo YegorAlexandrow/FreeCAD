@@ -4968,11 +4968,11 @@ function arcPts2(O, r, a1, a2) {
   return out;
 }
 // Section polygon in 2D: corner C, face directions d1, d2 and outward face normals n1, n2.
-function edgeSection(kind, size, C, d1, d2, n1, n2, convex) {
+function edgeSection(kind, size, C, d1, d2, n1, n2, convex, size2 = size) {
   const add = (p, v, k) => [p[0] + v[0] * k, p[1] + v[1] * k]; const dot = (p, q) => p[0] * q[0] + p[1] * q[1];
   const cosT = Math.max(-1, Math.min(1, dot(d1, d2))); const th = Math.acos(cosT); const dl = 0.01 * (convex ? 1 : -1);
   const out0 = add(C, [n1[0] + n2[0], n1[1] + n2[1]], dl);
-  if (kind === 'chamfer') { const T1 = add(C, d1, size), T2 = add(C, d2, size); return [out0, add(T1, n1, dl), T1, T2, add(T2, n2, dl)]; }
+  if (kind === 'chamfer') { const T1 = add(C, d1, size), T2 = add(C, d2, size2); return [out0, add(T1, n1, dl), T1, T2, add(T2, n2, dl)]; }
   const t = size / Math.tan(th / 2); const T1 = add(C, d1, t), T2 = add(C, d2, t);
   const bis = [d1[0] + d2[0], d1[1] + d2[1]]; const bl = Math.hypot(...bis); const O = add(C, [bis[0] / bl, bis[1] / bl], size / Math.sin(th / 2));
   const arc = arcPts2(O, size, Math.atan2(T1[1] - O[1], T1[0] - O[0]), Math.atan2(T2[1] - O[1], T2[0] - O[0]));
@@ -5060,7 +5060,7 @@ function profileEdgeTool(body, edge, kind, size, pc) {
   g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(O)); g.computeVertexNormals();
   return { g, convex: conv, cyl: { p: W(c, 0), dir: Z.clone(), r: size } };
 }
-function edgeTool(body, edge, kind, size, feats) {
+function edgeTool(body, edge, kind, size, feats, size2 = size) {
   const eps = Math.min(0.05, size / 20);
   if (edge.t === 'line' && feats) { const pc = profileCorner(body, edge, feats); if (pc) { const t = profileEdgeTool(body, edge, kind, size, pc); if (t) return t; } }
   if (edge.t === 'line') {
@@ -5073,12 +5073,12 @@ function edgeTool(body, edge, kind, size, feats) {
     const [n1, n2] = ns; const d1 = dir(n1), d2 = dir(n2);
     const convex = isInside(body, mid.clone().addScaledVector(d1.clone().add(d2).normalize(), eps * 0.5));
     // A fillet or chamfer wider than a face it runs onto turns the body inside out: said in numbers instead.
-    if (convex) { const th = d1.angleTo(d2); const need = kind === 'fillet' ? size / Math.tan(th / 2) : size;
-      for (const [n, d] of [[n1, d1], [n2, d2]]) { const dep = Math.min(eps * 0.3, need * 0.01); for (let k = 1; k <= 24; k++) { const sAt = need * k / 24 * 0.995; if (!isInside(body, mid.clone().addScaledVector(d, sAt).addScaledVector(n, -dep))) { const room = need * (k - 1) / 24;
+    if (convex) { const th = d1.angleTo(d2);
+      for (const [n, d, sz] of [[n1, d1, size], [n2, d2, size2]]) { const need = kind === 'fillet' ? size / Math.tan(th / 2) : sz; const dep = Math.min(eps * 0.3, need * 0.01); for (let k = 1; k <= 24; k++) { const sAt = need * k / 24 * 0.995; if (!isInside(body, mid.clone().addScaledVector(d, sAt).addScaledVector(n, -dep))) { const room = need * (k - 1) / 24;
         throw new Error(`${kind === 'fillet' ? 'Радиус' : 'Размер фаски'} ${fmt(size)} не помещается: соседняя грань шириной около ${fmt(room, 1)} мм${kind === 'fillet' ? `, наибольший радиус около ${fmt(room * Math.tan(th / 2), 1)}` : ''}`); } } } }
     let e1 = new THREE.Vector3().crossVectors(u, Math.abs(u.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const e2 = new THREE.Vector3().crossVectors(u, e1);
     const to2 = (v) => [v.dot(e1), v.dot(e2)];
-    const sec = edgeSection(kind, size, [0, 0], to2(d1), to2(d2), to2(n1), to2(n2), convex);
+    const sec = edgeSection(kind, size, [0, 0], to2(d1), to2(d2), to2(n1), to2(n2), convex, size2);
     const ext = convex ? 0.01 : 0; let g = extrudeGeometry([{ pts: sec, holes: [] }], -ext, L + ext);
     g.applyMatrix4(new THREE.Matrix4().makeBasis(e1, e2, u).setPosition(a)); g.computeVertexNormals();
     // Added material stays over the two faces: where a face ends (a round rim, a step) the fillet ends with it
@@ -5099,7 +5099,7 @@ function edgeTool(body, edge, kind, size, feats) {
   if (ins.length === 1) { pick = ins[0]; convex = true; } else if (ins.length === 3) { pick = q.find((x) => !x.inside); convex = false; } else throw new Error('Ребро не найдено на текущем теле');
   const d1 = [pick.sr, 0], d2 = [0, pick.sn];
   const n1 = convex ? [0, -pick.sn] : [0, pick.sn], n2 = convex ? [-pick.sr, 0] : [pick.sr, 0];
-  const sec = edgeSection(kind, size, [edge.r, 0], d1, d2, n1, n2, convex);
+  const sec = edgeSection(kind, size, [edge.r, 0], d1, d2, n1, n2, convex, size2);
   if (sec.some((p) => p[0] < 1e-6)) throw new Error(`${kind === 'fillet' ? 'Радиус скругления' : 'Размер фаски'} ${fmt(size)} не меньше радиуса круглой кромки ${fmt(edge.r)} мм`);
   // A rim that runs only part way round (an arc of the outline, the top of a plate along it) is rounded only where it
   // is: taken for a whole circle, the fillet went round the full ring through material that has no such edge.
@@ -5213,7 +5213,7 @@ function applyEdgeFeature(f, body, cyls, feats) {
   // An edge that cannot be found is skipped, not the whole feature: the others keep their chamfer,
   // and the feature says how many were lost.
   let out = body; let lost = 0;
-  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d, feats); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
+  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : (f.flip && f.d2 > 0 ? f.d2 : f.d), feats, f.type === 'chamfer' && f.d2 > 0 ? (f.flip ? f.d : f.d2) : undefined); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
   if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление сделано' : 'фаска сделана'}. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
   return out;
 }
@@ -8441,7 +8441,10 @@ function renderPM0() {
   if (pm.edgePick) {
     const f = pm.feature; const isF = f.type === 'fillet'; const err = S.errors[f.id];
     const body = h('div', { class: 'pm' }, pmHeader(isF ? 'Скругление' : 'Фаска', isF ? ICON.fillet : ICON.chamfer),
-      h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Размер'), isF ? numField('Радиус', 'pmRadius', f.r, (v) => { f.r = v; schedulePreview(); }) : numField('Расстояние', 'pmDist', f.d, (v) => { f.d = v; schedulePreview(); })),
+      h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Размер'), isF ? numField('Радиус', 'pmRadius', f.r, (v) => { f.r = v; schedulePreview(); }) : numField('Расстояние', 'pmDist', f.d, (v) => { f.d = v; schedulePreview(); }),
+        // A chamfer with two distances (P0-13): the second along the other face, 0 for the same as the first.
+        isF ? null : numField('Второе расстояние', 'pmDist2', f.d2 || 0, (v) => { f.d2 = v > 0 ? v : 0; if (!f.d2) delete f.d2; schedulePreview(); }),
+        isF || !(f.d2 > 0) ? null : h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (ev) => { f.flip = ev.target.checked; if (!f.flip) delete f.flip; schedulePreview(); } }), 'Поменять стороны')),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Рёбра: ${f.edges.length}`), h('div', { class: 'note' }, 'Щёлкайте рёбра модели, повторный щелчок убирает ребро.'),
         // Each edge is listed by what it is, so one can be taken out without hunting for it in the view.
         ...f.edges.map((e, i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), e.t === 'circle' ? `Окружность ⌀${fmt(2 * e.r, 2)}` : `Прямое ${fmt(Math.hypot(...e.b.map((v, k) => v - e.a[k])), 2)} мм`,
