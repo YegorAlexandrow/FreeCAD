@@ -4950,7 +4950,7 @@ function profileEdgeTool(body, edge, kind, size, pc) {
   const { P, sides, O, X, Y } = pc; const Z = X.clone().cross(Y).normalize();
   const arcPts = (c, R, a0, a1, n = 24) => Array.from({ length: n + 1 }, (_, i) => { const t = a0 + (a1 - a0) * i / n; return { x: c.x + R * Math.cos(t), y: c.y + R * Math.sin(t) }; });
   const short = (a0, a1) => { let s = a1 - a0; while (s > Math.PI) s -= 2 * Math.PI; while (s < -Math.PI) s += 2 * Math.PI; return a0 + s; };
-  const word = kind === 'fillet' ? 'Радиус' : 'Размер фаски'; let poly, C = null;
+  const word = kind === 'fillet' ? 'Радиус' : 'Размер фаски'; let poly, C = null, core = null;
   const lines = sides.filter((x) => x.line), arcs = sides.filter((x) => x.arc);
   if (lines.length === 2) {
     const [u1, u2] = lines.map((x) => x.d); const phi = Math.acos(Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y))); if (phi < 1e-3 || phi > Math.PI - 1e-3) return null;
@@ -4964,12 +4964,17 @@ function profileEdgeTool(body, edge, kind, size, pc) {
     const Ln = lines[0], A = arcs[0]; const f = filletLC(P, Ln.d, Ln.room, A.C, A.R, A.ccw, size);
     if (!f) { let lo = 0, hi = size; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (filletLC(P, Ln.d, Ln.room, A.C, A.R, A.ccw, m)) lo = m; else hi = m; } throw new Error(`Радиус ${fmt(size)} не помещается между гранями${lo > 1e-3 ? `, наибольший около ${fmt(lo * 0.98, 2)} мм` : ''}`); }
     C = f.C; const a0 = Math.atan2(f.T1.y - C.y, f.T1.x - C.x); const fil = arcPts(C, size, a0, short(a0, Math.atan2(f.T2.y - C.y, f.T2.x - C.x)));
-    const b0 = Math.atan2(f.T2.y - A.C.y, f.T2.x - A.C.x); const back = arcPts(A.C, A.R, b0, b0 - f.sweep * (A.ccw ? 1 : -1));
-    poly = [P, ...fil, ...back.slice(1, -1)];
+    // Back along the arc to the corner, a little past the face into the air: the face on the body is made of chords of
+    // the arc, and a piece bounded by the true arc left thin teeth between the chords (ARM1, the end of the R30 fillet).
+    const b0 = Math.atan2(f.T2.y - A.C.y, f.T2.x - A.C.x); const bm = b0 - f.sweep / 2 * (A.ccw ? 1 : -1); const pm = { x: A.C.x + A.R * Math.cos(bm), y: A.C.y + A.R * Math.sin(bm) };
+    const out = (pm.x - A.C.x) * (pm.x - C.x) + (pm.y - A.C.y) * (pm.y - C.y) > 0 ? 1 : -1; const dl = Math.max(0.05, 2.5 * A.R * (1 - Math.cos(Math.PI / 32)));
+    const back = arcPts(A.C, A.R + out * dl, b0, b0 - f.sweep * (A.ccw ? 1 : -1));
+    poly = [P, ...fil, ...back.slice(1, -1)]; core = [P, ...fil];
   } else return null;
   let ar = 0; for (let i = 0; i < poly.length; i++) { const p = poly[i], q = poly[(i + 1) % poly.length]; ar += p.x * q.y - q.x * p.y; } if (Math.abs(ar) < 1e-12) return null; if (ar < 0) poly.reverse();
   const a = V3(edge.a), b = V3(edge.b); const za = a.clone().sub(O).dot(Z), zb = b.clone().sub(O).dot(Z); const W = (p, z) => O.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y).addScaledVector(Z, z);
-  let cx = 0, cy = 0; for (const p of poly) { cx += p.x; cy += p.y; } const conv = isInside(body, W({ x: cx / poly.length, y: cy / poly.length }, (za + zb) / 2));
+  // Material or air is told from the piece itself, not the margin past the face.
+  const cp = core || poly; let cx = 0, cy = 0; for (const p of cp) { cx += p.x; cy += p.y; } const conv = isInside(body, W({ x: cx / cp.length, y: cy / cp.length }, (za + zb) / 2));
   const ext = conv ? 0.01 : 0; const g = extrudeGeometry([{ pts: poly.map((p) => [p.x, p.y]), holes: [] }], Math.min(za, zb) - ext, Math.max(za, zb) + ext);
   g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(O)); g.computeVertexNormals();
   return { g, convex: conv, cyl: C ? { p: W(C, 0), dir: Z.clone(), r: size } : null };
