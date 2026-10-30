@@ -3316,7 +3316,10 @@ function sketchDown(ev) {
     return;
   }
   if (S.tool === 'dim') { dimClick(m); return; }
-  if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return; trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
+  if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; if (!e || e.ext) return;
+    // Shift: extend the line to the next curve it meets, from its end nearer the click (SolidWorks' Extend).
+    if (down?.shift && e.t === 'line') { const r = extendLine(sk, e, m); if (r) toast(r, 'info'); S.draw = null; commitSketch(); return; }
+    trimAt(sk, e, m); S.draw = null; S.hover = null; commitSketch(); return; }
   if (S.tool === 'convert') { const r = convertEdge(sk, m) || convertFace(sk, m); if (typeof r === 'string') { toast(r, 'warn'); return; } commitSketch(); toast(`Контур грани в эскизе: ${r} ${plural(r, 'линия', 'линии', 'линий')}. Можно щёлкнуть ещё грань, Esc завершает`, 'info'); return; }
   if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true });
     // Two lines clicked one after the other round the corner where they meet.
@@ -3352,12 +3355,15 @@ function sketchMove(ev) {
       if (!(picks.length === 1 && firstIsPoint)) { const con = makeDim(sk, picks, m); if (con) { placeDim(sk, con, [m.u, m.v]); initSigns(sk, con); con.v = measure(sk, con); S.dimPreview = con; } } }
     updateSketchVisuals(); return;
   }
-  if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)]; S.draw = e && !e.ext ? { stage: 0, preview: trimPreview(sk, e, m), bad: true } : null; updateSketchVisuals(); return; }
+  if (S.tool === 'trim') { const p = pick(m, { noRefs: true, noAxes: true }); const e = p?.key.startsWith('e:') && sk.ents[p.key.slice(2)];
+    // Held down and dragged, the pointer trims every piece it crosses (SolidWorks' power trim, S0-18).
+    if (down && !down.shift && e && !e.ext) { trimAt(sk, e, m); S.trimDrag = true; S.draw = null; refreshSketch(); return; }
+    S.draw = e && !e.ext ? { stage: 0, preview: trimPreview(sk, e, m), bad: true } : null; updateSketchVisuals(); return; }
   if (S.tool === 'sfillet') { const p = pick(m, { pointsOnly: true }); const k = p?.key || null; if (k !== S.hover) { S.hover = k; updateSketchVisuals(); } return; }
   drawMove(m); void sk;
 }
 function sketchUp(ev, d) {
-  const sk = editSk();
+  const sk = editSk(); if (S.trimDrag) { S.trimDrag = false; commitSketch(); }
   if (S.drag?.lostPt) { const D = S.drag; S.drag = null; const q = sk.pts[D.lostPt];
     if (d.moved && D.hit && S.refs?.mref) { q.x = D.hit[0]; q.y = D.hit[1]; q.mref = S.refs.mref('p', D.hit); delete q.lost; const f = editF(); const rest = (S.dangling.get(f.id) || []).filter((id) => id !== q.id); if (rest.length) S.dangling.set(f.id, rest); else S.dangling.delete(f.id); solveSketch(sk); commitSketch(); toast('Привязка к модели восстановлена', 'info'); }
     else { restoreGeo(sk, D.snap); refreshSketch(); if (d.moved) toast('Отпустите точку на вершине модели: она привязывается только к ней', 'info'); }
@@ -4099,6 +4105,17 @@ function trimPreview(sk, e, m) {
   if (pc.all) return e.t === 'line' ? curveSegs(sk, e, 0, 1) : e.t === 'arc' ? curveSegs(sk, e, 0, arcSpan(sk, e).sw) : curveSegs(sk, e, 0, TAU);
   if (e.t === 'circle') { const t0 = pc.lo.t, t1 = pc.hi.t > pc.lo.t ? pc.hi.t : pc.hi.t + TAU; return curveSegs(sk, e, t0, t1); }
   const end = e.t === 'line' ? 1 : arcSpan(sk, e).sw; return curveSegs(sk, e, pc.lo ? pc.lo.t : 0, pc.hi ? pc.hi.t : end);
+}
+function extendLine(sk, e, m) {
+  const a = gp(sk, e.p1), b = gp(sk, e.p2); const endId = Math.hypot(m.u - a.x, m.v - a.y) < Math.hypot(m.u - b.x, m.v - b.y) ? e.p1 : e.p2; const from = gp(sk, endId), other = endId === e.p1 ? b : a;
+  if (Object.values(sk.ents).some((x) => x !== e && entPts(x).includes(endId)) || sk.pts[endId]?.fixed) return 'Этот конец соединён с другой геометрией: удлинять нечего';
+  const d = { x: from.x - other.x, y: from.y - other.y }; const L = Math.hypot(d.x, d.y); d.x /= L; d.y /= L; let best = null;
+  for (const f of Object.values(sk.ents)) { if (f === e || f.ext) continue;
+    if (f.t === 'line') { const p = gp(sk, f.p1), q = gp(sk, f.p2); const ex = q.x - p.x, ey = q.y - p.y; const den = d.x * ey - d.y * ex; if (Math.abs(den) < 1e-12) continue; const t = ((p.x - from.x) * ey - (p.y - from.y) * ex) / den, u = ((p.x - from.x) * d.y - (p.y - from.y) * d.x) / den; if (t > 1e-6 && u >= -1e-9 && u <= 1 + 1e-9 && (!best || t < best.t)) best = { t, f }; }
+    else if (f.t === 'circle' || f.t === 'arc') { const c = gp(sk, f.c); const fx = from.x - c.x, fy = from.y - c.y; const B = fx * d.x + fy * d.y, C = fx * fx + fy * fy - f.r * f.r; const D = B * B - C; if (D < 0) continue;
+      for (const t of [-B - Math.sqrt(D), -B + Math.sqrt(D)]) { if (t <= 1e-6) continue; const x = from.x + d.x * t, y = from.y + d.y * t; if (f.t === 'arc' && !angleInArc(sk, f, Math.atan2(y - c.y, x - c.x))) continue; if (!best || t < best.t) best = { t, f }; } } }
+  if (!best) return 'Впереди нет кривой, до которой удлинить';
+  const q = sk.pts[endId]; q.x = from.x + d.x * best.t; q.y = from.y + d.y * best.t; addRelations(sk, [{ t: best.f.t === 'line' ? 'online' : 'oncircle', refs: [endId, best.f.id] }]); solveSketch(sk); return null;
 }
 function trimAt(sk, e, m) {
   // Dimensions that lose what they measured go with it, said rather than silently.
