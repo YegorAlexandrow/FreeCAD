@@ -2265,6 +2265,8 @@ function buildTool(f, body, cyls = []) {
     let z0, z1;
     if (f.end === 'mid') { z0 = -d / 2; z1 = d / 2; if (reach) { const m = Math.max(...reach); z0 = -m; z1 = m; } }
     else if (f.dir === -1) { z0 = -d; z1 = eps; } else { z0 = -eps; z1 = d; }
+    // «Направление 2» (P0-15): on the other side of the sketch too, by its own depth.
+    if (f.end === 'blind' && f.depth2 > 0 && !f.from) { if (f.dir === -1) z1 = f.depth2; else z0 = -f.depth2; }
     if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = reach ? -reach[0] : -d; z1 = reach ? reach[1] : d; }
     // The caps where they are on the model, the sliver of overlap included (a face picked there is 2 µm off the sketch).
     { const lo = z0, hi = z1; const rev = f.dir === -1 && f.end !== 'mid' && !(f.end === 'through' && f.mode === 'cut' && f.both);
@@ -8473,6 +8475,8 @@ function renderPM0() {
       f.end === 'face' ? numField('Не доходя', 'pmOffset', f.offset || 0, (v) => { f.offset = v; schedulePreview(); }) : null,
       f.end === 'blind' || f.end === 'mid' ? numField('Глубина', 'pmDepth', f.depth, (v) => { f.depth = v; schedulePreview(); }) : null,
       f.end !== 'mid' && f.end !== 'face' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление') : null,
+      f.end === 'blind' && !f.from ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.depth2 > 0, onchange: (e) => { if (e.target.checked) f.depth2 = f.depth; else delete f.depth2; refresh(); } }), 'Направление 2') : null,
+      f.end === 'blind' && f.depth2 > 0 && !f.from ? numField('Глубина 2', 'pmDepth2', f.depth2, (v) => { f.depth2 = v > 0 ? v : 0; if (!f.depth2) delete f.depth2; schedulePreview(); }) : null,
       f.end === 'through' && f.mode === 'cut' ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.both, onchange: (e) => { f.both = e.target.checked; schedulePreview(); } }), 'В обе стороны') : null,
       f.mode === 'cut' ? h('label', { class: 'chk', title: 'Удаляется материал снаружи контура, а внутри остаётся' }, h('input', { type: 'checkbox', checked: !!f.flipSide, onchange: (e) => { f.flipSide = e.target.checked; schedulePreview(); } }), 'Перевернуть сторону для резания') : null),
       h('div', { class: 'grp' }, h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.draft > 0, onchange: (e) => { f.draft = e.target.checked ? 3 : 0; refresh(); } }), 'Уклон'),
