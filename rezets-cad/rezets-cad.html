@@ -2297,6 +2297,20 @@ function buildTool(f, body, cyls = []) {
   }
   g.applyMatrix4(M); g.computeVertexNormals(); return g;
 }
+// What a change broke further down the tree is said at once, with a way to it (F16): a sketch whose ties to the model
+// lost their corners, one left off its face, an operation that fails. Found only by looking at the tree, it was seen
+// late, after more work was built on it. What was broken before the change is not said again.
+const brokenSeen = new WeakMap();
+function reportNewBreaks(feats) {
+  const now = new Map(); const name = (id) => featById(id)?.name || id;
+  for (const [id, pts] of S.dangling) if (pts?.length) now.set(id, `${pts.length} ${plural(pts.length, 'привязка', 'привязки', 'привязок')} к модели без опоры`);
+  for (const id of S.offFace) if (!now.has(id)) now.set(id, 'плоскость больше не на грани');
+  for (const [id, e] of Object.entries(S.errors)) if (e && !now.has(id)) now.set(id, 'ошибка');
+  const prev = brokenSeen.get(S.doc); brokenSeen.set(S.doc, now); if (!prev) return;
+  const fresh = [...now].filter(([id, why]) => prev.get(id) !== why && feats.some((f) => f.id === id)); if (!fresh.length) return;
+  const first = featById(fresh[0][0]);
+  toast(`После правки: ${fresh.slice(0, 3).map(([id, why]) => `${name(id)}: ${why}`).join('; ')}${fresh.length > 3 ? ` и ещё ${fresh.length - 3}` : ''}`, 'warn', first ? [{ label: 'Открыть', act: () => { if (first.type === 'sketch') editFeature(first); else { S.selectedTree = 'feat:' + first.id; renderTree(); } } }] : []);
+}
 function rebuild() {
   docGen++;
   if (S.selFace) showFaceSel(null);
@@ -2310,7 +2324,7 @@ function rebuild() {
   if (preview) { const i = list.findIndex((f) => f.id === preview.id); list = i >= 0 ? [...list.slice(0, i), preview] : [...list, preview]; }
   // So does editing a sketch: the bodies built from it would hide what is being drawn and change under every drag.
   else if (S.editing) { const i = list.findIndex((f) => f.id === S.editing); if (i >= 0) list = list.slice(0, i + 1); }
-  const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
+  const r = computeBody(list); S.body = r.body; S.errors = r.errors; S.cyls = r.cyls; if (!preview && !S.editing && list === feats) reportNewBreaks(feats); if (!!S.body !== S.toolsHadBody) { S.toolsHadBody = !!S.body; renderTools(); }
   updateBodyMesh(); buildPlanes(); renderTree(); renderRepairBar(); updateSketchVisuals(); if (S.ctx?.others?.some((o) => o.same)) drawContext();
   // What the open operation adds or cuts is tinted, so the preview stands out from the part (SolidWorks shows it yellow).
   if (preview && S.body && !S.errors[preview.id] && !['sketch', 'plane'].includes(preview.type)) { const i = list.indexOf(preview); const base = i > 0 ? computeBody(list.slice(0, i)).body : null; showPreviewFaces(base); } else if (preview) originGroup.clear();
