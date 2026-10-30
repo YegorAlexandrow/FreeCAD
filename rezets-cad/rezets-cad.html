@@ -1675,11 +1675,11 @@ function findSource(f, p, features, body) {
       cands.push({ g, sf, id, par, score, ws, n });
     }
   }
-  if (!cands.length) return findCrossing(f, [p.x, p.y], features);
+  if (!cands.length) return findCrossing(f, [p.x, p.y], features) || cornerOfFaces(f, w, want, features);
   const rank = (c) => [c.score, c.g.id === f.plane?.face?.by ? 1 : 0, features.indexOf(c.g)];
   cands.sort((a, b) => { const ra = rank(a), rb = rank(b); for (let i = 0; i < 3; i++) if (ra[i] !== rb[i]) return rb[i] - ra[i]; return 0; });
   const c = cands[0]; const src = { sk: c.sf.id, pt: c.id, by: c.g.id };
-  if (!c.par) { const on = cornersAlong(body, f.plane, c.ws, c.n); const k = on.findIndex((v) => v.distanceTo(w) < SRC_TOL); if (k < 0) return null; src.k = k < on.length / 2 ? k : k - on.length; }
+  if (!c.par) { const at = edgeEnd(f, w, c.n, want, c.g.id, features); if (at) src.at = at; else { const on = cornersAlong(body, f.plane, c.ws, c.n); const k = on.findIndex((v) => v.distanceTo(w) < SRC_TOL); if (k < 0) return cornerOfFaces(f, w, want, features); src.k = k < on.length / 2 ? k : k - on.length; } }
   return src;
 }
 // Where a tied corner is now; null when its source is gone (the sketch point deleted, the extrusion switched off).
@@ -1687,12 +1687,105 @@ function resolveSource(f, p, features, body) {
   const src = p.mref.from;
   if (src.x) { const cs = src.x.map((r) => { const g = features.find((x) => x.id === r.by); const sf = g && features.find((x) => x.id === r.sk); const e = sf?.sk?.ents[r.ent]; return g && !g.suppressed && e && features.indexOf(g) < features.indexOf(f) ? curveIn(f.plane, sf, e) : null; });
     if (cs.some((c) => !c)) return null; const xs = crossings(cs[0], cs[1]); const q = xs[src.k] || (xs.length === 1 ? xs[0] : null); if (!q) return null; return { x: +q[0].toFixed(6), y: +q[1].toFixed(6), w: toWorld(f.plane, q[0], q[1]) }; }
+  const N = V3(f.plane.n), O = V3(f.plane.o); const inPlane = (v) => Math.abs(v.clone().sub(O).dot(N)) < GEN_TOL;
+  const to2 = (v) => { const d = v.clone().sub(O); const x = +d.dot(V3(f.plane.x)).toFixed(6), y = +d.dot(V3(f.plane.y)).toFixed(6); return { x, y, w: toWorld(f.plane, x, y) }; };
+  if (src.g) { const A = genPlane(src.g[0], features, f), B = genPlane(src.g[1], features, f); const v = A && B && planes3(f.plane, A, B); return v ? to2(v) : null; }
   const g = features.find((x) => x.id === src.by); const sf = g && features.find((x) => x.id === g.sketch); const q = sf?.sk?.pts[src.pt];
   if (!g || g.suppressed || !q || features.indexOf(g) > features.indexOf(f)) return null;
   const ws = toWorld(sf.plane, q.x, q.y); let v = ws;
+  // Across this sketch: the edge the point sweeps, up to the face that ends it.
+  if (src.at) { const pl = genPlane(src.at, features, f); v = pl && lineMeets(ws, V3(sf.plane.n), pl); if (!v || !inPlane(v)) return null; return to2(v); }
   if (src.k != null) { const on = cornersAlong(body, f.plane, ws, V3(sf.plane.n)); const i = src.k >= 0 ? src.k : on.length + src.k; if (i < 0 || i >= on.length) return null; v = on[i]; }
   const d = v.clone().sub(V3(f.plane.o)); const x = +d.dot(V3(f.plane.x)).toFixed(6), y = +d.dot(V3(f.plane.y)).toFixed(6); return { x, y, w: toWorld(f.plane, x, y) };
 }
+// What made a face of the model: an extrusion's start or end (its caps) or the side a line of its sketch sweeps. A
+// reference to the model names that maker, not a place on the mesh, and is worked out from the sketch and the depth
+// on every rebuild: it cannot go to another face that looks the same, and it is only lost with its maker (the line
+// deleted, the extrusion deleted or switched off). Where each extrusion went is kept as it is built (spanOf).
+const spanOf = new WeakMap();
+const GEN_TOL = 1e-3;
+function genOwner(gen, features, f) { const g = features.find((x) => x.id === gen.by); if (!g || g.suppressed || g.type !== 'extrude' || (f && features.indexOf(g) >= features.indexOf(f))) return null; const sf = features.find((x) => x.id === g.sketch); if (!sf?.sk) return null; const sp = spanOf.get(g); return sp ? { g, sf, sp } : null; }
+// The face's frame: on a cap the sketch's own axes at the cap's level, on a side the line's direction, the extrusion's
+// direction and the normal out of the line. A plane picked on that face keeps its place in this frame.
+function genFrame(gen, features, f) {
+  const w = genOwner(gen, features, f); if (!w) return null; const { sf, sp } = w; const nS = V3(sp.n);
+  if (gen.cap) { const c = gen.cap === 'end' ? sp.end : sp.start; if (c.clip) return null; return { O: V3(sp.o).addScaledVector(nS, c.z), X: V3(sf.plane.x), Y: V3(sf.plane.y), Z: nS.clone() }; }
+  const e = sf.sk.ents[gen.ent]; if (!e || e.t !== 'line' || e.constr || e.ext || sp.draft) return null; const a = toWorld(sf.plane, gp(sf.sk, e.p1).x, gp(sf.sk, e.p1).y), b = toWorld(sf.plane, gp(sf.sk, e.p2).x, gp(sf.sk, e.p2).y);
+  const X = b.sub(a); if (X.length() < 1e-9) return null; X.normalize(); return { O: a.addScaledVector(nS, sp.start.z), X, Y: nS.clone(), Z: X.clone().cross(nS) };
+}
+// The face's plane (a point on it and its normal); the end of an extrusion up to a slanted face is that face.
+function genPlane(gen, features, f) {
+  const w = genOwner(gen, features, f); if (!w) return null; const { sp } = w;
+  if (gen.cap) { const c = gen.cap === 'end' ? sp.end : sp.start; if (c.clip) return { p: V3(c.clip.o), n: V3(c.clip.n).normalize() }; }
+  const fr = genFrame(gen, features, f); return fr && { p: fr.O, n: fr.Z };
+}
+// Every face an extrusion before f makes that is flat: its caps and the sides of its lines.
+function planarGens(features, f) {
+  const out = [];
+  for (const g of features.slice(0, features.indexOf(f))) { if (g.type !== 'extrude' || g.suppressed) continue; const sf = features.find((x) => x.id === g.sketch); if (!sf?.sk || !spanOf.get(g)) continue;
+    for (const cap of ['start', 'end']) { const gen = { by: g.id, cap }; const pl = genPlane(gen, features, f); if (pl) out.push({ gen, ...pl, g }); }
+    for (const e of Object.values(sf.sk.ents)) if (e.t === 'line' && !e.constr && !e.ext) { const gen = { by: g.id, ent: e.id }; const pl = genPlane(gen, features, f); if (pl) out.push({ gen, ...pl, g }); } }
+  return out;
+}
+const toLocal = (fr, v, point) => { const d = point ? v.clone().sub(fr.O) : v.clone(); return [d.dot(fr.X), d.dot(fr.Y), d.dot(fr.Z)].map((x) => +x.toFixed(9)); };
+const fromLocal = (fr, l, point) => (point ? fr.O.clone() : new THREE.Vector3()).addScaledVector(fr.X, l[0]).addScaledVector(fr.Y, l[1]).addScaledVector(fr.Z, l[2]);
+// A plane on a face (a sketch's, an extrusion's «до грани», a mirror plane) told which face of its operation it lies
+// on, once, while it does lie on it. Faces of other operations are not taken: the pick named its operation.
+// Lines whose sides lie in one plane make one face on the model; of those, the line whose part of it holds what the
+// sketch on it is drawn on (its points, seen in the plane), the longest one when nothing says (a face picked as an
+// end). ARM3 v2: a sketch on the side of a groove went with the side of the lever next to it when the lever widened.
+function tieFace(pl, features, f, near = []) {
+  const by = pl.face?.by; const g = by && features.find((x) => x.id === by); if (!g || g.type !== 'extrude') return null; const sf = features.find((x) => x.id === g.sketch); if (!sf?.sk) return null;
+  const n = V3(pl.n).normalize(), o = V3(pl.o);
+  const cands = [{ by, cap: 'end' }, { by, cap: 'start' }, ...Object.values(sf.sk.ents).filter((e) => e.t === 'line' && !e.constr && !e.ext).map((e) => ({ by, ent: e.id }))];
+  let best = null;
+  for (const gen of cands) { const fr = genFrame(gen, features, f); if (!fr || Math.abs(Math.abs(fr.Z.dot(n)) - 1) > 1e-6 || Math.abs(o.clone().sub(fr.O).dot(fr.Z)) > GEN_TOL) continue;
+    let score = [0, 0];
+    if (gen.ent) { const e = sf.sk.ents[gen.ent]; const a = gp(sf.sk, e.p1), b = gp(sf.sk, e.p2); const L = Math.hypot(b.x - a.x, b.y - a.y); score = [near.filter((w) => { const t = w.clone().sub(fr.O).dot(fr.X); return t > -GEN_TOL && t < L + GEN_TOL; }).length, L]; }
+    else score = [Infinity, 0];
+    if (!best || score[0] > best.score[0] || (score[0] === best.score[0] && score[1] > best.score[1])) best = { gen, fr, score }; }
+  if (!best) return null; const { gen, fr } = best;
+  return { ...gen, loc: { o: toLocal(fr, o, true), x: toLocal(fr, V3(pl.x)), y: toLocal(fr, V3(pl.y)) } };
+}
+// Where a tied plane is now: its frame carried by the face, wherever the dimensions put it; null when the face's maker
+// is gone.
+function genFace(pl, features, f) {
+  const gen = pl.face.gen; const fr = genFrame(gen, features, f); if (!fr) return null;
+  const o = fromLocal(fr, gen.loc.o, true), x = fromLocal(fr, gen.loc.x).normalize(), y = fromLocal(fr, gen.loc.y).normalize(); const n = x.clone().cross(y).normalize(); const r6 = (v) => v.toArray().map((q) => +q.toFixed(6));
+  return { ...pl, o: r6(o), x: r6(x), y: r6(y), n: r6(n), face: { ...pl.face, d: +n.dot(o).toFixed(6) } };
+}
+// A plane taken from a face: by its maker when it has one; tied on the first rebuild that finds it on its face; the
+// older search over the mesh only for faces no extrusion made.
+function followPlaneOf(pl, body, steps, features, f, near) {
+  if (!pl?.face?.by) return pl;
+  if (pl.face.gen) { const r = genFace(pl, features, f); return r || pl; }
+  const gen = tieFace(pl, features, f, near); if (gen) { pl.face.gen = gen; return genFace(pl, features, f) || pl; }
+  return S.noSearch ? pl : followPlane(pl, body, steps);
+}
+// Files from before faces were named: the plane as the last rebuild left it agrees with the model as it is now (what
+// was picked may be from long ago, before dimensions changed), so that is where it is tied, and that is its home.
+function preTie(f, key, features) {
+  const pl = f[key]; const home = f[key + 'Home']; if (!pl?.face?.by || pl.face.gen || home?.face?.gen) return;
+  const gen = tieFace(pl, features, f, key === 'plane' ? sketchWorldPts(f) : []); if (!gen) return; pl.face.gen = gen; f[key + 'Home'] = JSON.parse(JSON.stringify(pl));
+}
+// The corner where an edge of the model along dir through w meets a face's plane.
+function lineMeets(w, dir, pl) { const den = dir.dot(pl.n); if (Math.abs(den) < 1e-9) return null; return w.clone().addScaledVector(dir, pl.p.clone().sub(w).dot(pl.n) / den); }
+// Which flat face ends an edge at a corner: of the faces through the corner that the edge crosses, one whose normal is
+// one the corner has on the model; its own extrusion's cap before others, a later operation before an earlier one.
+function pickGen(cands, ns, by, features) {
+  const has = (c) => ns.some((m) => Math.abs(c.n.dot(m)) > 0.999) ? 1 : 0;
+  return cands.map((c) => [has(c), c.gen.by === by && c.gen.cap ? 1 : 0, features.indexOf(c.g), c]).sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2])[0]?.[3] || null;
+}
+function edgeEnd(f, w, dir, ns, by, features) { const cands = planarGens(features, f).filter((c) => Math.abs(dir.dot(c.n)) > 1e-6 && Math.abs(w.clone().sub(c.p).dot(c.n)) < GEN_TOL); return pickGen(cands, ns, by, features)?.gen || null; }
+// A corner no sketch point makes (two operations' faces meeting on this sketch's plane): the two flat faces through it.
+function cornerOfFaces(f, w, ns, features) {
+  const N = V3(f.plane.n); const cands = planarGens(features, f).filter((c) => Math.abs(Math.abs(c.n.dot(N)) - 1) > 1e-6 && Math.abs(w.clone().sub(c.p).dot(c.n)) < GEN_TOL);
+  const has = (c) => (ns.some((m) => Math.abs(c.n.dot(m)) > 0.999) ? 1 : 0); cands.sort((a, b) => has(b) - has(a) || features.indexOf(b.g) - features.indexOf(a.g));
+  for (let i = 0; i < cands.length; i++) for (let j = i + 1; j < cands.length; j++) { const A = cands[i], B = cands[j]; if (Math.abs(N.clone().cross(A.n).normalize().dot(B.n)) < 1e-3) continue; return { g: [A.gen, B.gen] }; }
+  return null;
+}
+function planes3(P, A, B) { const n1 = V3(P.n).normalize(), n2 = A.n, n3 = B.n; const det = n1.dot(n2.clone().cross(n3)); if (Math.abs(det) < 1e-9) return null; const d1 = n1.dot(V3(P.o)), d2 = n2.dot(A.p), d3 = n3.dot(B.p);
+  return n2.clone().cross(n3).multiplyScalar(d1).add(n3.clone().cross(n1).multiplyScalar(d2)).add(n1.clone().cross(n2).multiplyScalar(d3)).divideScalar(det); }
 // The sketch as its author left it (sketch.home): every rebuild solves it from there, not from what the last rebuild
 // made of it. A rebuild is then a function of the document alone, and a change undone gives back exactly what was:
 // solved from the previous result, a lip tied to a moved edge by an equal length came back mirrored (ARM3, 2.2 mm off).
@@ -1716,7 +1809,16 @@ function followSketchRefs(f, body, cyls, features = S.doc.features) {
   // A source can go while its corner stays: the point of the earlier sketch redrawn, merged into another (Деталь 12,
   // Эскиз1). A point still sitting on a corner of the model is then tied again, to what makes that corner now.
   const retie = (p) => { if (p.mref.circle || !p.mref.ns?.length || !nearVertex(world(p))) return null; const src = findSource(f, p, features, body); if (!src) return null; const r = resolveSource(f, { ...p, mref: { ...p.mref, from: src } }, features, body); if (!r) return null; p.mref.from = src; delete p.mref.a0; delete p.mref.nosrc; return r; };
-  for (const p of all) { if (!p.mref?.from) continue; const r = resolveSource(f, p, features, body) || retie(p); if (!r) { srcLost.push(p.id); continue; } snapTo(p, r); }
+  // A corner tied by its place in the row of corners along an edge (files before the faces were named) learns the face
+  // that ends the edge there, once, while it is there.
+  const learnEnd = (p, r) => { const src = p.mref.from; const g = features.find((x) => x.id === src.by); const sf = g && features.find((x) => x.id === g.sketch); if (!sf) return;
+    const at = edgeEnd(f, r.w, V3(sf.plane.n), (p.mref.ns || []).map((n) => V3(n)), src.by, features); if (!at) return; const t = { ...src, at }; delete t.k; const r2 = resolveSource(f, { ...p, mref: { ...p.mref, from: t } }, features, body); if (r2 && r2.w.distanceTo(r.w) < SRC_TOL) p.mref.from = t; };
+  // Below a switched off feature nothing is searched for on the mesh (S.noSearch): a corner known only by its place in
+  // a row of corners stays where it is, unless it is still there. Tying a point that sits on its corner moves nothing,
+  // and is done there too.
+  for (const p of all) { if (!p.mref?.from) continue; const byRow = p.mref.from.k != null && !p.mref.from.at; const r = resolveSource(f, p, features, body) || retie(p);
+    if (!r) { if (!(S.noSearch && byRow)) srcLost.push(p.id); continue; } const there = Math.hypot(r.x - p.x, r.y - p.y) < SRC_TOL;
+    if (byRow && there) learnEnd(p, r); if (S.noSearch && byRow && !there) continue; snapTo(p, r); }
   // Every point on a corner gets its source on its own, whatever the other points of the sketch: tied only when all of
   // them were in place, one point off kept the whole sketch without, and a change of 10.8 mm lost them all (Эскиз14).
   // A point no source was found for is tried again once it sits somewhere else.
@@ -1724,7 +1826,7 @@ function followSketchRefs(f, body, cyls, features = S.doc.features) {
     // Straight onto the exact point of its source (the mesh keeps corners to float precision, 46.259998 for 46.26).
     const r = retie(p); if (r) snapTo(p, r); else p.mref.nosrc = wkey(w); }
   const flagSrc = () => { for (const p of all) if (p.mref?.from) { if (srcLost.includes(p.id)) p.lost = true; else delete p.lost; } if (srcLost.length) S.dangling.set(f.id, [...new Set([...(S.dangling.get(f.id) || []), ...srcLost.filter((id) => usedPt(f.sk, id))])]); };
-  const pts = all.filter((p) => !p.mref?.from); if (!pts.length) { if (srcMoved) solveSketch(f.sk); flagSrc(); return; }
+  const pts = all.filter((p) => !p.mref?.from); if (!pts.length || S.noSearch) { if (srcMoved) solveSketch(f.sk); flagSrc(); return; }
   const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
   const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3;
   // Where each point on a corner is now, for what reads it (a point put back home leaves no stale place behind).
@@ -1903,7 +2005,8 @@ function refPlane(f, features = S.doc.features, depth = 0) {
 }
 // A sketch on a face moves with that face: among the planar faces of the body with the same normal,
 // the one made by the same operation (traced back as in faceCreator) and nearest to the old position.
-function followFace(f, body, steps) { f.plane = followPlane(f.plane, body, steps); }
+const sketchWorldPts = (f) => (f.sk ? Object.values(f.sk.pts).map((q) => toWorld(f.plane, q.x, q.y)) : []);
+function followFace(f, body, steps, features) { f.plane = followPlaneOf(f.plane, body, steps, features, f, sketchWorldPts(f)); }
 // Any plane taken from a face (a sketch's, an extrude's «до грани» or «от грани», a mirror plane, a
 // reference plane's base) remembers the operation that made the face and follows it the same way.
 // Faces and edges taken from the model are followed the same way: from what the user picked (key + 'Home'), every
@@ -1919,9 +2022,12 @@ function followFromHome(obj, key, follow) {
   // What following learns about who an edge is (the side of the rim the material is on, the operation that made the
   // hole, the faces meeting at it) stays with the pick; where it is does not.
   if (Array.isArray(obj[hk]) && Array.isArray(obj[key])) obj[hk].forEach((h, i) => { const o = obj[key][i]; if (o) for (const k of ['side', 'src', 'sig']) if (h[k] == null && o[k] != null) h[k] = o[k]; });
+  // So does the face a plane was found on: tied while home and model agree, it is what home means from then on.
+  if (obj[hk]?.face && obj[key]?.face?.gen && !obj[hk].face.gen) obj[hk].face.gen = obj[key].face.gen;
 }
-function followRefs(f, body, steps) {
-  const fp = (pl) => (pl?.face?.by ? followPlane(pl, body, steps) : pl);
+function followRefs(f, body, steps, features) {
+  const fp = (pl) => followPlaneOf(pl, body, steps, features, f);
+  preTie(f, 'target', features); preTie(f, 'fromTarget', features);
   if (f.target?.face?.by) followFromHome(f, 'target', () => { f.target = fp(f.target); }); if (f.fromTarget?.face?.by) followFromHome(f, 'fromTarget', () => { f.fromTarget = fp(f.fromTarget); });
   if (f.type === 'mirror' && f.plane?.face) f.plane = { ...f.plane, face: fp(f.plane.face) };
   if (f.type === 'plane') { if (f.base?.face) f.base = { ...f.base, face: fp(f.base.face) }; if (f.base2?.face) f.base2 = { ...f.base2, face: fp(f.base2.face) }; }
@@ -1947,9 +2053,10 @@ function computeBody(features) {
   let body = null; const errors = {}; const key = []; let cyls = [];
   for (const f of features) if (f.type === 'sketch' && f.planeRef) { const pf = features.find((g) => g.id === f.planeRef); if (pf) { const pl = refPlane(pf, features); f.plane = { ...pl, label: pf.name }; } }
   const steps = []; let lastSolid = null; let nBodies = 1;
-  // Below a suppressed feature references are not followed: what they pointed at is only switched off, and following
-  // would move them onto other geometry for good (a sketch's hole centre went to another hole, and stayed there once
-  // the boss was back: switching a feature off and on again changed the part).
+  // Below a suppressed feature references are not searched for on the mesh: what they pointed at is only switched off,
+  // and a search would move them onto other geometry for good (a sketch's hole centre went to another hole, and stayed
+  // there once the boss was back). References tied to what made their face or corner are still worked out: those that
+  // depend on the switched off feature stay where they are, the others follow every change above.
   let frozen = false;
   for (const f of features) {
     if (lastSolid) { steps.push({ id: lastSolid, body }); lastSolid = null; }
@@ -1958,20 +2065,21 @@ function computeBody(features) {
     // the tree used to redo it all (a click on a face of BASE walked the tree once per feature).
     // Sketches it takes points from count too: a sketch follows another one even when the body stays the same.
     const deps = f.type === 'sketch' ? [...new Set(Object.values(f.sk?.pts || {}).map((q) => q.mref?.sk).filter(Boolean))].map((id) => JSON.stringify(features.find((x) => x.id === id)?.sk?.pts || null)).join('|') : '';
-    const fm = followMemo.get(f); const fj = JSON.stringify(f) + deps; const same = frozen || (fm && fm.body === body && fm.json === fj);
+    const fm = followMemo.get(f); const fj = JSON.stringify(f) + deps; const same = fm && fm.body === body && fm.json === fj && fm.frozen === frozen; S.noSearch = frozen;
     if (!same) {
     if (f.type === 'sketch' && f.sk && f.id !== S.editing && restoreHome(f.sk)) solveSketch(f.sk);
     if (f.type === 'sketch' && f.sk && f.id === S.editing) setHome(f.sk);
-    if (f.type === 'sketch' && f.plane?.face?.by && body) followFromHome(f, 'plane', () => followFace(f, body, steps));
+    if (f.type === 'sketch' && f.plane?.face?.by && body) { preTie(f, 'plane', features); followFromHome(f, 'plane', () => followFace(f, body, steps, features)); }
     if (f.type === 'sketch' && !f.suppressed && !body) S.dangling.delete(f.id);
     if (f.type === 'sketch' && !f.suppressed && !body) followOtherSketches(f, features);
     if (f.type === 'sketch' && body && !f.suppressed) { followSketchRefs(f, body, cyls, features); followOtherSketches(f, features); if (f.plane?.label === 'Грань' && !f.planeRef && !onSomeFace(body, f.plane)) S.offFace.add(f.id); else S.offFace.delete(f.id); }
     // A sketch on a face of a body that is no longer there (its boss deleted) hangs in the air just the same.
     else if (f.type === 'sketch' && !body && !f.suppressed && f.plane?.face) S.offFace.add(f.id);
-    if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed) followFromHome(f, 'edges', () => followEdges(f, body, cyls));
-    if (body && f.type !== 'sketch') followRefs(f, body, steps);
+    if ((f.type === 'fillet' || f.type === 'chamfer') && f.edges?.length && body && !f.suppressed && !frozen) followFromHome(f, 'edges', () => followEdges(f, body, cyls));
+    if (body && f.type !== 'sketch') followRefs(f, body, steps, features);
     if (f.type === 'sketch' && f.sk) lastOut.set(f.sk, outOf(f.sk));
-    followMemo.set(f, { body, json: JSON.stringify(f) + deps }); }
+    followMemo.set(f, { body, json: JSON.stringify(f) + deps, frozen }); }
+    S.noSearch = false;
     // A circular pattern's axis taken from a hole or boss stays on that hole when a dimension moves it.
     if (body && (f.type === 'cpattern' || f.type === 'lpattern') && !f.suppressed) for (const key of ['axis', 'dir', 'dir2']) { const e = f[key]?.edge; if (e?.t !== 'circle' || !e.src) continue; const c = edgeTopology(body, cyls).circles.filter((q) => q.src === e.src).sort((p, q) => p.c.distanceTo(V3(e.c)) - q.c.distanceTo(V3(e.c)))[0]; if (c && c.c.distanceTo(V3(e.c)) > 1e-9) f[key] = { ...f[key], edge: { ...e, c: c.c.toArray(), n: c.n.toArray(), r: c.r } }; }
     // Where a region pick is remembered (points, entity names) does not change the solid: it stays out of the key, so the
@@ -1981,7 +2089,7 @@ function computeBody(features) {
     if (f.suppressed || f.type === 'sketch' || f.type === 'plane') continue;
     lastSolid = f.id;
     const k = key.join('\n');
-    if (S.cache.has(k)) { const c = S.cache.get(k); S.cache.delete(k); S.cache.set(k, c); if (c.bodies) nBodies = c.bodies; body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
+    if (S.cache.has(k)) { const c = S.cache.get(k); S.cache.delete(k); S.cache.set(k, c); if (c.span) spanOf.set(f, c.span); if (c.bodies) nBodies = c.bodies; body = c.body; cyls = c.cyls || cyls; if (c.err) errors[f.id] = c.err; S.warns[f.id] = c.warn || null; continue; }
     let err = null; let warn = null;
     try {
       if (f.varErr) throw new Error(f.varErr);
@@ -2005,7 +2113,7 @@ function computeBody(features) {
     // A cut that splits the part, or a boss that does not touch it, leaves several bodies: said, as SolidWorks does.
     if (!err && !warn && body && (f.type === 'extrude' || f.type === 'revolve' || f.type === 'hole')) { const n = bodyCount(body); if (n > nBodies) warn = `Деталь теперь из ${n} отдельных тел`; nBodies = n; }
     if (err) errors[f.id] = err; S.warns[f.id] = warn;
-    S.cache.set(k, { body, err, cyls, warn, bodies: nBodies });
+    S.cache.set(k, { body, err, cyls, warn, bodies: nBodies, span: spanOf.get(f) });
   }
   // Least recently used entries go first, down to what two builds of this part need (each one adds a body per feature).
   const cap = Math.max(80, 2 * features.length); while (S.cache.size > cap) S.cache.delete(S.cache.keys().next().value);
@@ -2071,7 +2179,7 @@ function isInside(body, p) {
   return c.bvh.raycast(ray, THREE.DoubleSide).length % 2 === 1;
 }
 function buildTool(f, body, cyls = []) {
-  const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
+  const f0 = f; const sf = featById(f.sketch); if (!sf) throw new Error('Эскиз не найден');
   const reg = sketchRegions(sf); if (!reg.faces.length) throw new Error('В эскизе нет замкнутых контуров.' + gapNote(sf.sk));
   const st = {}; const selIds = selectedRegionIds(f, reg, st); const loops0 = profileLoops(reg, selIds); if (!loops0.length) throw new Error('Не выбрано ни одной области');
   if (Array.isArray(f.regions) && f.regions.length && st.sure) { const ids = [...selIds]; const pts = ids.map((i) => reg.faces[i].sample.map((v) => +v.toFixed(6))); const sigs = ids.map((i) => reg.faces[i].sig); if (JSON.stringify([ids, pts, sigs]) !== JSON.stringify([f.regions, f.regionPts, f.regionSigs])) { f.regions = ids; f.regionPts = pts; f.regionSigs = sigs; } }
@@ -2098,7 +2206,7 @@ function buildTool(f, body, cyls = []) {
       eps = f.mode === 'cut' ? (inside ? 0 : 0.002) : (inside ? 0.002 : 0);
     }
     // "Up to face": exact depth for a parallel face, otherwise extrude past it and clip by its plane.
-    let clip = null;
+    let clip = null, clipPl = null;
     if (f.end === 'face') {
       const T = f.target; if (!T) throw new Error('Выберите грань или плоскость, до которой вытягивать');
       const ids = selectedRegionIds(f, reg); const r0 = reg.faces.find((x) => ids.has(x.id)) || reg.faces[0]; const C = toWorld(sf.plane, r0.sample[0], r0.sample[1]).addScaledVector(nS, s0);
@@ -2108,7 +2216,7 @@ function buildTool(f, body, cyls = []) {
       const off = f.offset || 0;
       if (Math.abs(Math.abs(cosA) - 1) < 1e-9) { d = Math.abs(sAlong) - off; if (d <= 1e-6) throw new Error('Грань слишком близко к эскизу'); }
       else { body?.computeBoundingBox(); const sph = body ? body.boundingBox.getBoundingSphere(new THREE.Sphere()) : new THREE.Sphere(C, 100); const Rr = sph.radius + sph.center.distanceTo(C) + Math.abs(sAlong) + 10; d = 2 * Rr;
-        const ns = nt.clone(); if (ns.dot(C.clone().sub(Q)) < 0) ns.negate(); clip = halfSpaceBox(Q.clone().addScaledVector(ns, off), nt, C, Rr); }
+        const ns = nt.clone(); if (ns.dot(C.clone().sub(Q)) < 0) ns.negate(); clip = halfSpaceBox(Q.clone().addScaledVector(ns, off), nt, C, Rr); clipPl = { o: Q.clone().addScaledVector(ns, off).toArray(), n: nt.toArray() }; }
     }
     // "Up to next": rays from the profile along the extrusion find where the material next ends (a cut,
     // which then stops at the far side of the wall it starts in) or next begins (a boss).
@@ -2142,6 +2250,9 @@ function buildTool(f, body, cyls = []) {
     if (f.end === 'mid') { z0 = -d / 2; z1 = d / 2; if (reach) { const m = Math.max(...reach); z0 = -m; z1 = m; } }
     else if (f.dir === -1) { z0 = -d; z1 = eps; } else { z0 = -eps; z1 = d; }
     if (f.end === 'through' && f.mode === 'cut' && f.both) { z0 = reach ? -reach[0] : -d; z1 = reach ? reach[1] : d; }
+    // The caps where they are on the model, the sliver of overlap included (a face picked there is 2 µm off the sketch).
+    { const lo = z0, hi = z1; const rev = f.dir === -1 && f.end !== 'mid' && !(f.end === 'through' && f.mode === 'cut' && f.both);
+      spanOf.set(f0, { o: [...sf.plane.o], n: nS.toArray(), start: { z: s0 + (rev ? hi : lo) }, end: { z: s0 + (rev ? lo : hi), ...(clipPl ? { clip: clipPl } : {}) }, draft: f.draft > 0 }); }
     // A cut drawn on the walls of the body (the same sketch as the boss) leaves coplanar faces the
     // boolean cannot resolve; the tool is widened by 0.2 µm so it clears those walls instead.
     // «Перевернуть сторону для резания»: the material outside the profile goes, inside it stays. The tool is a frame
@@ -8232,7 +8343,7 @@ const thumbs = (() => {
   const dataOf = (d) => (d.id === S.project.active && S.mode === d.kind ? S.doc : d.data);
   // What rebuilds write down for themselves (where the user put things, the sources of references) is not a change
   // of the part: the picture stays.
-  const own = (k, v) => (k === 'home' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
+  const own = (k, v) => (k === 'home' || k === 'gen' || k === 'planeHome' || k === 'edgesHome' || k === 'targetHome' || k === 'fromTargetHome' || k === 'a0' || k === 'nosrc' || (k === 'from' && typeof v === 'object') ? undefined : v);
   const sig = (d) => { const x = dataOf(d); return d.kind === 'part' ? hashStr(JSON.stringify([x.features, x.rollback, x.vars, x.color, x.faceColors], own)) : d.kind === 'asm' ? hashStr(JSON.stringify([x.comps, x.explode?.on])) : d.kind === 'import' ? hashStr(JSON.stringify([x.name, x.zup, x.scale, x.pos?.length])) : null; };
   const items = (d) => {
     const active = d.id === S.project.active && S.mode === d.kind;
@@ -8895,5 +9006,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
