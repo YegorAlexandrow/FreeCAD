@@ -8032,7 +8032,8 @@ const stdPlaneRef = (c, k) => ({ comp: c.id, kind: 'plane', p: [0, 0, 0], d: PLA
 // ---------------- pointer handling in the assembly ----------------
 function asmDown(ev) {
   if (ev.button !== 0) return;
-  if (S.pm) return;
+  // In the mate panel a part can be dragged too (E30): a click without a move still picks a face or edge for the mate.
+  if (S.pm && S.pm.kind !== 'mate') return;
   if (S.doc.explode?.on) { const p = asmPick(ev); if (p) { controls.mouseButtons.LEFT = null; S.asmDrag = { fixed: true, exploded: true }; } return; }
   const p = asmPick(ev); const c = p && S.doc.comps.find((x) => x.id === p.comp);
   if (!c) { controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE; return; }
