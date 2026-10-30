@@ -1751,7 +1751,10 @@ function tieFace(pl, features, f, near = []) {
 // is gone.
 function genFace(pl, features, f) {
   const gen = pl.face.gen; const fr = genFrame(gen, features, f); if (!fr) return null;
-  const o = fromLocal(fr, gen.loc.o, true), x = fromLocal(fr, gen.loc.x).normalize(), y = fromLocal(fr, gen.loc.y).normalize(); const n = x.clone().cross(y).normalize(); const r6 = (v) => v.toArray().map((q) => +q.toFixed(6));
+  let o = fromLocal(fr, gen.loc.o, true), x = fromLocal(fr, gen.loc.x).normalize(), y = fromLocal(fr, gen.loc.y).normalize(); let n = x.clone().cross(y).normalize(); const r6 = (v) => v.toArray().map((q) => +q.toFixed(6));
+  // A face that only moved along its normal takes the sketch along the normal, nothing else: what is drawn on it stays
+  // where it was across the face (ARM0: posts made taller moved the side the hole sketch is on, and the holes with it).
+  const n0 = V3(pl.n).normalize(); if (Math.abs(n.dot(n0) - 1) < 1e-9) { const o0 = V3(pl.o); o = o0.clone().addScaledVector(n0, o.clone().sub(o0).dot(n0)); x = V3(pl.x); y = V3(pl.y); n = n0; }
   return { ...pl, o: r6(o), x: r6(x), y: r6(y), n: r6(n), face: { ...pl.face, d: +n.dot(o).toFixed(6) } };
 }
 // A plane taken from a face: by its maker when it has one; tied on the first rebuild that finds it on its face; the
@@ -1822,7 +1825,9 @@ function followSketchRefs(f, body, cyls, features = S.doc.features) {
   // Every point on a corner gets its source on its own, whatever the other points of the sketch: tied only when all of
   // them were in place, one point off kept the whole sketch without, and a change of 10.8 mm lost them all (Эскиз14).
   // A point no source was found for is tried again once it sits somewhere else.
-  for (const p of all) { if (!p.mref || p.mref.from || p.mref.circle || !p.mref.ns?.length || p.lost) continue; const w = world(p); if (p.mref.nosrc === wkey(w) || !nearVertex(w)) continue; if (!p.mref.a0) p.mref.a0 = w.toArray().map((v) => +v.toFixed(6));
+  for (const p of all) { if (!p.mref || p.mref.from || p.mref.circle || p.lost) continue; const w = world(p); if (p.mref.nosrc === wkey(w) || !nearVertex(w)) continue;
+    // Older files kept no normals for a corner: they are read off the model while the point sits on it.
+    if (!p.mref.ns?.length) { const v = near.find((q) => q.distanceTo(w) < SRC_TOL); p.mref.ns = vertNormals(body, v).map((n) => n.toArray().map((x) => +x.toFixed(5))); if (!p.mref.ns.length) continue; } if (!p.mref.a0) p.mref.a0 = w.toArray().map((v) => +v.toFixed(6));
     // Straight onto the exact point of its source (the mesh keeps corners to float precision, 46.259998 for 46.26).
     const r = retie(p); if (r) snapTo(p, r); else p.mref.nosrc = wkey(w); }
   const flagSrc = () => { for (const p of all) if (p.mref?.from) { if (srcLost.includes(p.id)) p.lost = true; else delete p.lost; } if (srcLost.length) S.dangling.set(f.id, [...new Set([...(S.dangling.get(f.id) || []), ...srcLost.filter((id) => usedPt(f.sk, id))])]); };
