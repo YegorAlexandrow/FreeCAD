@@ -3416,6 +3416,14 @@ function drawMove(m) {
   if (t === 'line' && D.stage === 1) {
     const a = gp(sk, D.start); let u = sn.u, v = sn.v;
     if (!sn.kind) { const ang = Math.atan2(v - a.y, u - a.x); const tol = 3 * Math.PI / 180; if (Math.abs(Math.sin(ang)) < Math.sin(tol)) { v = a.y; D.glyph = '—'; D.hv = 'horizontal'; } else if (Math.abs(Math.cos(ang)) < Math.sin(tol)) { u = a.x; D.glyph = '|'; D.hv = 'vertical'; } else D.hv = null; } else D.hv = null;
+    // Neither level nor upright: square to a line that ends where this one starts, or along an arc that ends there,
+    // within 3°, as SolidWorks infers while drawing (S0-21). Kept as a relation when the click lands there.
+    D.infer = null;
+    if (!sn.kind && !D.hv) { const L = Math.hypot(u - a.x, v - a.y); const dir = [(u - a.x) / L, (v - a.y) / L]; const tol = Math.sin(3 * Math.PI / 180);
+      for (const e of Object.values(sk.ents)) { if (D.infer || L < 1e-9 || e.ext || (e.p1 !== D.start && e.p2 !== D.start)) continue; let w = null, t = null;
+        if (e.t === 'line') { const o = gp(sk, e.p1 === D.start ? e.p2 : e.p1); const l = Math.hypot(o.x - a.x, o.y - a.y); if (l < 1e-9) continue; const d = [(o.x - a.x) / l, (o.y - a.y) / l]; if (Math.abs(d[0] * dir[0] + d[1] * dir[1]) < tol) { w = [-d[1], d[0]]; t = 'perpendicular'; } }
+        else if (e.t === 'arc') { const c = gp(sk, e.c); const rr = Math.hypot(a.x - c.x, a.y - c.y); if (rr < 1e-9) continue; const d = [-(a.y - c.y) / rr, (a.x - c.x) / rr]; if (Math.abs(d[0] * dir[1] - d[1] * dir[0]) < tol) { w = d; t = 'tangent'; } }
+        if (!w) continue; const k = w[0] * dir[0] + w[1] * dir[1] < 0 ? -1 : 1; u = a.x + w[0] * k * L; v = a.y + w[1] * k * L; D.glyph = t === 'tangent' ? '⌒' : '⊥'; D.infer = { t, ref: e.id }; } }
     sn.u = u; sn.v = v; D.preview = [[a.x, a.y, u, v]]; D.lenTip = Math.hypot(u - a.x, v - a.y);
   }
   if (t === 'slot' && D.stage === 1) {
@@ -3475,6 +3483,7 @@ function drawClick(m) {
     const a = gp(sk, D.start); const sa = sScreen(a.x, a.y), sb = sScreen(sn.u, sn.v); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6 || (sn.kind !== 'pt' && Math.hypot(sa.x - sb.x, sa.y - sb.y) < 4)) return;
     const end = snapToPoint(sk, sn, pending); const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: D.start, p2: end };
     if (D.hv && !sn.kind) pending.push({ t: D.hv, refs: [id] });
+    else if (D.infer && !sn.kind && sk.ents[D.infer.ref]) pending.push({ t: D.infer.t, refs: D.infer.t === 'tangent' ? [id, D.infer.ref] : [D.infer.ref, id] });
     // Ended on a point that lies level with the start (or straight above it), the line is horizontal (vertical) as
     // well as joined there, as SolidWorks adds both: the snap used to drop the one for the other (J19).
     else if (sn.kind) { const b = gp(sk, end); const dx = b.x - a.x, dy = b.y - a.y; const L = Math.hypot(dx, dy); if (L > 1e-9 && Math.abs(dy) < 1e-9 * Math.max(1, L)) pending.push({ t: 'horizontal', refs: [id] }); else if (L > 1e-9 && Math.abs(dx) < 1e-9 * Math.max(1, L)) pending.push({ t: 'vertical', refs: [id] }); }
@@ -3861,6 +3870,12 @@ function deleteSelection() {
   for (const k of S.sel) { const id = k.slice(2); if (k[0] === 'e' && sk.ents[id]) delEnts.add(id); if (k[0] === 'p' && sk.pts[id]) delPts.add(id); if (k[0] === 'c') delCons.add(id); }
   // A spline loses just the through-point deleted from its middle (SolidWorks drops the point, not the curve).
   for (const e of Object.values(sk.ents)) if (e.t === 'spline' && !delEnts.has(e.id)) { const inner = (q, i) => delPts.has(q) && (e.closed || (i > 0 && i < e.pts.length - 1)); const keep = e.pts.filter((q, i) => !inner(q, i)); if (keep.length < e.pts.length && keep.length >= (e.closed ? 3 : 2)) { e.pts = keep; e.p1 = keep[0]; e.p2 = e.closed ? keep[0] : keep[keep.length - 1]; } }
+  // A corner (an end shared by two curves not deleted themselves) is not a reason to delete both (S0-26): what goes is
+  // what is put on the point, its relations and dimensions, as SolidWorks deletes them and keeps the corner.
+  let cornerCons = 0, corners = 0;
+  for (const id of [...delPts]) { const own = Object.values(sk.ents).filter((e) => !delEnts.has(e.id) && entPts(e).includes(id)); if (own.length < 2) continue; delPts.delete(id); corners++;
+    for (const c of Object.values(sk.cons)) if (c.refs.includes(id) && !delCons.has(c.id)) { delCons.add(c.id); cornerCons++; } }
+  if (corners) toast(cornerCons ? `Угол оставлен, удалены его взаимосвязи и размеры: ${cornerCons}` : 'Угловая точка удаляется вместе с линиями: выделите линию', 'info');
   for (const e of Object.values(sk.ents)) if (entPts(e).some((p) => delPts.has(p))) delEnts.add(e.id);
   for (const id of delEnts) delete sk.ents[id];
   const usedPts = new Set(); for (const e of Object.values(sk.ents)) entPts(e).forEach((p) => usedPts.add(p));
