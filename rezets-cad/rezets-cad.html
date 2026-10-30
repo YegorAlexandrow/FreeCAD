@@ -2322,6 +2322,9 @@ function rebuild() {
 // ============================================================================================
 const canvas = $('cv'); const view = $('view'); const overlay = $('overlay');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, stencil: true }); renderer.localClippingEnabled = true;
+// Reading each shader's log after linking waits for the compile there and then: the first hover in an assembly stalled
+// for seconds on its highlight material. The shaders are fixed, a broken one shows in development anyway.
+renderer.debug.checkShaderErrors = false;
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 const scene = new THREE.Scene();
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -100000, 100000);
@@ -7102,7 +7105,7 @@ function asmRefresh(reanalyze) {
   { const tk = [S.asmSel, S.mateSel, asm.explode?.on, S.pm?.kind].join('|'); if (tk !== asmRefresh.tk) { asmRefresh.tk = tk; renderTools(); } }
   // A component carries the name of its document as it is now (renamed documents included).
   if (reanalyze) { for (const c of asm.comps) { const inf = docInfo(c.doc); if (inf?.ent && !c.userName) c.name = inf.ent.name + (c.name?.match(/<\d+>$/)?.[0] || ''); } if (checkMateRefs(asm)) asmSolve(asm); S.asmAnalysis = asmAnalyze(asm); }
-  asmGroup.clear();
+  asmGroup.clear(); const byComp = new Map(); asmGroup.userData.byComp = byComp; asmGroup.userData.doc = asm;
   allComps(asm).forEach((c) => {
     const inf = docInfo(c.doc); if (!inf || inf.empty) return; const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id));
     // Pattern copies keep showing when their seed is hidden (as in SolidWorks); a suppressed seed takes them along.
@@ -7116,7 +7119,7 @@ function asmRefresh(reanalyze) {
     if (src.clear) { mat.transparent = true; mat.opacity = 0.3; mat.depthWrite = false; }
     const mesh = new THREE.Mesh(geoC, mat); mesh.userData.comp = c.virtual ? null : c.id; if (c.virtual) mesh.userData.virt = c.name; g.add(mesh);
     g.add(edgeLines(inf.edges, lineMat(colors.edge, 1.3)));
-    asmGroup.add(g);
+    asmGroup.add(g); byComp.set(c.virtual ? 'v:' + c.name : c.id, g);
   });
   drawMatePicks(); renderSide(); setHint(); if (S.section || secGroup.children.length) applySection(); requestRender();
 }
@@ -7126,22 +7129,37 @@ function toggleCompSuppressed(c) { if (c.suppressed) delete c.suppressed; else {
 function toggleCompHidden(c) { if (c.hidden) delete c.hidden; else { c.hidden = true; if (S.asmSel === c.id) S.asmSel = null; } asmRefresh(); pushUndo(); }
 const shadedCache = new WeakMap(); function shadedGeo(g) { if (!shadedCache.has(g)) { const sg = toCreasedNormals(g.clone(), 30 * Math.PI / 180); sg.userData.shared = true; shadedCache.set(g, sg); } return shadedCache.get(g); }
 // Vertices and edges of components near the cursor, for mates (in component coordinates).
+// Where the edges of each component fall on the screen, kept until the view or the component moves: projecting every
+// corner and edge of a 170k-triangle servo on each mouse move took 240 ms per move (B0-11).
+const edgeScreen = new Map();
+function compEdgesOnScreen(c, inf, camKey) {
+  const k = camKey + '|' + c.T.join(','); const hit = edgeScreen.get(c.id); if (hit && hit.k === k && hit.inf === inf) return hit;
+  const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
+  const verts = T.verts.map((v) => { const cc = T.circles.find((ci) => ci.c.distanceTo(v) < 1e-6) || null; const wq = v.clone().applyMatrix4(M); return { v, cc, wq, s: toScreen(wq) }; });
+  const lines = T.lines.map(([a, b]) => { const A = a.clone().applyMatrix4(M), B = b.clone().applyMatrix4(M); return { a, b, A, B, sa: toScreen(A), sb: toScreen(B) }; });
+  const circles = T.circles.map((ci) => ({ ci, sc: toScreen(ci.c.clone().applyMatrix4(M)) }));
+  const out = { k, inf, M, verts, lines, circles }; edgeScreen.set(c.id, out); return out;
+}
 function asmEdgePick(ev) {
   const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; const cands = [];
   const take = (o, d, tol, wq) => { if (d < tol) cands.push({ o, d, wq }); };
   const pxPerMm = view.clientHeight * camera.zoom / (camera.top - camera.bottom);
+  camera.updateMatrixWorld(); const camKey = camera.matrixWorld.elements.join(',') + camera.projectionMatrix.elements.join(',') + r.width + 'x' + r.height;
   for (const c of S.doc.comps) {
-    if (c.hidden || c.suppressed) continue; const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const T = edgeTopology(inf.geo, inf.cyls); const M = new THREE.Matrix4().fromArray(c.T);
+    if (c.hidden || c.suppressed) continue; const inf = docInfo(c.doc); if (!inf || inf.empty) continue; const E = compEdgesOnScreen(c, inf, camKey); const M = E.M;
     // A circle's centre is not a corner of the part: a click there means the circle (its axis), not a vertex.
-    for (const v of T.verts) { const cc = T.circles.find((ci) => ci.c.distanceTo(v) < 1e-6); if (cc) { const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'axis', p: cc.c.toArray(), d: cc.n.toArray(), r: cc.r, edge: { t: 'circle', c: cc.c.toArray(), n: cc.n.toArray(), r: cc.r } }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); continue; } const wq = v.clone().applyMatrix4(M); const s2 = toScreen(wq); take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, Math.hypot(s2.x - mx, s2.y - my) - 3, 3, wq); }
-    for (const ci of T.circles) {
-      const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
+    for (const { v, cc, wq, s: s2 } of E.verts) { const dd = Math.hypot(s2.x - mx, s2.y - my) - 3; if (dd >= 3) continue;
+      if (cc) take({ comp: c.id, kind: 'axis', p: cc.c.toArray(), d: cc.n.toArray(), r: cc.r, edge: { t: 'circle', c: cc.c.toArray(), n: cc.n.toArray(), r: cc.r } }, dd, 3, wq.clone());
+      else take({ comp: c.id, kind: 'point', p: v.toArray(), d: [0, 0, 1] }, dd, 3, wq.clone()); }
+    for (const { ci, sc } of E.circles) {
       // Circles far from the cursor are skipped before sampling; each circle gives one candidate.
-      const sc = toScreen(ci.c.clone().applyMatrix4(M)); if (Math.hypot(sc.x - mx, sc.y - my) > ci.r * pxPerMm + 8) continue;
+      if (Math.hypot(sc.x - mx, sc.y - my) > ci.r * pxPerMm + 8) continue;
+      const u = new THREE.Vector3().crossVectors(ci.n, Math.abs(ci.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(ci.n, u);
       let best = null; for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; const wq = ci.c.clone().addScaledVector(u, ci.r * Math.cos(a)).addScaledVector(w, ci.r * Math.sin(a)).applyMatrix4(M); const s2 = toScreen(wq); const dd = Math.hypot(s2.x - mx, s2.y - my); if (!best || dd < best.dd) best = { dd, wq }; }
       take({ comp: c.id, kind: 'axis', p: ci.c.toArray(), d: ci.n.toArray(), r: ci.r, edge: { t: 'circle', c: ci.c.toArray(), n: ci.n.toArray(), r: ci.r } }, best.dd, 4, best.wq);
     }
-    for (const [a, b] of T.lines) { const A = a.clone().applyMatrix4(M), B = b.clone().applyMatrix4(M); const sa = toScreen(A), sb = toScreen(B); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1)));
+    for (const { a, b, A, B, sa, sb } of E.lines) { if (Math.min(sa.x, sb.x) > mx + 4 || Math.max(sa.x, sb.x) < mx - 4 || Math.min(sa.y, sb.y) > my + 4 || Math.max(sa.y, sb.y) < my - 4) continue;
+      const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1)));
       take({ comp: c.id, kind: 'axis', p: a.toArray(), d: b.clone().sub(a).normalize().toArray(), edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), 4, A.clone().lerp(B, t)); }
   }
   // Nearest one that is not hidden behind a surface.
@@ -7783,7 +7801,7 @@ function asmMove(ev) {
   if (D && !D.fixed && down?.moved) {
     const asm = S.doc; const c = D.comp;
     // Following the mates goes on from the last frame, so a long drag costs no more than a short one.
-    if (!D.rotate && D.last) { restorePoses(asm, D.last); const hit = new THREE.Vector3(); if (rayFromEvent(ev).ray.intersectPlane(D.plane, hit) && dragFollow(asm, c, D, hit)) { D.last = snapPoses(asm); asmRefresh(); return; } restorePoses(asm, D.last); asmRefresh(); return; }
+    if (!D.rotate && D.last) { restorePoses(asm, D.last); const hit = new THREE.Vector3(); if (rayFromEvent(ev).ray.intersectPlane(D.plane, hit) && dragFollow(asm, c, D, hit)) { D.last = snapPoses(asm); asmPoses(); return; } restorePoses(asm, D.last); asmPoses(); return; }
     restorePoses(asm, D.all0);
     if (D.rotate) {
       const dx = (ev.clientX - D.sx) * 0.01, dy = (ev.clientY - D.sy) * 0.01; const up = camera.up.clone(), right = new THREE.Vector3().crossVectors(camera.getWorldDirection(new THREE.Vector3()), up).normalize();
@@ -7791,18 +7809,34 @@ function asmMove(ev) {
       const t = D.pose0.t.clone().sub(D.start).applyQuaternion(q).add(D.start); setPose(c, t, q.multiply(D.pose0.q.clone()));
     } else {
       const hit = new THREE.Vector3(); if (!rayFromEvent(ev).ray.intersectPlane(D.plane, hit)) return;
-      if (dragFollow(asm, c, D, hit)) { D.last = snapPoses(asm); asmRefresh(); return; }
+      if (dragFollow(asm, c, D, hit)) { D.last = snapPoses(asm); asmPoses(); return; }
       restorePoses(asm, D.all0); setPose(c, D.pose0.t.clone().add(hit.sub(D.start)), D.pose0.q.clone());
     }
     const L = compSize(c); const ok = asmSolve(asm, (sys) => { const i = sys.idx.get(c.id); return i === undefined ? [] : [0, 1, 2, 3, 4, 5].map((k) => [6 * i + k, k < 3 ? 1e-8 / (L * L) : 1e-4]); });
     if (!ok) restorePoses(asm, D.all0);
-    asmRefresh(); return;
+    asmPoses(); return;
   }
   if (!down) {
     const p = asmPick(ev);
     if (S.pm?.kind === 'mate') { const ep = asmEdgePick(ev); const hv = ep || (p?.ent ? { comp: p.comp, ...p.ent } : null); if (JSON.stringify(hv) !== JSON.stringify(S.pm.hover)) { S.pm.hover = hv; drawMatePicks(); } return; }
-    const hc = p?.comp || null; if (!S.pm && hc !== S.asmHover?.comp) { S.asmHover = p; asmRefresh(); }
+    const hc = p?.comp || null; if (!S.pm && hc !== S.asmHover?.comp) { const was = S.asmHover?.comp; S.asmHover = p; asmHoverTint([was, hc]); }
   }
+}
+// While a part is dragged only where the components are changes: their groups are moved, nothing is built again. A
+// full refresh made new coloured copies of every component's mesh for each mouse move, and the servo's 170k triangles
+// went to the graphics card again each time (frames of 0.8 to 1.9 s, E31, K18).
+// The part under the cursor is lit by its material alone: the whole assembly was built again each time the cursor went
+// from one part to another (B0-10).
+function asmHoverTint(ids) {
+  const byComp = asmGroup.userData.byComp; if (!byComp || asmGroup.userData.doc !== S.doc) { asmRefresh(); return; }
+  for (const id of ids) { if (!id) continue; const g = byComp.get(id); const mesh = g?.children.find((o) => o.isMesh); if (!mesh) continue; const sel = S.asmSel === id; const hov = S.asmHover?.comp === id && !S.pm;
+    mesh.material.emissive.copy(sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0)); mesh.material.emissiveIntensity = sel ? 0.25 : hov ? 0.15 : 0; }
+  requestRender();
+}
+function asmPoses() {
+  const asm = S.doc; const byComp = asmGroup.userData.byComp; if (!byComp || asmGroup.userData.doc !== asm) { asmRefresh(); return; }
+  for (const c of allComps(asm)) { const g = byComp.get(c.virtual ? 'v:' + c.name : c.id); if (!g) { const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id)); if (!c.virtual && asm.comps[i]?.hidden) continue; if (!docInfo(c.doc) || docInfo(c.doc).empty) continue; asmRefresh(); return; } g.matrix.copy(displayT(asm, c)); g.matrixWorldNeedsUpdate = true; }
+  drawMatePicks(); if (S.section || secGroup.children.length) applySection(); requestRender();
 }
 function asmUp(ev, d) {
   const D = S.asmDrag; S.asmDrag = null;
@@ -9144,6 +9178,16 @@ window.addEventListener('keydown', (e) => {
 // ============================================================================================
 $('loading').remove();
 resize(); renderTools();
+// The materials a hover, a pick or a highlight first shows are compiled while nothing happens, a few seconds after the
+// start, instead of on the first hover in an assembly (it waited seconds for its shaders, E31, K18).
+setTimeout(() => (window.requestIdleCallback || ((f) => setTimeout(f, 0)))(() => {
+  try { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1e-3, 0, 0, 0, 1e-3, 0], 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 0, 0, 1], 3)); g.setAttribute('color', new THREE.Float32BufferAttribute([1, 1, 1, 1, 1, 1, 1, 1, 1], 3));
+    const tmp = new THREE.Group(); tmp.visible = true;
+    for (const side of [THREE.FrontSide, THREE.DoubleSide]) for (const vc of [false, true]) { tmp.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.4, side, vertexColors: vc }))); tmp.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ side, vertexColors: vc, polygonOffset: true }))); }
+    for (const dashed of [false, true]) tmp.add(segLines([0, 0, 0, 1e-3, 0, 0], lineMat(0xffffff, 2, { dashed })));
+    scene.add(tmp); const done = () => { scene.remove(tmp); };
+    if (renderer.compileAsync && renderer.extensions.has('KHR_parallel_shader_compile')) renderer.compileAsync(scene, camera).then(done, done); else { renderer.compile(scene, camera); done(); } } catch (e) { console.warn('warm-up', e); }
+}, { timeout: 3000 }), 1500);
 CLOUD.writer = Math.random().toString(36).slice(2);
 $('bProjects').onclick = () => openProjects();
 $('projModal').addEventListener('pointerdown', (e) => { if (e.target.id === 'projModal') $('projModal').hidden = true; });
