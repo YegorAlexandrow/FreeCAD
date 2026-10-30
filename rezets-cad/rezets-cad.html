@@ -4934,50 +4934,53 @@ function profileCorner(body, edge, feats) {
   if (sides.some((x) => !x) || !sides.some((x) => x.arc)) return null;
   return { P, sides, O, X, Y };
 }
-// The fillet where a line from P along d (room long) meets a circle (centre C, radius R) leaving P one way round
-// (ccw): its centre and where it touches the two, in the corner the two make as they leave P. Null when it does not fit.
-function filletLC(P, d, room, C, R, ccw, r) {
-  const rx = (P.x - C.x) / R, ry = (P.y - C.y) / R; const tA = ccw ? { x: -ry, y: rx } : { x: ry, y: -rx }; const nrm = { x: -d.y, y: d.x };
-  const side = Math.sign(tA.x * nrm.x + tA.y * nrm.y) || 1; const into = Math.hypot(P.x + d.x * 1e-3 - C.x, P.y + d.y * 1e-3 - C.y) < R; const R2 = R + (into ? -r : r); if (R2 <= 1e-9) return null;
-  const q = { x: P.x + nrm.x * side * r, y: P.y + nrm.y * side * r }; const fx = q.x - C.x, fy = q.y - C.y; const B = fx * d.x + fy * d.y, Cq = fx * fx + fy * fy - R2 * R2; const D = B * B - Cq; if (D < 0) return null;
-  for (const t of [-B - Math.sqrt(D), -B + Math.sqrt(D)].sort((x, y) => x - y)) { if (t <= 1e-6 || t >= room - 1e-6) continue; const O = { x: q.x + d.x * t, y: q.y + d.y * t }; const T1 = { x: P.x + d.x * t, y: P.y + d.y * t };
-    const dc = Math.hypot(O.x - C.x, O.y - C.y); const T2 = { x: C.x + (O.x - C.x) / dc * R, y: C.y + (O.y - C.y) / dc * R };
-    // Where it touches the circle is ahead of P the way the face leaves it, within half a turn.
-    const a0 = Math.atan2(P.y - C.y, P.x - C.x), a1 = Math.atan2(T2.y - C.y, T2.x - C.x); let sw = (a1 - a0) * (ccw ? 1 : -1); while (sw < 0) sw += 2 * Math.PI; if (sw > Math.PI) continue; return { C: O, T1, T2, sweep: sw }; }
-  return null;
-}
+// The fillet of a corner of the outline, whatever its two sides are (a line, an arc, either way round, the corner
+// inside or outside): the centre is the point r from both sides in the corner they make as they leave it, found by
+// Newton's method on the two signed distances; it touches each side at the point of the side nearest to it. One way
+// for every corner, instead of a formula per pair of curves, each with corners it did not see (ARM1: a line into an
+// arc, then the arc of the lever into the boss).
 function profileEdgeTool(body, edge, kind, size, pc) {
-  const { P, sides, O, X, Y } = pc; const Z = X.clone().cross(Y).normalize();
+  const { P, sides, O, X, Y } = pc; const Z = X.clone().cross(Y).normalize(); if (kind !== 'fillet') return null;
+  const dep = (s) => { if (s.line) return s.d; const rx = (P.x - s.C.x) / s.R, ry = (P.y - s.C.y) / s.R; return s.ccw ? { x: -ry, y: rx } : { x: ry, y: -rx }; };
+  const D = sides.map(dep);
+  // Each side's distance, positive on the side the other one goes (the corner); an arc's k says which side that is.
+  const dist = sides.map((s, i) => { const o = D[1 - i]; const q = { x: P.x + o.x * 1e-2, y: P.y + o.y * 1e-2 };
+    if (s.line) { const n = { x: -s.d.y, y: s.d.x }; const k = Math.sign((q.x - P.x) * n.x + (q.y - P.y) * n.y) || 1; return (v) => ((v.x - P.x) * n.x + (v.y - P.y) * n.y) * k; }
+    s.k = Math.hypot(q.x - s.C.x, q.y - s.C.y) > s.R ? 1 : -1; return (v) => (Math.hypot(v.x - s.C.x, v.y - s.C.y) - s.R) * s.k; });
+  const touch = (s, v) => (s.line ? { x: P.x + s.d.x * ((v.x - P.x) * s.d.x + (v.y - P.y) * s.d.y), y: P.y + s.d.y * ((v.x - P.x) * s.d.x + (v.y - P.y) * s.d.y) } : (() => { const l = Math.hypot(v.x - s.C.x, v.y - s.C.y); return { x: s.C.x + (v.x - s.C.x) / l * s.R, y: s.C.y + (v.y - s.C.y) / l * s.R }; })());
+  // How far along the side from P a point of it is: a length on a line, a turn (radians) on an arc.
+  const ahead = (s, T, i) => { if (s.line) return (T.x - P.x) * s.d.x + (T.y - P.y) * s.d.y; const a0 = Math.atan2(P.y - s.C.y, P.x - s.C.x), a1 = Math.atan2(T.y - s.C.y, T.x - s.C.x); let sw = (a1 - a0) * (s.ccw ? 1 : -1); while (sw < 0) sw += 2 * Math.PI; while (sw >= 2 * Math.PI) sw -= 2 * Math.PI; void i; return sw; };
+  const fits = (s, T, i) => { const a = ahead(s, T, i); return s.line ? a > 1e-6 && a < s.room - 1e-6 : a > 1e-6 && a < Math.PI; };
+  const cosF = Math.max(-1, Math.min(1, D[0].x * D[1].x + D[0].y * D[1].y)); const phi = Math.acos(cosF);
+  const solve = (r) => {
+    let bx = D[0].x + D[1].x, by = D[0].y + D[1].y; let bl = Math.hypot(bx, by); if (bl < 1e-6) { bx = -D[0].y; by = D[0].x; bl = 1; }
+    const v = { x: P.x + bx / bl * r / Math.max(0.05, Math.sin(phi / 2)), y: P.y + by / bl * r / Math.max(0.05, Math.sin(phi / 2)) };
+    const F = (q) => [dist[0](q) - r, dist[1](q) - r]; const h = 1e-6 * (1 + r);
+    for (let it = 0; it < 60; it++) { const f = F(v); if (Math.hypot(f[0], f[1]) < 1e-10 * (1 + r)) break;
+      const fx = F({ x: v.x + h, y: v.y }), fy = F({ x: v.x, y: v.y + h }); const a = (fx[0] - f[0]) / h, b = (fy[0] - f[0]) / h, c = (fx[1] - f[1]) / h, d = (fy[1] - f[1]) / h; const det = a * d - b * c; if (Math.abs(det) < 1e-14) return null;
+      let dx = (d * f[0] - b * f[1]) / det, dy = (-c * f[0] + a * f[1]) / det; const st = Math.hypot(dx, dy); if (st > r) { dx *= r / st; dy *= r / st; } v.x -= dx; v.y -= dy; }
+    const f = F(v); if (Math.hypot(f[0], f[1]) > 1e-7 * (1 + r)) return null;
+    const T = sides.map((s) => touch(s, v)); if (!sides.every((s, i) => fits(s, T[i], i))) return null; return { c: v, T };
+  };
+  const sol = solve(size);
+  if (!sol) { let lo = 0, hi = size; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (solve(m)) lo = m; else hi = m; } throw new Error(`Радиус ${fmt(size)} не помещается в этом углу${lo > 1e-3 ? `, наибольший около ${fmt(lo * 0.98, 2)} мм` : ''}`); }
   const arcPts = (c, R, a0, a1, n = 24) => Array.from({ length: n + 1 }, (_, i) => { const t = a0 + (a1 - a0) * i / n; return { x: c.x + R * Math.cos(t), y: c.y + R * Math.sin(t) }; });
-  const short = (a0, a1) => { let s = a1 - a0; while (s > Math.PI) s -= 2 * Math.PI; while (s < -Math.PI) s += 2 * Math.PI; return a0 + s; };
-  const word = kind === 'fillet' ? 'Радиус' : 'Размер фаски'; let poly, C = null, core = null;
-  const lines = sides.filter((x) => x.line), arcs = sides.filter((x) => x.arc);
-  if (lines.length === 2) {
-    const [u1, u2] = lines.map((x) => x.d); const phi = Math.acos(Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y))); if (phi < 1e-3 || phi > Math.PI - 1e-3) return null;
-    const dist = kind === 'fillet' ? size / Math.tan(phi / 2) : size; const room = Math.min(lines[0].room, lines[1].room);
-    if (dist >= room - 1e-6) throw new Error(`${word} ${fmt(size)} не помещается: грань у угла около ${fmt(room, 1)} мм, наибольший ${kind === 'fillet' ? 'радиус' : 'размер'} около ${fmt((kind === 'fillet' ? room * Math.tan(phi / 2) : room) * 0.98, 2)} мм`);
-    const T1 = { x: P.x + u1.x * dist, y: P.y + u1.y * dist }, T2 = { x: P.x + u2.x * dist, y: P.y + u2.y * dist };
-    if (kind === 'fillet') { const bl = Math.hypot(u1.x + u2.x, u1.y + u2.y); C = { x: P.x + (u1.x + u2.x) / bl * size / Math.sin(phi / 2), y: P.y + (u1.y + u2.y) / bl * size / Math.sin(phi / 2) };
-      const a0 = Math.atan2(T1.y - C.y, T1.x - C.x); poly = [P, ...arcPts(C, size, a0, short(a0, Math.atan2(T2.y - C.y, T2.x - C.x)))]; }
-    else poly = [P, T1, T2];
-  } else if (lines.length === 1 && arcs.length === 1 && kind === 'fillet') {
-    const Ln = lines[0], A = arcs[0]; const f = filletLC(P, Ln.d, Ln.room, A.C, A.R, A.ccw, size);
-    if (!f) { let lo = 0, hi = size; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (filletLC(P, Ln.d, Ln.room, A.C, A.R, A.ccw, m)) lo = m; else hi = m; } throw new Error(`Радиус ${fmt(size)} не помещается между гранями${lo > 1e-3 ? `, наибольший около ${fmt(lo * 0.98, 2)} мм` : ''}`); }
-    C = f.C; const a0 = Math.atan2(f.T1.y - C.y, f.T1.x - C.x); const fil = arcPts(C, size, a0, short(a0, Math.atan2(f.T2.y - C.y, f.T2.x - C.x)));
-    // Back along the arc to the corner, a little past the face into the air: the face on the body is made of chords of
-    // the arc, and a piece bounded by the true arc left thin teeth between the chords (ARM1, the end of the R30 fillet).
-    const b0 = Math.atan2(f.T2.y - A.C.y, f.T2.x - A.C.x); const bm = b0 - f.sweep / 2 * (A.ccw ? 1 : -1); const pm = { x: A.C.x + A.R * Math.cos(bm), y: A.C.y + A.R * Math.sin(bm) };
-    const out = (pm.x - A.C.x) * (pm.x - C.x) + (pm.y - A.C.y) * (pm.y - C.y) > 0 ? 1 : -1; const dl = Math.max(0.05, 2.5 * A.R * (1 - Math.cos(Math.PI / 32)));
-    const back = arcPts(A.C, A.R + out * dl, b0, b0 - f.sweep * (A.ccw ? 1 : -1));
-    poly = [P, ...fil, ...back.slice(1, -1)]; core = [P, ...fil];
-  } else return null;
-  let ar = 0; for (let i = 0; i < poly.length; i++) { const p = poly[i], q = poly[(i + 1) % poly.length]; ar += p.x * q.y - q.x * p.y; } if (Math.abs(ar) < 1e-12) return null; if (ar < 0) poly.reverse();
+  // Along a side from P to where the fillet touches it; an arc a little past its face away from the corner: the face
+  // on the body is made of chords, and a piece bounded by the true arc left teeth between them.
+  const run = (s, T) => { if (s.line) return [T]; const a0 = Math.atan2(P.y - s.C.y, P.x - s.C.x); const sw = ahead(s, T) * (s.ccw ? 1 : -1); const m = Math.max(0.05, 2.5 * s.R * (1 - Math.cos(Math.PI / 32)));
+    return [...arcPts(s.C, s.R - s.k * m, a0, a0 + sw, Math.max(4, Math.ceil(Math.abs(sw) / 0.05))), T]; };
+  const { c, T } = sol; const f0 = Math.atan2(T[0].y - c.y, T[0].x - c.x); let f1 = Math.atan2(T[1].y - c.y, T[1].x - c.x); let sw = f1 - f0; while (sw > Math.PI) sw -= 2 * Math.PI; while (sw < -Math.PI) sw += 2 * Math.PI;
+  const fil = arcPts(c, size, f0, f0 + sw, 32);
+  let poly = [P, ...run(sides[0], T[0]), ...fil.slice(1, -1), ...run(sides[1], T[1]).reverse()];
+  const core = [P, T[0], fil[16], T[1]];
+  let ar = 0; for (let i = 0; i < poly.length; i++) { const p = poly[i], q = poly[(i + 1) % poly.length]; ar += p.x * q.y - q.x * p.y; } if (Math.abs(ar) < 1e-12) return null; if (ar < 0) poly = poly.reverse();
   const a = V3(edge.a), b = V3(edge.b); const za = a.clone().sub(O).dot(Z), zb = b.clone().sub(O).dot(Z); const W = (p, z) => O.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y).addScaledVector(Z, z);
   // Material or air is told from the piece itself, not the margin past the face.
-  const cp = core || poly; let cx = 0, cy = 0; for (const p of cp) { cx += p.x; cy += p.y; } const conv = isInside(body, W({ x: cx / cp.length, y: cy / cp.length }, (za + zb) / 2));
+  // Right at the corner, inside it: the piece's own middle can be past the faces for a big radius.
+  const bx = D[0].x + D[1].x, by = D[0].y + D[1].y, bl = Math.hypot(bx, by) || 1; const conv = isInside(body, W({ x: P.x + bx / bl * 0.02, y: P.y + by / bl * 0.02 }, (za + zb) / 2)); void core;
   const ext = conv ? 0.01 : 0; const g = extrudeGeometry([{ pts: poly.map((p) => [p.x, p.y]), holes: [] }], Math.min(za, zb) - ext, Math.max(za, zb) + ext);
   g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(O)); g.computeVertexNormals();
-  return { g, convex: conv, cyl: C ? { p: W(C, 0), dir: Z.clone(), r: size } : null };
+  return { g, convex: conv, cyl: { p: W(c, 0), dir: Z.clone(), r: size } };
 }
 function edgeTool(body, edge, kind, size, feats) {
   const eps = Math.min(0.05, size / 20);
