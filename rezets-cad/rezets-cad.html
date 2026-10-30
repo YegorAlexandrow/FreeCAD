@@ -3254,6 +3254,12 @@ canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length
 function partClick(ev) {
   // The second click of a double click is not a request for the face behind (a double click opens the feature).
   { const now = performance.now(); if (now - pickCycle.t > 450) pickCycle.n = cycleHere(ev) ? pickCycle.n + 1 : 0; pickCycle.t = now; pickCycle.x = ev.clientX; pickCycle.y = ev.clientY; pickCycle.cam = viewKey(); }
+  // A revolve's axis is picked in the view too (P0-17): a line of its sketch near the click, or a sketch axis.
+  if (S.pm?.kind === 'feature' && S.pm.feature?.type === 'revolve') { const f = S.pm.feature; const sf = featById(f.sketch); if (sf?.sk) { const r = canvas.getBoundingClientRect(); const mx = ev.clientX - r.left, my = ev.clientY - r.top; let best = null;
+      const segD = (A, B) => { const a = toScreen(A), b = toScreen(B); return distSeg(mx, my, a, b); };
+      for (const e of Object.values(sf.sk.ents)) { if (e.t !== 'line') continue; const a = gp(sf.sk, e.p1), b = gp(sf.sk, e.p2); const d = segD(toWorld(sf.plane, a.x, a.y), toWorld(sf.plane, b.x, b.y)); if (d < 8 && (!best || d < best.d)) best = { d, id: e.id }; }
+      for (const [id, dx, dy] of [['H', 1, 0], ['V', 0, 1]]) { const d = segD(toWorld(sf.plane, -1e3 * dx, -1e3 * dy), toWorld(sf.plane, 1e3 * dx, 1e3 * dy)); if (d < 6 && (!best || d < best.d - 2)) best = { d, id }; }
+      if (best) { f.axis = best.id; renderSide(); schedulePreview(); return; } } }
   // In a loft or sweep, sketches are picked in the view too: a loft takes or drops a section, a sweep takes a closed
   // sketch as its profile and an open one as its path.
   if (S.pm?.kind === 'feature' && ['loft', 'sweep'].includes(S.pm.feature?.type)) { const sf = sketchAt(ev, S.pm.feature.type === 'sweep'); if (sf) { const f = S.pm.feature;
@@ -8488,7 +8494,7 @@ function renderPM0() {
       return [e.id, `${e.constr ? 'Осевая' : 'Линия'} ${fmt(Math.hypot(b.x - a.x, b.y - a.y), 1)} мм: (${fmt(a.x, 1)}; ${fmt(a.y, 1)}) → (${fmt(b.x, 1)}; ${fmt(b.y, 1)})`]; })];
     const selAx = h('select', { id: 'pmAxis' }, axes.map(([v, l]) => h('option', { value: v, selected: v === f.axis }, l)));
     selAx.onchange = () => { f.axis = selAx.value; schedulePreview(); };
-    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Ось вращения'), h('label', { class: 'field' }, h('span', {}, 'Ось'), selAx)),
+    body.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Ось вращения'), h('label', { class: 'field' }, h('span', {}, 'Ось'), selAx), h('div', { class: 'note' }, 'Или щёлкните линию эскиза в окне')),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Угол'), numField('Угол', 'pmAngle', f.angle, (v) => { f.angle = Math.min(360, v); schedulePreview(); }, '°'),
         f.angle < 360 ? h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.mid, onchange: (e) => { if (e.target.checked) f.mid = true; else delete f.mid; schedulePreview(); } }), 'Симметрично от плоскости эскиза') : null,
         h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: f.dir === -1, onchange: (e) => { f.dir = e.target.checked ? -1 : 1; schedulePreview(); } }), 'Обратное направление')));
