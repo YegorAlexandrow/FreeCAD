@@ -3242,7 +3242,10 @@ function partClick(ev) {
   if (S.pm?.pattern) { patternPick(ev, true); return; }
   if (S.pm?.shell) { shellClick(ev); return; }
   if (S.pm?.pickFrom) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.fromTarget = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.fromTarget = planeByKey(p.plane); else return; S.pm.pickFrom = false; showFaceHover(null); renderSide(); schedulePreview(); return; }
-  if (S.pm?.pickTarget) { const p = partPickAt(ev); const f = S.pm.feature; if (p?.face) f.target = { ...planeFromFace(p.face, p.point), label: 'Грань' }; else if (p?.plane) f.target = planeByKey(p.plane); else return; S.pm.pickTarget = false; renderSide(); schedulePreview(); return; }
+  if (S.pm?.pickTarget) { const p = partPickAt(ev); const f = S.pm.feature; const T = p?.face ? { ...planeFromFace(p.face, p.point), label: 'Грань' } : p?.plane ? planeByKey(p.plane) : null; if (!T) return;
+    // A face along the extrusion is never reached (H15): refused at the pick, not later as an error of the operation.
+    const sf = featById(f.sketch); if (sf?.plane && T.n && Math.abs(V3(T.n).normalize().dot(V3(sf.plane.n))) < 1e-6) { toast('Эта грань идёт вдоль вытягивания, до неё не дойти: выберите грань поперёк', 'warn'); return; }
+    f.target = T; S.pm.pickTarget = false; renderSide(); schedulePreview(); return; }
   if (S.pm?.edgePick) { const e = pickEdge(ev, S.pm.topo); if (!e) return; const list = S.pm.feature.edges; const i = list.findIndex((x) => sameEdge(x, e)); if (i >= 0) list.splice(i, 1); else list.push(e); renderSide(); drawEdgeSelection(); schedulePreview(); return; }
   // A second click on something already picked takes it out again; a click on empty space starts over.
   if (S.measure) { const x = measurePick(ev); const M = S.measure; if (!x) { if (M.picks.length) { M.picks = []; M.result = null; drawMeasure(); renderSide(); } return; }
