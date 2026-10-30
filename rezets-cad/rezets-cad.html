@@ -5025,16 +5025,32 @@ function edgeTool(body, edge, kind, size, feats) {
   }
   // Circular edge between a plane and a cylinder: work in the (radial, axial) half-plane.
   const c = V3(edge.c), n = V3(edge.n).normalize(); let rho = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize();
-  const P = c.clone().addScaledVector(rho, edge.r); const q = [];
-  for (const sr of [1, -1]) for (const sn of [1, -1]) q.push({ sr, sn, inside: isInside(body, P.clone().addScaledVector(rho, sr * eps).addScaledVector(n, sn * eps)) });
+  // Where the rim is: a rim that runs only part way round is looked at where it runs, not at one fixed side of it.
+  const quad = (r) => { const P = c.clone().addScaledVector(r, edge.r); const q = []; for (const sr of [1, -1]) for (const sn of [1, -1]) q.push({ sr, sn, inside: isInside(body, P.clone().addScaledVector(r, sr * eps).addScaledVector(n, sn * eps)) }); return q; };
+  let q = quad(rho); { const w = new THREE.Vector3().crossVectors(n, rho); const okq = (qq) => { const k = qq.filter((x) => x.inside).length; return k === 1 || k === 3; };
+    for (let i = 0; i < 72 && !okq(q); i++) { const th = (i + 0.5) / 72 * 2 * Math.PI; const r = rho.clone().multiplyScalar(Math.cos(th)).addScaledVector(w, Math.sin(th)); const qq = quad(r); if (okq(qq)) { rho = r; q = qq; } } }
   const ins = q.filter((x) => x.inside); let pick, convex;
   if (ins.length === 1) { pick = ins[0]; convex = true; } else if (ins.length === 3) { pick = q.find((x) => !x.inside); convex = false; } else throw new Error('Ребро не найдено на текущем теле');
   const d1 = [pick.sr, 0], d2 = [0, pick.sn];
   const n1 = convex ? [0, -pick.sn] : [0, pick.sn], n2 = convex ? [-pick.sr, 0] : [pick.sr, 0];
   const sec = edgeSection(kind, size, [edge.r, 0], d1, d2, n1, n2, convex);
   if (sec.some((p) => p[0] < 1e-6)) throw new Error(`${kind === 'fillet' ? 'Радиус скругления' : 'Размер фаски'} ${fmt(size)} не меньше радиуса круглой кромки ${fmt(edge.r)} мм`);
-  const g = revolveGeometry([{ pts: sec, holes: [] }], [0, 0], [0, 1], 360);
-  g.applyMatrix4(new THREE.Matrix4().makeBasis(rho, n, new THREE.Vector3().crossVectors(rho, n)).setPosition(c)); g.computeVertexNormals(); return { g, convex };
+  // A rim that runs only part way round (an arc of the outline, the top of a plate along it) is rounded only where it
+  // is: taken for a whole circle, the fillet went round the full ring through material that has no such edge.
+  const w0 = new THREE.Vector3().crossVectors(n, rho); const pat = (th) => { const rr = rho.clone().multiplyScalar(Math.cos(th)).addScaledVector(w0, Math.sin(th)); const Q = c.clone().addScaledVector(rr, edge.r);
+    const ins = [1, -1].flatMap((sr) => [1, -1].map((sn) => isInside(body, Q.clone().addScaledVector(rr, sr * eps).addScaledVector(n, sn * eps)))); return ins.map((x) => (x ? 1 : 0)).join(''); };
+  const NS = 360; const want = [1, -1].flatMap((sr) => [1, -1].map((sn) => (q.find((x) => x.sr === sr && x.sn === sn).inside ? 1 : 0))).join('');
+  const on = Array.from({ length: NS }, (_, i) => pat(i / NS * 2 * Math.PI) === want);
+  const make = (th0, sweep) => { const r0 = rho.clone().multiplyScalar(Math.cos(th0)).addScaledVector(w0, Math.sin(th0)); const g = revolveGeometry([{ pts: sec, holes: [] }], [0, 0], [0, 1], sweep * 180 / Math.PI);
+    g.applyMatrix4(new THREE.Matrix4().makeBasis(r0, n, new THREE.Vector3().crossVectors(r0, n)).setPosition(c)); g.computeVertexNormals(); return g; };
+  if (on.every(Boolean) || !on.some(Boolean)) return { g: make(0, 2 * Math.PI), convex };
+  // Runs of the rim; each end found between its last sample on the rim and the first off it.
+  const start = on.findIndex((x, i) => x && !on[(i + NS - 1) % NS]); let g = null; const step = 2 * Math.PI / NS;
+  const edgeAt = (inA, outA) => { let a = inA, b = outA; for (let it = 0; it < 24; it++) { const m = (a + b) / 2; if (pat(m) === want) a = m; else b = m; } return a; };
+  for (let k = 0; k < NS; k++) { const i = (start + k) % NS; if (!on[i] || on[(i + NS - 1) % NS]) continue; let j = i; while (on[(j + 1) % NS] && (j + 1) % NS !== i) j = (j + 1) % NS;
+    const th0 = edgeAt(i * step, (i - 1) * step), th1 = edgeAt(i * step + ((j - i + NS) % NS) * step, i * step + ((j - i + NS) % NS + 1) * step);
+    const piece = make(th0, th1 - th0); g = g ? boolean(g, piece, ADDITION) : piece; }
+  return { g, convex };
 }
 // The outline of the planar face of the body through a point: its loops in the face's own 2D axes (X, Y around
 // the point), the largest first.
@@ -5160,8 +5176,12 @@ function pickEdge(ev, topo, withDist) {
   }
   if (best) delete best.wq; return withDist ? best : best?.edge || null;
 }
-function edgeSegs(e) {
+function edgeSegs(e, topo) {
   if (e.t === 'line') return [[V3(e.a), V3(e.b)]];
+  // A rim drawn where it is on the body: one running part way round is not shown as a whole ring.
+  if (topo?.display) { const c = V3(e.c), n = V3(e.n).normalize(); const on = (x, y, z) => { const w = new THREE.Vector3(x, y, z).sub(c); return Math.abs(w.dot(n)) < 1e-2 && Math.abs(w.length() - e.r) < 1e-2; }; const d = topo.display; const out = [];
+    for (let i = 0; i < d.length; i += 6) if (on(d[i], d[i + 1], d[i + 2]) && on(d[i + 3], d[i + 4], d[i + 5])) out.push([new THREE.Vector3(d[i], d[i + 1], d[i + 2]), new THREE.Vector3(d[i + 3], d[i + 4], d[i + 5])]);
+    if (out.length) return out; }
   const c = V3(e.c), n = V3(e.n); const u = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const w = new THREE.Vector3().crossVectors(n, u); const out = [];
   for (let i = 0; i < 96; i++) { const p = (k) => c.clone().addScaledVector(u, e.r * Math.cos(k / 96 * 2 * Math.PI)).addScaledVector(w, e.r * Math.sin(k / 96 * 2 * Math.PI)); out.push([p(i), p(i + 1)]); }
   return out;
@@ -5169,13 +5189,13 @@ function edgeSegs(e) {
 // Edges selected on the part outside any command, shown in the selection colour.
 const selEdgeGroup = freeOnClear(new THREE.Group()); scene.add(selEdgeGroup);
 function drawSelEdges() {
-  selEdgeGroup.clear(); const list = S.mode === 'part' && !S.pm ? S.selEdges || [] : []; const segs = list.flatMap(edgeSegs);
+  selEdgeGroup.clear(); const list = S.mode === 'part' && !S.pm ? S.selEdges || [] : []; const topo = list.length && S.body ? edgeTopology(S.body, S.cyls) : null; const segs = list.flatMap((e) => edgeSegs(e, topo));
   if (segs.length) { const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(colors['geo-sel'], 3, { depthTest: false })); l.renderOrder = 20; selEdgeGroup.add(l); }
   requestRender();
 }
 function drawEdgeSelection() {
   groups.measure.clear(); const pm = S.pm; if (!pm?.edgePick) { requestRender(); return; }
-  const draw = (list, col) => { const segs = list.flatMap(edgeSegs); if (!segs.length) return; const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(col, 3, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l); };
+  const draw = (list, col) => { const segs = list.flatMap((e) => edgeSegs(e, pm.topo)); if (!segs.length) return; const l = segLines(segs.flatMap(([p, q]) => [...p.toArray(), ...q.toArray()]), lineMat(col, 3, { depthTest: false })); l.renderOrder = 20; groups.measure.add(l); };
   draw(pm.feature.edges, colors['geo-sel']); if (pm.hoverEdge && !pm.feature.edges.some((x) => sameEdge(x, pm.hoverEdge))) draw([pm.hoverEdge], colors['geo-hover']);
   requestRender();
 }
