@@ -8238,9 +8238,12 @@ function renderTree() {
   side.append(h('div', { class: 'sec-h' }, h('span', {}, S.doc.name), h('span', { class: 'meta' }, S.body ? 'тело' : 'нет тела')));
   const tree = h('div', { class: 'tree', role: 'tree' });
   const row = (key, icon, name, opts = {}) => {
-    const r = h('div', { class: 'row' + (S.selectedTree === key ? ' sel' : '') + (S.faceOrigin && key === 'feat:' + S.faceOrigin ? ' origin' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
+    const r = h('div', { class: 'row' + (S.selectedTree === key || (key.startsWith('feat:') && S.treeMulti?.has(key.slice(5))) ? ' sel' : '') + (S.faceOrigin && key === 'feat:' + S.faceOrigin ? ' origin' : '') + (opts.cls || ''), tabindex: '0', role: 'treeitem', title: opts.title || name },
       svg(icon), h('span', { class: 'nm' }, name), opts.meta ? h('span', { class: 'meta' }, opts.meta) : null);
-    r.addEventListener('click', () => {
+    r.addEventListener('click', (ev) => {
+      // Ctrl or Shift adds to the selection (P0-33): several features switched off, on or deleted at once.
+      if ((ev.ctrlKey || ev.metaKey || ev.shiftKey) && key.startsWith('feat:') && !S.pm) { const m = S.treeMulti || new Set(); if (S.selectedTree?.startsWith('feat:')) m.add(S.selectedTree.slice(5)); const id = key.slice(5); if (m.has(id)) m.delete(id); else m.add(id); S.treeMulti = m; S.selectedTree = key; renderTree(); return; }
+      S.treeMulti = null;
       if (S.pm?.pattern && S.pm.pickFor === 'feats' && key.startsWith('feat:')) { togglePatternSeed(key.slice(5)); return; }
       if (S.pickSketch && key.startsWith('feat:')) { const g = featById(key.slice(5)); const sf = g?.type === 'sketch' ? g : g?.sketch ? featById(g.sketch) : null; if (sf) { const q = S.pickSketch; S.pickSketch = null; S.selectedTree = 'feat:' + sf.id; cmdFeature(q.type, q.mode); return; } }
       S.selectedTree = key; S.faceOrigin = null; buildPlanes(); renderTree(); updateSketchVisuals(); showFeatureFaces(key.startsWith('feat:') ? key.slice(5) : null); opts.onSelect?.(); });
@@ -8248,7 +8251,7 @@ function renderTree() {
     // Pointing at a feature in the tree lights the faces it made, as SolidWorks does; leaving it shows the selection again.
     if (key.startsWith('feat:')) { r.addEventListener('mouseenter', () => { if (!S.pm && !S.editing) showFeatureFaces(key.slice(5)); }); r.addEventListener('mouseleave', () => { if (!S.pm && !S.editing) showFeatureFaces(S.selectedTree?.startsWith('feat:') ? S.selectedTree.slice(5) : null); }); }
     r.addEventListener('keydown', (e) => { if (e.key === 'Enter') opts.onOpen?.(); });
-    if (opts.menu) r.addEventListener('contextmenu', (e) => { e.preventDefault(); S.selectedTree = key; renderTree(); openMenu(e.clientX, e.clientY, opts.menu); });
+    if (opts.menu) r.addEventListener('contextmenu', (e) => { e.preventDefault(); const many = key.startsWith('feat:') && S.treeMulti?.size > 1 && S.treeMulti.has(key.slice(5)); if (!many) S.treeMulti = null; S.selectedTree = key; renderTree(); openMenu(e.clientX, e.clientY, many ? multiMenu() : opts.menu); });
     return r;
   };
   const nv = (S.doc.vars || []).length; const vr = row('vars', ICON.vars, 'Переменные', { meta: nv ? String(nv) : '', title: 'Переменные детали: размеры и параметры через выражения', onOpen: cmdVars }); vr.addEventListener('click', cmdVars); tree.append(vr);
@@ -8283,6 +8286,12 @@ function renderTree() {
 // with it when needed.
 // Suppressing a feature suppresses what is built on it (a sketch on its face, a fillet of its edges, a pattern of it),
 // as SolidWorks does; showing it again brings those back too.
+function multiMenu() {
+  const fs = () => S.doc.features.filter((f) => S.treeMulti?.has(f.id)); const n = S.treeMulti.size;
+  return [[`Погасить выбранные (${n})`, () => { for (const f of fs()) if (!f.suppressed) { f.suppressed = true; } S.treeMulti = null; rebuild(); pushUndo(); }],
+    [`Высветить выбранные (${n})`, () => { for (const f of fs()) { delete f.suppressed; delete f.suppressedBy; } S.treeMulti = null; rebuild(); pushUndo(); }],
+    [`Удалить выбранные (${n})`, () => { const list = fs().reverse(); S.treeMulti = null; for (const f of list) if (S.doc.features.includes(f)) deleteFeature(f); }]];
+}
 function toggleSuppress(f) {
   if (f.suppressed) { delete f.suppressed; for (const g of S.doc.features) if (g.suppressedBy === f.id) { delete g.suppressed; delete g.suppressedBy; } rebuild(); pushUndo(); return; }
   f.suppressed = true; const off = new Set([f.id]); let grew = true; const kids = [];
@@ -9434,6 +9443,7 @@ window.addEventListener('keydown', (e) => {
   if (S.mode === 'import') { if (k === 'f') return fitAnimated(); if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); return; }
   if (S.mode === 'drw') { if (k === 'd') { S.drwTool = S.drwTool ? null : { picks: [] }; renderTools(); setHint(S.drwTool ? drwToolHint() : ''); } return; }
   if ((e.key === 'Delete' || e.key === 'Backspace') && S.editing) { e.preventDefault(); deleteSelection(); return; }
+  if (e.key === 'Delete' && S.treeMulti?.size > 1 && !S.pm) { multiMenu()[2][1](); return; }
   if (e.key === 'Delete' && S.selectedTree?.startsWith('feat:') && !S.pm) { deleteFeature(featById(S.selectedTree.slice(5))); return; }
   if (k === 'f') return fitAnimated();
   // With something selected, letters add relations (shown on the relation bar); otherwise they pick tools.
