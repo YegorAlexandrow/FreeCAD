@@ -2105,7 +2105,7 @@ function computeBody(features) {
         const ent = docEntry(f.doc); if (!ent || ent.kind !== 'import') throw new Error('Импортированной модели (STEP или STL) больше нет в проекте');
         const g = cleanGeo(importGeometry(ent)); cyls = cyls.concat(importCyls(ent)); body = body ? boolean(body, g, ADDITION) : g; S.cache.set(k, { body, err: null, cyls }); continue;
       }
-      if (f.type === 'fillet' || f.type === 'chamfer') { cyls = [...cyls]; body = applyEdgeFeature(f, body, cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
+      if (f.type === 'fillet' || f.type === 'chamfer') { cyls = [...cyls]; body = applyEdgeFeature(f, body, cyls, features.slice(0, features.indexOf(f))); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'hole') { if (!body) throw new Error('Нечего сверлить: сначала создайте тело'); const own = []; for (const t of holeTool(f, body, own)) body = boolean(body, t, SUBTRACTION); cyls = cyls.concat(own); if (!body.getAttribute('position').count) throw new Error('Результат пустой'); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (f.type === 'shell') { const r = applyShell(f, body, cyls); checkSolid(r.body, 'shell'); body = r.body; cyls = cyls.concat(r.cyls); S.cache.set(k, { body, err: null, cyls }); continue; }
       if (PATTERN_TYPES.has(f.type)) { const r = applyPattern(f, body, cyls, features); body = r.body; cyls = cyls.concat(r.cyls); S.warns[f.id] = r.warn || null; S.cache.set(k, { body, err: null, cyls, warn: r.warn }); continue; }
@@ -2308,7 +2308,11 @@ function reportNewBreaks(feats) {
   for (const [id, e] of Object.entries(S.errors)) if (e && !now.has(id)) now.set(id, 'ошибка');
   const prev = brokenSeen.get(S.doc); brokenSeen.set(S.doc, now); if (!prev) return;
   const fresh = [...now].filter(([id, why]) => prev.get(id) !== why && feats.some((f) => f.id === id)); if (!fresh.length) return;
-  const first = featById(fresh[0][0]);
+  // Said once the action is over: a trial rebuild undone right away (a feature moved where it does not build) says nothing.
+  clearTimeout(reportNewBreaks.t); reportNewBreaks.t = setTimeout(() => { const cur = brokenSeen.get(S.doc); if (!cur) return; const still = fresh.filter(([id, why]) => cur.get(id) === why); if (still.length) sayBreaks(still); }, 0);
+}
+function sayBreaks(fresh) {
+  const name = (id) => featById(id)?.name || id; const first = featById(fresh[0][0]);
   toast(`После правки: ${fresh.slice(0, 3).map(([id, why]) => `${name(id)}: ${why}`).join('; ')}${fresh.length > 3 ? ` и ещё ${fresh.length - 3}` : ''}`, 'warn', first ? [{ label: 'Открыть', act: () => { if (first.type === 'sketch') editFeature(first); else { S.selectedTree = 'feat:' + first.id; renderTree(); } } }] : []);
 }
 function rebuild() {
@@ -3591,6 +3595,9 @@ function dimClick(m) {
   // line and an axis give their distance or angle, a circle and an axis the distance of its centre (S0-30).
   let p = null;
   if (picks.length < 2) p = pick(m, { tol: picks.length ? 6 : 9 });
+  // After a line, an axis it crosses is not taken (the click places the dimension, wherever the axis runs): only one
+  // along it, for their distance.
+  if (p && picks.length === 1 && !firstIsPoint && (p.key === 'e:H' || p.key === 'e:V')) { const e = ge(sk, first.slice(2)); if (e?.t === 'line') { const a = gp(sk, e.p1), b = gp(sk, e.p2); const along = p.key === 'e:H' ? Math.abs(b.y - a.y) : Math.abs(b.x - a.x); if (along > 1e-6 * Math.max(1, Math.hypot(b.x - a.x, b.y - a.y))) p = null; } }
   if (p && p.key.startsWith('r:')) p.key = materialize(sk, p.key);
   // The first click on an item that was already picked before the tool is taking it, not placing the dimension on it.
   const pre = S.dimPre; S.dimPre = false; if (pre && p && p.key === first && picks.length === 1) { refreshSketch(); setHint('Щёлкните, где поставить размер, или выберите второй объект'); return; }
@@ -4893,8 +4900,83 @@ function edgeSection(kind, size, C, d1, d2, n1, n2, convex) {
   const arc = arcPts2(O, size, Math.atan2(T1[1] - O[1], T1[0] - O[0]), Math.atan2(T2[1] - O[1], T2[0] - O[0]));
   return [out0, add(T1, n1, dl), ...arc, add(T2, n2, dl)];
 }
-function edgeTool(body, edge, kind, size) {
+// An edge along the extrusions that made it (a corner of the part's outline) is rounded in their plane: the arc tangent
+// to the two sides of the corner, swept through the edge's length, as SolidWorks does. Each side is the face as it is
+// on the body: a flat one is a line along it, a round one the arc of the sketch that made it. Worked out from the two
+// faces as if both were flat, a corner where a straight side runs into an arc took one facet of the arc for the face,
+// and R30 on ARM1's lever left a sliver and a spike.
+function profileCorner(body, edge, feats) {
+  const a = V3(edge.a), b = V3(edge.b); const u = b.clone().sub(a); const L = u.length(); if (L < 1e-9) return null; u.normalize();
+  let ns; try { ns = edgeFaceNormals(body, a, b); } catch { return null; } if (ns?.length !== 2) return null;
+  const mid = a.clone().lerp(b, 0.5); const eps = 0.02;
+  const along = (n) => { for (const s of [1, -1]) { const d = new THREE.Vector3().crossVectors(u, n).normalize().multiplyScalar(s); if (!isInside(body, mid.clone().addScaledVector(d, eps).addScaledVector(n, eps * 0.3)) && isInside(body, mid.clone().addScaledVector(d, eps).addScaledVector(n, -eps * 0.3))) return d; } return null; };
+  const ds = ns.map(along); if (ds.some((d) => !d)) return null;
+  // The plane of the outline: that of a sketch of an extrusion along the edge.
+  const sk0 = feats.map((g) => g.type === 'extrude' && !g.suppressed && feats.find((x) => x.id === g.sketch)).find((sf) => sf?.plane && Math.abs(Math.abs(V3(sf.plane.n).dot(u)) - 1) < 1e-6); if (!sk0) return null;
+  const pl = sk0.plane; const O = V3(pl.o), X = V3(pl.x), Y = V3(pl.y);
+  const to2 = (w) => { const m = w.clone().sub(O); return { x: m.dot(X), y: m.dot(Y) }; }; const dir2 = (v) => { const p = { x: v.dot(X), y: v.dot(Y) }; const l = Math.hypot(p.x, p.y) || 1; return { x: p.x / l, y: p.y / l }; };
+  const P = to2(a);
+  const sides = ns.map((n, i) => {
+    const d = dir2(ds[i]); const nn = dir2(n);
+    // A round face: an arc or circle through the corner in a sketch of an extrusion along the edge, its radius where
+    // the face's normal points, leaving the corner the way the face does.
+    for (const g of feats) { if (g.type !== 'extrude' || g.suppressed || g.draft > 0) continue; const sf = feats.find((x) => x.id === g.sketch); if (!sf?.sk || Math.abs(Math.abs(V3(sf.plane.n).dot(u)) - 1) > 1e-6) continue;
+      for (const e of Object.values(sf.sk.ents)) { if ((e.t !== 'arc' && e.t !== 'circle') || e.constr || e.ext) continue; const q = gp(sf.sk, e.c); const C = to2(toWorld(sf.plane, q.x, q.y)); const R = e.r;
+        if (Math.abs(Math.hypot(P.x - C.x, P.y - C.y) - R) > 1e-3) continue; const rad = { x: (P.x - C.x) / R, y: (P.y - C.y) / R }; if (Math.abs(rad.x * nn.x + rad.y * nn.y) < 0.99) continue;
+        const t = { x: -rad.y, y: rad.x }; const k = t.x * d.x + t.y * d.y; if (Math.abs(k) < 0.9) continue; return { arc: true, C, R, ccw: k > 0 }; } }
+    // A flat face: as far as it goes from the corner.
+    if (Math.abs(nn.x * d.x + nn.y * d.y) > 1e-3) return null;
+    let room = 0; const step = 0.25; for (let s2 = step; s2 < 2000; s2 += step) { const w = mid.clone().addScaledVector(ds[i], s2); if (!isInside(body, w.clone().addScaledVector(n, -0.01)) || isInside(body, w.clone().addScaledVector(n, 0.01))) break; room = s2; }
+    return { line: true, d, room };
+  });
+  // Between two flat faces the fillet from the two faces is right already (and kept, with its handling of faces that end
+  // short); a round side is what it got wrong.
+  if (sides.some((x) => !x) || !sides.some((x) => x.arc)) return null;
+  return { P, sides, O, X, Y };
+}
+// The fillet where a line from P along d (room long) meets a circle (centre C, radius R) leaving P one way round
+// (ccw): its centre and where it touches the two, in the corner the two make as they leave P. Null when it does not fit.
+function filletLC(P, d, room, C, R, ccw, r) {
+  const rx = (P.x - C.x) / R, ry = (P.y - C.y) / R; const tA = ccw ? { x: -ry, y: rx } : { x: ry, y: -rx }; const nrm = { x: -d.y, y: d.x };
+  const side = Math.sign(tA.x * nrm.x + tA.y * nrm.y) || 1; const into = Math.hypot(P.x + d.x * 1e-3 - C.x, P.y + d.y * 1e-3 - C.y) < R; const R2 = R + (into ? -r : r); if (R2 <= 1e-9) return null;
+  const q = { x: P.x + nrm.x * side * r, y: P.y + nrm.y * side * r }; const fx = q.x - C.x, fy = q.y - C.y; const B = fx * d.x + fy * d.y, Cq = fx * fx + fy * fy - R2 * R2; const D = B * B - Cq; if (D < 0) return null;
+  for (const t of [-B - Math.sqrt(D), -B + Math.sqrt(D)].sort((x, y) => x - y)) { if (t <= 1e-6 || t >= room - 1e-6) continue; const O = { x: q.x + d.x * t, y: q.y + d.y * t }; const T1 = { x: P.x + d.x * t, y: P.y + d.y * t };
+    const dc = Math.hypot(O.x - C.x, O.y - C.y); const T2 = { x: C.x + (O.x - C.x) / dc * R, y: C.y + (O.y - C.y) / dc * R };
+    // Where it touches the circle is ahead of P the way the face leaves it, within half a turn.
+    const a0 = Math.atan2(P.y - C.y, P.x - C.x), a1 = Math.atan2(T2.y - C.y, T2.x - C.x); let sw = (a1 - a0) * (ccw ? 1 : -1); while (sw < 0) sw += 2 * Math.PI; if (sw > Math.PI) continue; return { C: O, T1, T2, sweep: sw }; }
+  return null;
+}
+function profileEdgeTool(body, edge, kind, size, pc) {
+  const { P, sides, O, X, Y } = pc; const Z = X.clone().cross(Y).normalize();
+  const arcPts = (c, R, a0, a1, n = 24) => Array.from({ length: n + 1 }, (_, i) => { const t = a0 + (a1 - a0) * i / n; return { x: c.x + R * Math.cos(t), y: c.y + R * Math.sin(t) }; });
+  const short = (a0, a1) => { let s = a1 - a0; while (s > Math.PI) s -= 2 * Math.PI; while (s < -Math.PI) s += 2 * Math.PI; return a0 + s; };
+  const word = kind === 'fillet' ? 'Радиус' : 'Размер фаски'; let poly, C = null;
+  const lines = sides.filter((x) => x.line), arcs = sides.filter((x) => x.arc);
+  if (lines.length === 2) {
+    const [u1, u2] = lines.map((x) => x.d); const phi = Math.acos(Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y))); if (phi < 1e-3 || phi > Math.PI - 1e-3) return null;
+    const dist = kind === 'fillet' ? size / Math.tan(phi / 2) : size; const room = Math.min(lines[0].room, lines[1].room);
+    if (dist >= room - 1e-6) throw new Error(`${word} ${fmt(size)} не помещается: грань у угла около ${fmt(room, 1)} мм, наибольший ${kind === 'fillet' ? 'радиус' : 'размер'} около ${fmt((kind === 'fillet' ? room * Math.tan(phi / 2) : room) * 0.98, 2)} мм`);
+    const T1 = { x: P.x + u1.x * dist, y: P.y + u1.y * dist }, T2 = { x: P.x + u2.x * dist, y: P.y + u2.y * dist };
+    if (kind === 'fillet') { const bl = Math.hypot(u1.x + u2.x, u1.y + u2.y); C = { x: P.x + (u1.x + u2.x) / bl * size / Math.sin(phi / 2), y: P.y + (u1.y + u2.y) / bl * size / Math.sin(phi / 2) };
+      const a0 = Math.atan2(T1.y - C.y, T1.x - C.x); poly = [P, ...arcPts(C, size, a0, short(a0, Math.atan2(T2.y - C.y, T2.x - C.x)))]; }
+    else poly = [P, T1, T2];
+  } else if (lines.length === 1 && arcs.length === 1 && kind === 'fillet') {
+    const Ln = lines[0], A = arcs[0]; const f = filletLC(P, Ln.d, Ln.room, A.C, A.R, A.ccw, size);
+    if (!f) { let lo = 0, hi = size; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (filletLC(P, Ln.d, Ln.room, A.C, A.R, A.ccw, m)) lo = m; else hi = m; } throw new Error(`Радиус ${fmt(size)} не помещается между гранями${lo > 1e-3 ? `, наибольший около ${fmt(lo * 0.98, 2)} мм` : ''}`); }
+    C = f.C; const a0 = Math.atan2(f.T1.y - C.y, f.T1.x - C.x); const fil = arcPts(C, size, a0, short(a0, Math.atan2(f.T2.y - C.y, f.T2.x - C.x)));
+    const b0 = Math.atan2(f.T2.y - A.C.y, f.T2.x - A.C.x); const back = arcPts(A.C, A.R, b0, b0 - f.sweep * (A.ccw ? 1 : -1));
+    poly = [P, ...fil, ...back.slice(1, -1)];
+  } else return null;
+  let ar = 0; for (let i = 0; i < poly.length; i++) { const p = poly[i], q = poly[(i + 1) % poly.length]; ar += p.x * q.y - q.x * p.y; } if (Math.abs(ar) < 1e-12) return null; if (ar < 0) poly.reverse();
+  const a = V3(edge.a), b = V3(edge.b); const za = a.clone().sub(O).dot(Z), zb = b.clone().sub(O).dot(Z); const W = (p, z) => O.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y).addScaledVector(Z, z);
+  let cx = 0, cy = 0; for (const p of poly) { cx += p.x; cy += p.y; } const conv = isInside(body, W({ x: cx / poly.length, y: cy / poly.length }, (za + zb) / 2));
+  const ext = conv ? 0.01 : 0; const g = extrudeGeometry([{ pts: poly.map((p) => [p.x, p.y]), holes: [] }], Math.min(za, zb) - ext, Math.max(za, zb) + ext);
+  g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(O)); g.computeVertexNormals();
+  return { g, convex: conv, cyl: C ? { p: W(C, 0), dir: Z.clone(), r: size } : null };
+}
+function edgeTool(body, edge, kind, size, feats) {
   const eps = Math.min(0.05, size / 20);
+  if (edge.t === 'line' && feats) { const pc = profileCorner(body, edge, feats); if (pc) { const t = profileEdgeTool(body, edge, kind, size, pc); if (t) return t; } }
   if (edge.t === 'line') {
     const a = V3(edge.a), b = V3(edge.b); const u = b.clone().sub(a); const L = u.length(); u.normalize();
     const ns = edgeFaceNormals(body, a, b); if (ns.length !== 2) throw new Error('Ребро не найдено на текущем теле');
@@ -5024,12 +5106,12 @@ function followEdges(f, body, cyls) {
     return { ...rest, a: hit[0].toArray(), b: hit[1].toArray(), ...(hit === overlap ? { was: was || [e.a, e.b] } : {}) };
   });
 }
-function applyEdgeFeature(f, body, cyls) {
+function applyEdgeFeature(f, body, cyls, feats) {
   if (!body) throw new Error('Нет тела для обработки рёбер'); if (!f.edges?.length) throw new Error('Выберите рёбра');
   // An edge that cannot be found is skipped, not the whole feature: the others keep their chamfer,
   // and the feature says how many were lost.
   let out = body; let lost = 0;
-  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
+  for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : f.d, feats); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
   if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление сделано' : 'фаска сделана'}. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
   return out;
 }
@@ -9274,5 +9356,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, restoreFromTrash, openDocList, okPattern, cmdSkPattern, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, profileCorner, edgeFaceNormals, restoreFromTrash, openDocList, okPattern, cmdSkPattern, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
