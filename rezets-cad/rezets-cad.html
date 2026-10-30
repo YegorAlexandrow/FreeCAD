@@ -2701,6 +2701,8 @@ let anim = null;
 let fitOnly = null; const viewBack = [];
 // Shift+F fits the view to the selected face; Backspace goes back to the view before the last turn or fit (P0-22).
 function fitSelection() { const f = S.selFace; const pts = [];
+  if (S.mode === 'asm') { const g = S.asmSel && asmGroup.userData.byComp?.get(S.asmSel); if (g) { const bb = new THREE.Box3().setFromObject(g); if (!bb.isEmpty()) for (let k = 0; k < 8; k++) pts.push(new THREE.Vector3(k & 1 ? bb.max.x : bb.min.x, k & 2 ? bb.max.y : bb.min.y, k & 4 ? bb.max.z : bb.min.z)); }
+    if (!pts.length) { toast('Выберите компонент, чтобы вписать его', 'info'); return; } fitOnly = pts; fitAnimated(); return; }
   if (f?.tris?.length && S.body) { const pos = S.body.getAttribute('position'); for (const t of f.tris) for (let k = 0; k < 3; k++) pts.push(new THREE.Vector3().fromBufferAttribute(pos, 3 * t + k)); }
   else if (S.selEdges?.length && S.body) { const topo = edgeTopology(S.body, S.cyls); for (const e of S.selEdges) for (const [a, b] of edgeSegs(e, topo)) pts.push(a, b); }
   if (!pts.length) { toast('Выберите грань или ребро, чтобы вписать их', 'info'); return; } fitOnly = pts; fitAnimated(); }
@@ -7382,13 +7384,15 @@ function asmRefresh(reanalyze) {
   // A component carries the name of its document as it is now (renamed documents included).
   if (reanalyze) { for (const c of asm.comps) { const inf = docInfo(c.doc); if (inf?.ent && !c.userName) c.name = inf.ent.name + (c.name?.match(/<\d+>$/)?.[0] || ''); } if (checkMateRefs(asm)) asmSolve(asm); S.asmAnalysis = asmAnalyze(asm); }
   asmGroup.clear(); const byComp = new Map(); asmGroup.userData.byComp = byComp; asmGroup.userData.doc = asm;
+  // Instances of one part share a colour (K9): the default goes by part, in the order parts first appear.
+  const docOrder = [...new Set(asm.comps.map((x) => x.doc))];
   allComps(asm).forEach((c) => {
     const inf = docInfo(c.doc); if (!inf || inf.empty) return; const i = asm.comps.findIndex((x) => x.id === (c.seed || c.id));
     // Pattern copies keep showing when their seed is hidden (as in SolidWorks); a suppressed seed takes them along.
     if (!c.virtual && asm.comps[i]?.hidden) return;
     const g = new THREE.Group(); g.matrixAutoUpdate = false; g.matrix.copy(displayT(asm, c)); g.userData.comp = c.virtual ? null : c.id;
     const sel = S.asmSel === c.id || (S.pm?.kind === 'cpat' && S.pm.pat.seeds.includes(c.id)) || (S.pm?.kind === 'explode' && S.pm.cur.comps.includes(c.id)); const hov = S.asmHover?.comp === c.id && !S.pm;
-    const src = asm.comps[i] || c; const entD = docEntry(c.doc)?.data; const compCol = src.color || partColor(entD) || COMP_COLORS[i % COMP_COLORS.length];
+    const src = asm.comps[i] || c; const entD = docEntry(c.doc)?.data; const compCol = src.color || partColor(entD) || COMP_COLORS[docOrder.indexOf(c.doc) % COMP_COLORS.length];
     let geoC = shadedGeo(inf.geo); const vc = bodyColors(inf.geo, entD, inf.cyls, compCol); if (vc) { geoC = geoC.clone(); geoC.setAttribute('color', new THREE.BufferAttribute(vc, 3)); }
     const mat = new THREE.MeshStandardMaterial({ color: vc ? 0xffffff : new THREE.Color(compCol), vertexColors: !!vc, metalness: 0.08, roughness: 0.55, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, emissive: sel ? colors['geo-sel'] : hov ? colors['geo-hover'] : new THREE.Color(0), emissiveIntensity: sel ? 0.25 : hov ? 0.15 : 0 });
     // A component made see-through lets the parts inside it show (and stays pickable).
@@ -7668,7 +7672,10 @@ function renderAsmTree() {
     const r = h('div', { class: 'row' + (S.asmSel === c.id ? ' sel' : '') + (c.hidden || c.suppressed ? ' off' : '') + (c.suppressed ? ' supp' : '') + (lostDoc || noBody ? ' warn' : ''), tabindex: '0', role: 'treeitem', title: lostDoc ? 'Документа этой детали больше нет в проекте: компонент пустой. Удалите его или замените' : noBody ? 'У детали сейчас нет тела (ошибка в её дереве или всё откачено): компонент не виден. Откройте деталь' : (c.hidden ? 'Скрыт. ' : '') + (c.fixed ? 'Зафиксирован' : status ? 'Недоопределён: его можно двигать' : 'Полностью определён') },
       svg(ICON[KIND_ICON[ent?.kind || 'part']]), h('span', { class: 'meta' }, status), h('span', { class: 'nm' }, c.name), eye);
     r.onclick = () => { S.asmSel = c.id; S.mateSel = null; asmRefresh(); };
-    r.ondblclick = () => switchDoc(c.doc);
+    // Double-click brings the component into view and stays in the assembly (K61); the part opens from the menu.
+    r.ondblclick = () => { S.asmSel = c.id; asmRefresh(); fitSelection(); };
+    r.onmouseenter = () => { if (S.pm || S.asmHover?.comp === c.id) return; const was = S.asmHover?.comp; S.asmHover = { comp: c.id }; asmHoverTint([was, c.id]); };
+    r.onmouseleave = () => { if (S.asmHover?.comp !== c.id) return; S.asmHover = null; asmHoverTint([c.id]); };
     r.oncontextmenu = (e) => { e.preventDefault(); S.asmSel = c.id; asmRefresh(); openMenu(e.clientX, e.clientY, compMenu(asm, c, e)); };
     // A component opens like a folder onto its own mates, as in SolidWorks; a click there selects the mate.
     const own = asm.mates.filter((m) => m.a.comp === c.id || m.b.comp === c.id); S.compOpen ||= new Set(); const opened = S.compOpen.has(c.id) && own.length;
@@ -9474,7 +9481,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && S.mode === 'part' && !S.editing && !S.measure && !S.pickSketch && S.lastCmd) { e.preventDefault(); setHint(`Повтор: ${S.lastCmd.label}`); S.lastCmd.fn(); return; }
   if (e.key === 'Enter' && S.editing && S.tool === 'spline' && S.draw?.pts?.length >= 2) { finishSpline(false); return; }
   if (S.mode === 'asm') {
-    if (k === 'f') return fitAnimated();
+    if (k === 'f') return e.shiftKey ? fitSelection() : fitAnimated();
     if (k === 'i') return cmdInsert();
     // M again inside the mate panel used to close it and drop the picks (E18): the panel stays, Esc closes it.
     if (k === 'm') { if (S.pm?.kind === 'mate') { setHint('Сопряжение уже открыто: Enter применяет, Esc закрывает'); return; } if (!S.pm) cmdMate(); return; }
