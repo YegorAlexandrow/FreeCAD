@@ -1523,6 +1523,28 @@ function classifyChains(chains) {
       if (turn || last) { if (P[s0].distanceTo(P[i]) > 0.01) { lines.push([P[s0], P[i]]); verts.push(P[s0], P[i]); } s0 = i; }
     }
   }
+  // A curve's chain breaks where it bends faster (the ends of a spline): the short straight pieces that carry it on
+  // smoothly are joined back to it, so the whole curved edge is one edge (P0-43).
+  const near = (a, b) => a.distanceToSquared(b) < 1e-10; const used = new Set();
+  for (const C of curves) for (let grew = true; grew;) { grew = false;
+    for (const atEnd of [true, false]) { const E = atEnd ? C[C.length - 1] : C[0], Q = atEnd ? C[C.length - 2] : C[1]; if (near(C[0], C[C.length - 1])) break; const d = E.clone().sub(Q).normalize();
+      // A mesh can leave out a segment of the edge there (a T-junction): a gap of a few segments in the same direction is crossed.
+      const gap = 3 * E.distanceTo(Q) + 1e-5; const ahead = (v) => { const w = v.clone().sub(E); const l = w.length(); return l < 1e-5 || (l < gap && w.dot(d) > l * Math.cos(0.45)); };
+      const at = lines.map((L, i) => [L, i]).filter(([L, i]) => !used.has(i) && (ahead(L[0]) || ahead(L[1]))).map(([L, i]) => { const k = L[0].distanceTo(E) <= L[1].distanceTo(E) ? 0 : 1; return { L, i, S: L[k], F: L[1 - k] }; }).sort((x, y) => x.S.distanceTo(E) - y.S.distanceTo(E));
+      if (!at.length || (at.length > 1 && at[1].S.distanceTo(E) < 1e-5)) continue;
+      const { i, S: S0, F } = at[0]; if (F.clone().sub(S0).normalize().dot(d) < Math.cos(0.45)) continue;
+      used.add(i); const add = near(S0, E) ? [F] : [S0, F]; if (atEnd) C.push(...add); else C.unshift(...add.reverse()); grew = true; } }
+  // Runs of short straight pieces turning smoothly the same way with no curve to join (a cylinder cut by an inclined
+  // face, broken by the mesh at every few degrees) make a curve of their own: five pieces or more, turning by more
+  // than 0.3 rad in all.
+  { const kk = (v) => `${Math.round(v.x * 1e5)},${Math.round(v.y * 1e5)},${Math.round(v.z * 1e5)}`; const at = new Map(); lines.forEach((L, i) => { for (const v of L) { const k = kk(v); if (!at.has(k)) at.set(k, []); at.get(k).push(i); } });
+    const curveEnd = new Set(curves.flatMap((C) => [kk(C[0]), kk(C[C.length - 1])]));
+    for (let i0 = 0; i0 < lines.length; i0++) { if (used.has(i0)) continue; const run = [i0]; const pts = [lines[i0][0], lines[i0][1]]; const taken = new Set([i0]);
+      for (const atEnd of [true, false]) for (;;) { const E = atEnd ? pts[pts.length - 1] : pts[0], Q = atEnd ? pts[pts.length - 2] : pts[1]; const k = kk(E); if (curveEnd.has(k)) break; const nb = (at.get(k) || []).filter((j) => !taken.has(j) && !used.has(j)); if (nb.length !== 1 || (at.get(k) || []).length !== 2) break;
+        const L = lines[nb[0]]; const F = kk(L[0]) === k ? L[1] : L[0]; if (F.clone().sub(E).normalize().dot(E.clone().sub(Q).normalize()) < Math.cos(0.45)) break; taken.add(nb[0]); run.push(nb[0]); if (atEnd) pts.push(F); else pts.unshift(F); }
+      if (run.length < 5) continue; let turn = 0; for (let k = 1; k + 1 < pts.length; k++) turn += Math.acos(Math.max(-1, Math.min(1, pts[k].clone().sub(pts[k - 1]).normalize().dot(pts[k + 1].clone().sub(pts[k]).normalize()))));
+      if (turn < 0.3) continue; run.forEach((j) => used.add(j)); curves.push(pts); } }
+  if (used.size) { const kept = lines.filter((_, i) => !used.has(i)); lines.length = 0; lines.push(...kept); const ends = [...lines.flat(), ...curves.flatMap((C) => [C[0], C[C.length - 1]])]; const v2 = verts.filter((v) => ends.some((e) => near(e, v))); verts.length = 0; verts.push(...v2); }
   const uniq = []; for (const v of verts) if (!uniq.some((u) => u.distanceToSquared(v) < 1e-8)) uniq.push(v);
   return { lines, circles, verts: uniq, curves };
 }
@@ -3366,7 +3388,8 @@ function sketchDown(ev) {
       if (!shared) { const j = joinAtCorner(sk, first, L); if (j.err) { toast(j.err, 'warn'); updateSketchVisuals(); setHint(); return; } shared = j.id; }
       const r = filletCorner(sk, shared, S.toolOpt.filletR); if (typeof r === 'string') { toast(r, 'warn'); updateSketchVisuals(); setHint(); return; } if (r?.arc) { sameFillet(sk, r.arc); (S.toolFillets ||= []).push(r.arc); } S.hover = null; commitSketch(); setHint(); return; } }
     if (!p) { if (S.toolOpt.chamfer) return; const r2 = filletCurves(sk, m, S.toolOpt.filletR); if (r2 == null) return; if (typeof r2 === 'string') { toast(r2, 'warn'); return; } sameFillet(sk, r2.arc); (S.toolFillets ||= []).push(r2.arc); S.hover = null; commitSketch(); return; } const r = filletCorner(sk, p.key.slice(2), S.toolOpt.filletR); if (r?.arc) { sameFillet(sk, r.arc); (S.toolFillets ||= []).push(r.arc); } if (typeof r === 'string') { toast(r, 'warn'); return; } S.hover = null; commitSketch(); return; }
-  drawClick(m);
+  // A press that starts a line, a rectangle or a circle may also be dragged to its other end (S0-40).
+  const was = S.draw?.stage; drawClick(m); if (was !== 1 && S.draw?.stage === 1 && ['line', 'rect', 'circle'].includes(S.tool)) S.draw.pressAt = { x: m.sx, y: m.sy };
 }
 function sketchMove(ev) {
   const m = mouseToSketch(ev); const sk = editSk(); $('stXY').textContent = `X ${fmt(m.u, 2)}  Y ${fmt(m.v, 2)}`; S.skCursor = m;
@@ -3399,6 +3422,10 @@ function sketchMove(ev) {
 }
 function sketchUp(ev, d) {
   const sk = editSk(); if (S.trimDrag) { S.trimDrag = false; commitSketch(); }
+  // Let go away from where it was pressed: the drag drew it, as if the other end had been clicked. A dragged line is
+  // one line, not the start of a chain.
+  if (S.draw?.pressAt) { const P = S.draw.pressAt; delete S.draw.pressAt; const m = mouseToSketch(ev);
+    if (S.draw.stage === 1 && Math.hypot(m.sx - P.x, m.sy - P.y) > 6) { const line = S.tool === 'line'; drawClick(m); if (line && S.draw) endDrawing(); refreshSketch(); return; } }
   if (S.drag?.lostPt) { const D = S.drag; S.drag = null; const q = sk.pts[D.lostPt];
     if (d.moved && D.hit && S.refs?.mref) { q.x = D.hit[0]; q.y = D.hit[1]; q.mref = S.refs.mref('p', D.hit); delete q.lost; const f = editF(); const rest = (S.dangling.get(f.id) || []).filter((id) => id !== q.id); if (rest.length) S.dangling.set(f.id, rest); else S.dangling.delete(f.id); solveSketch(sk); commitSketch(); toast('Привязка к модели восстановлена', 'info'); }
     else { restoreGeo(sk, D.snap); refreshSketch(); if (d.moved) toast('Отпустите точку на вершине модели: она привязывается только к ней', 'info'); }
@@ -4908,7 +4935,7 @@ function edgeTopology(body, cyls) {
   const display = []; segs.forEach((sg, i) => { if (onCircle[i]) display.push(...sg); });
   for (const [a, b] of cl.lines) display.push(a.x, a.y, a.z, b.x, b.y, b.z);
   for (const P of cl.curves) for (let i = 0; i + 1 < P.length; i++) display.push(P[i].x, P[i].y, P[i].z, P[i + 1].x, P[i + 1].y, P[i + 1].z);
-  const val = { lines: cl.lines, circles, verts, display }; topoCache.set(body, val); return val;
+  const val = { lines: cl.lines, circles, curves: cl.curves, verts, display }; topoCache.set(body, val); return val;
 }
 function bodyTopo() { return edgeTopology(S.body, S.cyls); }
 function measurePick(ev) {
@@ -5040,21 +5067,21 @@ function edgeFaceNormals(body, a, b) {
   }
   return found;
 }
-function arcPts2(O, r, a1, a2) {
+function arcPts2(O, r, a1, a2, nFix) {
   let d = a2 - a1; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
-  const N = Math.max(4, Math.ceil(Math.abs(d) / (2 * Math.acos(Math.max(-1, 1 - 0.0005 / r))))); const out = [];
+  const N = nFix || Math.max(4, Math.ceil(Math.abs(d) / (2 * Math.acos(Math.max(-1, 1 - 0.0005 / r))))); const out = [];
   for (let i = 0; i <= N; i++) { const t = a1 + d * i / N; out.push([O[0] + r * Math.cos(t), O[1] + r * Math.sin(t)]); }
   return out;
 }
 // Section polygon in 2D: corner C, face directions d1, d2 and outward face normals n1, n2.
-function edgeSection(kind, size, C, d1, d2, n1, n2, convex, size2 = size) {
+function edgeSection(kind, size, C, d1, d2, n1, n2, convex, size2 = size, nArc) {
   const add = (p, v, k) => [p[0] + v[0] * k, p[1] + v[1] * k]; const dot = (p, q) => p[0] * q[0] + p[1] * q[1];
   const cosT = Math.max(-1, Math.min(1, dot(d1, d2))); const th = Math.acos(cosT); const dl = 0.01 * (convex ? 1 : -1);
   const out0 = add(C, [n1[0] + n2[0], n1[1] + n2[1]], dl);
   if (kind === 'chamfer') { const T1 = add(C, d1, size), T2 = add(C, d2, size2); return [out0, add(T1, n1, dl), T1, T2, add(T2, n2, dl)]; }
   const t = size / Math.tan(th / 2); const T1 = add(C, d1, t), T2 = add(C, d2, t);
   const bis = [d1[0] + d2[0], d1[1] + d2[1]]; const bl = Math.hypot(...bis); const O = add(C, [bis[0] / bl, bis[1] / bl], size / Math.sin(th / 2));
-  const arc = arcPts2(O, size, Math.atan2(T1[1] - O[1], T1[0] - O[0]), Math.atan2(T2[1] - O[1], T2[0] - O[0]));
+  const arc = arcPts2(O, size, Math.atan2(T1[1] - O[1], T1[0] - O[0]), Math.atan2(T2[1] - O[1], T2[0] - O[0]), nArc);
   return [out0, add(T1, n1, dl), ...arc, add(T2, n2, dl)];
 }
 // An edge along the extrusions that made it (a corner of the part's outline) is rounded in their plane: the arc tangent
@@ -5139,8 +5166,69 @@ function profileEdgeTool(body, edge, kind, size, pc) {
   g.applyMatrix4(new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(O)); g.computeVertexNormals();
   return { g, convex: conv, cyl: { p: W(c, 0), dir: Z.clone(), r: size } };
 }
+// A curved edge (P0-43): the corner's section, as for a straight edge, worked out at every point of the edge from the
+// two faces meeting there and swept along it as one solid. The faces' normals come from the triangles on each segment.
+function curveEdgeTool(body, edge, kind, size, size2 = size) {
+  const P = edge.pts.map(V3); const closed = P.length > 3 && P[0].distanceTo(P[P.length - 1]) < 1e-6; if (closed) P.pop(); const n = P.length; if (n < 2) throw new Error('Ребро не найдено на текущем теле');
+  const pos = body.getAttribute('position'); const key = (v) => `${Math.round(v.x * 1e4)},${Math.round(v.y * 1e4)},${Math.round(v.z * 1e4)}`; const want = new Map();
+  for (let i = 0; i < n - (closed ? 0 : 1); i++) { const a = key(P[i]), b = key(P[(i + 1) % n]); want.set(a < b ? a + '|' + b : b + '|' + a, i); }
+  const segN = Array.from({ length: n }, () => []); const A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3();
+  for (let t = 0; t < pos.count / 3; t++) { A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); const ks = [key(A), key(B), key(C)];
+    for (let k = 0; k < 3; k++) { const a = ks[k], b = ks[(k + 1) % 3]; const i = want.get(a < b ? a + '|' + b : b + '|' + a); if (i === undefined) continue; const nn = B.clone().sub(A).cross(C.clone().sub(A)); if (nn.lengthSq() > 1e-20) segN[i].push(nn.normalize()); } }
+  // A segment the mesh left out (crossed by the topology over a T-junction) takes its neighbour's faces.
+  const segs = closed ? n : n - 1; for (let i = 0; i < segs; i++) if (segN[i].every((x) => x.dot(segN[i][0]) > 1 - 1e-4)) segN[i] = [];
+  if (!segN.slice(0, segs).some((x) => x.length >= 2)) throw new Error('Ребро не найдено на текущем теле');
+  for (let pass = 0; pass < segs; pass++) { let left = false; for (let i = 0; i < segs; i++) if (segN[i].length < 2) { const nb = [segN[(i + segs - 1) % segs], segN[(i + 1) % segs]].find((x) => x.length >= 2 && x.filled !== pass + 1); if (nb) { segN[i] = nb.slice(); segN[i].filled = pass + 1; } else left = true; } if (!left) break; }
+  // The two faces kept apart along the edge: each segment's pair is matched to the one before it.
+  const pairs = []; for (let i = 0; i < segs; i++) { let [p, q] = [segN[i][0], segN[i].reduce((m, x) => (x.dot(segN[i][0]) < m.dot(segN[i][0]) ? x : m), segN[i][1])]; if (pairs.length) { const [p0] = pairs[pairs.length - 1]; if (q.dot(p0) > p.dot(p0)) [p, q] = [q, p]; } pairs.push([p, q]); }
+  const eps = Math.min(0.05, size / 20); let sign1 = 0, sign2 = 0, convex = null; const rings = [], areas = [];
+  // An end where the edge meets another face at an angle: the tool runs on past it and is cut off by that face's plane,
+  // so it ends against the face instead of notching it with a square end.
+  const endN = [null, null]; if (!closed) [[0, 0], [n - 1, segs - 1]].forEach(([vi, si], k) => { const V = P[vi]; const kv = key(V); const [m1, m2] = pairs[si]; let best = null;
+    for (let t = 0; t < pos.count / 3; t++) { A.fromBufferAttribute(pos, 3 * t); B.fromBufferAttribute(pos, 3 * t + 1); C.fromBufferAttribute(pos, 3 * t + 2); if (key(A) !== kv && key(B) !== kv && key(C) !== kv) continue; const nn = B.clone().sub(A).cross(C.clone().sub(A)); if (nn.lengthSq() < 1e-20) continue; nn.normalize();
+      if (Math.abs(nn.dot(m1)) > 0.999 || Math.abs(nn.dot(m2)) > 0.999) continue; const along = Math.abs(nn.dot(P[vi === 0 ? 1 : n - 2].clone().sub(V).normalize())); if (!best || along > best.along) best = { nn, along }; }
+    if (best && best.along > 0.2) endN[k] = best.nn; });
+  for (let i = 0; i < n; i++) {
+    const prev = closed ? (i + segs - 1) % segs : Math.max(0, i - 1), next = closed ? i % segs : Math.min(segs - 1, i);
+    const u = P[closed ? (i + 1) % n : Math.min(n - 1, i + 1)].clone().sub(P[closed ? (i + n - 1) % n : Math.max(0, i - 1)]).normalize();
+    const n1 = pairs[prev][0].clone().add(pairs[next][0]).normalize(), n2 = pairs[prev][1].clone().add(pairs[next][1]).normalize();
+    let d1 = new THREE.Vector3().crossVectors(u, n1).normalize(), d2 = new THREE.Vector3().crossVectors(u, n2).normalize();
+    // Which way along each face is into it, and whether the corner is convex, settled once in the middle of the edge.
+    if (!sign1) { const m = P[Math.floor(n / 2)]; const onFace = (d, nn) => !isInside(body, m.clone().addScaledVector(d, eps).addScaledVector(nn, eps * 0.3)) && isInside(body, m.clone().addScaledVector(d, eps).addScaledVector(nn, -eps * 0.3));
+      const um = P[Math.min(n - 1, Math.floor(n / 2) + 1)].clone().sub(P[Math.max(0, Math.floor(n / 2) - 1)]).normalize(); const [mn1, mn2] = pairs[Math.min(segs - 1, Math.floor(n / 2))];
+      const md1 = new THREE.Vector3().crossVectors(um, mn1).normalize(), md2 = new THREE.Vector3().crossVectors(um, mn2).normalize();
+      sign1 = onFace(md1, mn1) ? 1 : onFace(md1.clone().negate(), mn1) ? -1 : 0; sign2 = onFace(md2, mn2) ? 1 : onFace(md2.clone().negate(), mn2) ? -1 : 0;
+      // Curved faces or a knife edge defeat the probes: each face then lies on the side of the other's tangent plane
+      // that the corner's kind says (inside it for a convex edge).
+      if ((!sign1 || !sign2) && mn1.dot(mn2) > -1 + 1e-6) { const cv = isInside(body, m.clone().addScaledVector(mn1.clone().add(mn2).normalize(), -eps * 0.1)); if (!sign1) sign1 = (md1.dot(mn2) < 0) === cv ? 1 : -1; if (!sign2) sign2 = (md2.dot(mn1) < 0) === cv ? 1 : -1; }
+      if (!sign1 || !sign2) throw new Error('Не удалось определить грани ребра');
+      convex = isInside(body, m.clone().addScaledVector(md1.clone().multiplyScalar(sign1).add(md2.clone().multiplyScalar(sign2)).normalize(), eps * 0.5)); }
+    d1.multiplyScalar(sign1); d2.multiplyScalar(sign2);
+    const e1 = new THREE.Vector3().crossVectors(u, Math.abs(u.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize(); const e2 = new THREE.Vector3().crossVectors(u, e1);
+    const to2 = (v) => [v.dot(e1), v.dot(e2)]; const sec = edgeSection(kind, size, [0, 0], to2(d1), to2(d2), to2(n1), to2(n2), convex, size2, 24);
+    const ext = !closed && (i === 0 || i === n - 1) ? (i === 0 ? -1 : 1) * (endN[i === 0 ? 0 : 1] ? 3 * Math.max(size, size2) : convex ? 0.01 : 0) : 0; const o = P[i].clone().addScaledVector(u, ext);
+    { let ar = 0; for (let k = 0; k < sec.length; k++) { const a = sec[k], b = sec[(k + 1) % sec.length]; ar += a[0] * b[1] - b[0] * a[1]; } areas.push(Math.abs(ar / 2)); }
+    rings.push(sec.map(([x, y]) => o.clone().addScaledVector(e1, x).addScaledVector(e2, y)));
+  }
+  const M = rings[0].length; if (rings.some((r) => r.length !== M)) throw new Error('Ребро не найдено на текущем теле');
+  const out = []; const tri = (a, b, c) => out.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+  for (let i = 0; i < (closed ? n : n - 1); i++) { const R0 = rings[i], R1 = rings[(i + 1) % n]; for (let k = 0; k < M; k++) { const k1 = (k + 1) % M; tri(R0[k], R0[k1], R1[k1]); tri(R0[k], R1[k1], R1[k]); } }
+  if (!closed) { const cap = (R, flip) => { const c = R.reduce((a, b) => a.add(b), new THREE.Vector3()).divideScalar(M); for (let k = 0; k < M; k++) { const k1 = (k + 1) % M; if (flip) tri(c, R[k1], R[k]); else tri(c, R[k], R[k1]); } }; cap(rings[0], true); cap(rings[n - 1], false); }
+  let g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+  if (geoVolume(g) < 0) { const a = g.getAttribute('position').array; for (let i = 0; i < a.length; i += 9) for (let k = 0; k < 3; k++) { const t = a[i + 3 + k]; a[i + 3 + k] = a[i + 6 + k]; a[i + 6 + k] = t; } }
+  // On a tight bend the sections reach past the bend's centre and overlap: the sweep then crosses itself and the cut
+  // comes out torn. Its volume, well over the sections' areas along the edge, says so; it is refused instead.
+  { let want = 0; for (let i = 0; i < (closed ? n : n - 1); i++) { const j = (i + 1) % n; want += (areas[i] + areas[j]) / 2 * rings[i][0].distanceTo(rings[j][0]) ; } const ends = closed ? 0 : (areas[0] + areas[n - 1]) * 0.01;
+    if (Math.abs(geoVolume(g)) > 1.25 * (want + ends) + 1e-9) throw new Error(`${kind === 'fillet' ? 'Радиус' : 'Размер фаски'} ${fmt(size)} велик для изгиба этого ребра: сечения перекрываются. Уменьшите ${kind === 'fillet' ? 'радиус' : 'размер'}`); }
+  g.computeVertexNormals();
+  // The end faces' planes: what stays is on the side of the edge itself.
+  endN.forEach((nn, k) => { if (!nn) return; const V = P[k ? n - 1 : 0], W = P[k ? n - 2 : 1]; const keep = nn.clone().multiplyScalar(Math.sign(W.clone().sub(V).dot(nn)) || 1); const S2 = 2 * new THREE.Box3().setFromPoints(P).getSize(new THREE.Vector3()).length() + 20 * Math.max(size, size2) + 10;
+    const [bx] = perpBasis(keep); const by = new THREE.Vector3().crossVectors(keep, bx).normalize(); const box = extrudeGeometry([{ pts: [[-S2, -S2], [S2, -S2], [S2, S2], [-S2, S2]], holes: [] }], 0, S2); box.applyMatrix4(new THREE.Matrix4().makeBasis(bx, by, keep).setPosition(V)); g = boolean(g, box, INTERSECTION); });
+  return { g, convex, cyl: null };
+}
 function edgeTool(body, edge, kind, size, feats, size2 = size) {
   const eps = Math.min(0.05, size / 20);
+  if (edge.t === 'curve') return curveEdgeTool(body, edge, kind, size, size2);
   if (edge.t === 'line' && feats) { const pc = profileCorner(body, edge, feats); if (pc) { const t = profileEdgeTool(body, edge, kind, size, pc); if (t) return t; } }
   if (edge.t === 'line') {
     const a = V3(edge.a), b = V3(edge.b); const u = b.clone().sub(a); const L = u.length(); u.normalize();
@@ -5148,8 +5236,12 @@ function edgeTool(body, edge, kind, size, feats, size2 = size) {
     const mid = a.clone().lerp(b, 0.5);
     // The direction along a face away from the edge has air just above the face and material just below it.
     const onFace = (d, n) => !isInside(body, mid.clone().addScaledVector(d, eps).addScaledVector(n, eps * 0.3)) && isInside(body, mid.clone().addScaledVector(d, eps).addScaledVector(n, -eps * 0.3));
-    const dir = (n) => { const d = new THREE.Vector3().crossVectors(u, n).normalize(); if (onFace(d, n)) return d; d.negate(); if (onFace(d, n)) return d; throw new Error('Не удалось определить грани ребра'); };
-    const [n1, n2] = ns; const d1 = dir(n1), d2 = dir(n2);
+    // A knife edge (faces a few degrees apart) is thinner there than the probes: each face then lies, locally, on the
+    // side of the other face's plane that the corner's kind says, inside it for a convex edge and outside for a concave one.
+    const [n1, n2] = ns; let wedge = null; const knife = () => (wedge ??= isInside(body, mid.clone().addScaledVector(n1.clone().add(n2).normalize(), -eps * 0.1)));
+    const dir = (n, o) => { const d = new THREE.Vector3().crossVectors(u, n).normalize(); if (onFace(d, n)) return d; d.negate(); if (onFace(d, n)) return d;
+      if (n.dot(o) > -1 + 1e-6 && (d.dot(o) < 0) !== knife()) d.negate(); if (n.dot(o) > -1 + 1e-6) return d; throw new Error('Не удалось определить грани ребра'); };
+    const d1 = dir(n1, n2), d2 = dir(n2, n1);
     const convex = isInside(body, mid.clone().addScaledVector(d1.clone().add(d2).normalize(), eps * 0.5));
     // A fillet or chamfer wider than a face it runs onto turns the body inside out: said in numbers instead.
     if (convex) { const th = d1.angleTo(d2);
@@ -5168,6 +5260,15 @@ function edgeTool(body, edge, kind, size, feats, size2 = size) {
     let cyl = null; if (kind === 'fillet') { const th = d1.angleTo(d2); if (th > 1e-3 && th < Math.PI - 1e-3) cyl = { p: a.clone().addScaledVector(d1.clone().add(d2).normalize(), size / Math.sin(th / 2)), dir: u.clone(), r: size }; }
     return { g, convex, cyl };
   }
+  // A rim between faces other than a plane and a cylinder (a cone or a torus of a revolve) is not in the half-plane's
+  // terms: it is rounded as a curve along its own segments.
+  // Only a plane across the axis and a cylinder about it are the half-plane's case; a cone's rim (the edge of a chamfer)
+  // made a tool of next to no volume there, a fillet that did nothing without a word.
+  const planeAndCyl = (() => { const pts = rimPolyline(body, edge); if (!pts || pts.length < 2) return true; const a = pts[0], b = pts[1]; let ns; try { ns = edgeFaceNormals(body, a, b); } catch { return true; } if (ns.length !== 2) return true;
+    const ax = V3(edge.n).normalize(); const mid = a.clone().lerp(b, 0.5).sub(V3(edge.c)); const rad = mid.addScaledVector(ax, -mid.dot(ax)).normalize();
+    return ns.some((m) => Math.abs(m.dot(ax)) > 1 - 1e-3) && ns.some((m) => Math.abs(m.dot(rad)) > 1 - 1e-3); })();
+  try { if (!planeAndCyl) throw new Error('Ребро не найдено на текущем теле'); return rimTool(); } catch (err) { const pts = rimPolyline(body, edge); if (pts) return curveEdgeTool(body, { t: 'curve', pts: pts.map((v) => v.toArray()) }, kind, size, size2); throw err; }
+  function rimTool() {
   // Circular edge between a plane and a cylinder: work in the (radial, axial) half-plane.
   const c = V3(edge.c), n = V3(edge.n).normalize(); let rho = new THREE.Vector3().crossVectors(n, Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0)).normalize();
   // Where the rim is: a rim that runs only part way round is looked at where it runs, not at one fixed side of it.
@@ -5196,6 +5297,19 @@ function edgeTool(body, edge, kind, size, feats, size2 = size) {
     const th0 = edgeAt(i * step, (i - 1) * step), th1 = edgeAt(i * step + ((j - i + NS) % NS) * step, i * step + ((j - i + NS) % NS + 1) * step);
     const piece = make(th0, th1 - th0); g = g ? boolean(g, piece, ADDITION) : piece; }
   return { g, convex };
+  }
+}
+// The mesh segments of a body lying on a rim, chained in order (the longest run; closed runs repeat their first point).
+function rimPolyline(body, edge) {
+  const c = V3(edge.c), n = V3(edge.n).normalize(); const on = (v) => { const w = v.clone().sub(c); return Math.abs(w.dot(n)) < 1e-2 && Math.abs(w.length() - edge.r) < 1e-2; };
+  const e = featureEdges(body); const key = (v) => `${Math.round(v.x * 1e4)},${Math.round(v.y * 1e4)},${Math.round(v.z * 1e4)}`; const adj = new Map(); const P = new Map();
+  for (let i = 0; i < e.length; i += 6) { const a = new THREE.Vector3(e[i], e[i + 1], e[i + 2]), b = new THREE.Vector3(e[i + 3], e[i + 4], e[i + 5]); if (!on(a) || !on(b)) continue; const ka = key(a), kb = key(b); if (ka === kb) continue;
+    P.set(ka, a); P.set(kb, b); for (const [x, y] of [[ka, kb], [kb, ka]]) { if (!adj.has(x)) adj.set(x, []); if (!adj.get(x).includes(y)) adj.get(x).push(y); } }
+  if (!adj.size) return null; const seen = new Set(); let best = null;
+  for (const k0 of adj.keys()) { if (seen.has(k0)) continue; let start = k0; const vis = new Set([k0]); for (let k = k0, prev = null; ;) { const nx = adj.get(k).filter((x) => x !== prev && !vis.has(x)); if (adj.get(k).length !== 2 || !nx.length) { if (adj.get(k).length !== 2) start = k; break; } prev = k; k = nx[0]; vis.add(k); }
+    const run = [start]; seen.add(start); for (let k = start, prev = null; ;) { const nx = (adj.get(k) || []).filter((x) => x !== prev); const nk = nx.find((x) => !seen.has(x)) ?? (nx.includes(start) && run.length > 2 ? start : null); if (nk == null) break; run.push(nk); if (nk === start) break; seen.add(nk); prev = k; k = nk; }
+    if (!best || run.length > best.length) best = run; }
+  return best && best.length >= 3 ? best.map((k) => P.get(k)) : null;
 }
 // The outline of the planar face of the body through a point: its loops in the face's own 2D axes (X, Y around
 // the point), the largest first.
@@ -5237,8 +5351,11 @@ function followEdges(f, body, cyls) {
   // An edge still on the body keeps it; the others follow only edges nobody holds, so a corner moved away and back
   // does not leave two stored edges on one and a corner without its fillet for good.
   const onLine = (e, [a, b]) => { const d = b.clone().sub(a); const L2 = d.lengthSq(); if (L2 < 1e-12) return false; const on = (P) => { const t = P.clone().sub(a).dot(d) / L2; return t > -1e-4 && t < 1 + 1e-4 && P.clone().sub(a).addScaledVector(d, -t).length() < tol; }; return on(V3(e.a)) && on(V3(e.b)); };
-  const held = new Set(); for (const e of f.edges) if (e.t !== 'circle') topo.lines.forEach((l, i) => { if (onLine(e, l)) held.add(i); });
+  const held = new Set(); for (const e of f.edges) if (e.t === 'line') topo.lines.forEach((l, i) => { if (onLine(e, l)) held.add(i); });
   f.edges = f.edges.map((e) => {
+    // A curved edge follows the curve of the body nearest to where it was, its points taken anew.
+    if (e.t === 'curve') { const Q = e.pts.map(V3); const dTo = (P) => Q.reduce((s, q) => s + Math.min(...P.map((p) => p.distanceTo(q))), 0) / Q.length; let best = null;
+      for (const P of topo.curves || []) { const d = dTo(P); if (!best || d < best.d) best = { d, P }; } return best && best.d < 5 ? { ...e, pts: best.P.map((v) => v.toArray().map((x) => +x.toFixed(6))) } : e; }
     if (e.t === 'circle') {
       const C = V3(e.c), N = V3(e.n || [0, 0, 1]).normalize(); const onAxis = topo.circles.filter((c) => Math.abs(c.n.clone().normalize().dot(N)) > 1 - 1e-6 && c.c.clone().sub(C).cross(N).length() < tol);
       // Same radius first; a hole whose diameter changed is still the same rim on the same axis.
@@ -5287,19 +5404,42 @@ function followEdges(f, body, cyls) {
     return { ...rest, a: hit[0].toArray(), b: hit[1].toArray(), ...(hit === overlap ? { was: was || [e.a, e.b] } : {}) };
   });
 }
+// Where three rounded edges of one radius meet at a convex corner (P0-42), the three swept tools leave a pointed
+// patch where their cylinders cross. The rolling ball gives a sphere there: the centre is r inside all three faces,
+// and past the cylinders' ends (towards the corner along each edge) everything but the ball is cut away.
+function filletCorners(body, edges, r) {
+  const lines = edges.filter((e) => e.t === 'line').map((e) => [V3(e.a), V3(e.b)]); const out = []; const done = [];
+  for (const [a0, b0] of lines) for (const V of [a0, b0]) {
+    if (done.some((d) => d.distanceTo(V) < 1e-6)) continue; const at = lines.filter(([a, b]) => a.distanceTo(V) < 1e-6 || b.distanceTo(V) < 1e-6); if (at.length !== 3) continue; done.push(V);
+    try { const ns = []; for (const [a, b] of at) for (const nn of edgeFaceNormals(body, a, b)) if (!ns.some((m) => m.dot(nn) > 1 - 1e-6)) ns.push(nn); if (ns.length !== 3) continue;
+      // Each normal pointing out of the body at the corner.
+      const inward = ns[0].clone().add(ns[1]).add(ns[2]).normalize(); if (!isInside(body, V.clone().addScaledVector(inward, -Math.min(0.05, r / 20)))) continue;
+      const Nm = ns.map((nn) => (isInside(body, V.clone().addScaledVector(nn, -Math.min(0.05, r / 20)).addScaledVector(inward, -Math.min(0.02, r / 50))) ? nn : nn.clone().negate()));
+      const M = new THREE.Matrix3().set(...Nm[0].toArray(), ...Nm[1].toArray(), ...Nm[2].toArray()); if (Math.abs(M.determinant()) < 1e-6) continue;
+      const rhs = Nm.map((nn) => nn.dot(V) - r); const c = new THREE.Vector3(...rhs).applyMatrix3(M.clone().invert());
+      const toV = at.map(([a, b]) => (a.distanceTo(V) < 1e-6 ? a.clone().sub(b) : b.clone().sub(a)).normalize());
+      let g = null; const L = 4 * r + 1;
+      for (const fdir of toV) { const [bx] = perpBasis(fdir); const by = new THREE.Vector3().crossVectors(fdir, bx).normalize(); const box = extrudeGeometry([{ pts: [[-L, -L], [L, -L], [L, L], [-L, L]], holes: [] }], 0, L); box.applyMatrix4(new THREE.Matrix4().makeBasis(bx, by, fdir).setPosition(c)); g = g ? boolean(g, box, INTERSECTION) : box; }
+      const ball = new THREE.SphereGeometry(r, 64, 48).toNonIndexed(); ball.deleteAttribute('uv'); ball.deleteAttribute('normal'); ball.translate(c.x, c.y, c.z);
+      out.push(boolean(g, ball, SUBTRACTION)); } catch { /* left as the three fillets make it */ }
+  }
+  return out;
+}
 function applyEdgeFeature(f, body, cyls, feats) {
   if (!body) throw new Error('Нет тела для обработки рёбер'); if (!f.edges?.length) throw new Error('Выберите рёбра');
   // An edge that cannot be found is skipped, not the whole feature: the others keep their chamfer,
   // and the feature says how many were lost.
-  let out = body; let lost = 0;
+  let out = body; let lost = 0; const corners = f.type === 'fillet' ? filletCorners(body, f.edges, f.r) : [];
   for (const e of f.edges) { let t; try { t = edgeTool(out, e, f.type, f.type === 'fillet' ? f.r : (f.flip && f.d2 > 0 ? f.d2 : f.d), feats, f.type === 'chamfer' && f.d2 > 0 ? (f.flip ? f.d : f.d2) : undefined); } catch (err) { lost++; if (lost === f.edges.length) throw err; continue; } out = boolean(out, t.g, t.convex ? SUBTRACTION : ADDITION); if (t.cyl && cyls) cyls.push(t.cyl); }
+  for (const k of corners) { try { out = boolean(out, k, SUBTRACTION); } catch { /* the corner stays as the three fillets left it */ } }
   if (lost) { const w = new Error(`${lost} ${plural(lost, 'ребро', 'ребра', 'рёбер')} из ${f.edges.length} не найдено на теле, на остальных ${f.type === 'fillet' ? 'скругление сделано' : 'фаска сделана'}. Выберите потерянные рёбра заново`); w.partial = out; throw w; }
   return out;
 }
-const edgeId = (e) => (e.t === 'line' ? 'l' + [...e.a, ...e.b].map((v) => v.toFixed(3)).join(',') : 'c' + [...e.c, e.r].map((v) => v.toFixed(3)).join(','));
+const edgeId = (e) => (e.t === 'line' ? 'l' + [...e.a, ...e.b].map((v) => v.toFixed(3)).join(',') : e.t === 'curve' ? 'k' + [...e.pts[0], ...e.pts[e.pts.length >> 1], ...e.pts[e.pts.length - 1]].map((v) => v.toFixed(3)).join(',') : 'c' + [...e.c, e.r].map((v) => v.toFixed(3)).join(','));
 function sameEdge(x, y) {
   if (x.t !== y.t) return false;
   if (x.t === 'circle') return V3(x.c).distanceTo(V3(y.c)) < 1e-3 && Math.abs(x.r - y.r) < 1e-3;
+  if (x.t === 'curve') { const near = (p, Q) => Q.some((q) => V3(p).distanceTo(V3(q)) < 1e-3); return x.pts.length === y.pts.length && [x.pts[0], x.pts[x.pts.length >> 1], x.pts[x.pts.length - 1]].every((p) => near(p, y.pts)); }
   const a = V3(x.a), b = V3(x.b), c = V3(y.a), d = V3(y.b); return (a.distanceTo(c) < 1e-3 && b.distanceTo(d) < 1e-3) || (a.distanceTo(d) < 1e-3 && b.distanceTo(c) < 1e-3);
 }
 // Edge under the cursor on the body the feature starts from.
@@ -5311,6 +5451,9 @@ function pickEdge(ev, topo, withDist) {
     let best = null; for (let i = 0; i < 72; i++) { const a = i / 72 * Math.PI * 2; const q = c.c.clone().addScaledVector(u, c.r * Math.cos(a)).addScaledVector(w, c.r * Math.sin(a)); const s2 = toScreen(q); const d = Math.hypot(s2.x - mx, s2.y - my); if (!best || d < best.d) best = { d, q }; }
     take({ edge: { t: 'circle', c: c.c.toArray(), n: c.n.toArray(), r: c.r, ...(c.src ? { src: c.src } : {}) } }, best.d, best.q);
   }
+  // A curved edge (a spline's or an ellipse's outline, where an inclined face cuts a cylinder) is picked too (P0-43).
+  for (const P of topo.curves || []) { let best = null; for (let i = 0; i + 1 < P.length; i++) { const sa = toScreen(P[i]), sb = toScreen(P[i + 1]); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1))); const d = Math.hypot(sa.x + dx * t - mx, sa.y + dy * t - my); if (!best || d < best.d) best = { d, q: P[i].clone().lerp(P[i + 1], t) }; }
+    if (best) take({ edge: { t: 'curve', pts: P.map((v) => v.toArray().map((x) => +x.toFixed(6))) } }, best.d, best.q); }
   for (const [a, b] of topo.lines) { const sa = toScreen(a), sb = toScreen(b); const dx = sb.x - sa.x, dy = sb.y - sa.y; const t = Math.max(0, Math.min(1, ((mx - sa.x) * dx + (my - sa.y) * dy) / (dx * dx + dy * dy || 1))); take({ edge: { t: 'line', a: a.toArray(), b: b.toArray() } }, distSeg(mx, my, sa, sb), a.clone().lerp(b, t)); }
   // An edge behind the part (seen through it in the wireframe of hidden lines) is not picked: the nearest visible one is.
   const dirV = camera.getWorldDirection(new THREE.Vector3()); const span = (camera.top - camera.bottom) / camera.zoom; let best = null;
@@ -5326,23 +5469,26 @@ function pickEdge(ev, topo, withDist) {
 // other and they go the same way there; a rim counts only where it is on the body.
 function tangentChain(topo, e0) {
   const rimSegs = (c) => { const out = []; const d = topo.display; const on = (x, y, z) => { const w = new THREE.Vector3(x, y, z).sub(c.c); return Math.abs(w.dot(c.n)) < 1e-2 && Math.abs(w.length() - c.r) < 1e-2; }; for (let i = 0; i < d.length; i += 6) if (on(d[i], d[i + 1], d[i + 2]) && on(d[i + 3], d[i + 4], d[i + 5])) out.push(new THREE.Vector3(d[i], d[i + 1], d[i + 2]), new THREE.Vector3(d[i + 3], d[i + 4], d[i + 5])); return out; };
-  const all = [...topo.lines.map(([a, b]) => ({ t: 'line', a, b })), ...topo.circles.map((c) => ({ t: 'circle', c: c.c, n: c.n.clone().normalize(), r: c.r, pts: null }))];
+  const all = [...topo.lines.map(([a, b]) => ({ t: 'line', a, b })), ...topo.circles.map((c) => ({ t: 'circle', c: c.c, n: c.n.clone().normalize(), r: c.r, pts: null })), ...(topo.curves || []).map((P) => ({ t: 'curve', P }))];
   for (const x of all) if (x.t === 'circle') x.pts = rimSegs(x);
-  const ends = (x) => (x.t === 'line' ? [x.a, x.b] : []);
+  const ends = (x) => (x.t === 'line' ? [x.a, x.b] : x.t === 'curve' ? [x.P[0], x.P[x.P.length - 1]] : []);
+  // A curve's direction at a point is its nearest segment's; its polyline is a few degrees off the true tangent there.
+  const segAt = (x, p) => { let best = null; for (let i = 0; i + 1 < x.P.length; i++) { const a = x.P[i], d = x.P[i + 1].clone().sub(a); const t = Math.max(0, Math.min(1, p.clone().sub(a).dot(d) / (d.lengthSq() || 1))); const dd = a.clone().addScaledVector(d, t).distanceTo(p); if (!best || dd < best.dd) best = { dd, d }; } return best; };
   // Direction of an edge at a point on it (unit, up to sign).
-  const dirAt = (x, p) => (x.t === 'line' ? x.b.clone().sub(x.a).normalize() : x.n.clone().cross(p.clone().sub(x.c)).normalize());
-  const onEdge = (x, p) => { if (x.t === 'line') { const d = x.b.clone().sub(x.a); const t = p.clone().sub(x.a).dot(d) / d.lengthSq(); return t > -1e-4 && t < 1 + 1e-4 && p.clone().sub(x.a).addScaledVector(d, -t).length() < 1e-3; } const w = p.clone().sub(x.c); return Math.abs(w.dot(x.n)) < 1e-3 && Math.abs(w.length() - x.r) < 1e-3 && x.pts.some((q) => q.distanceTo(p) < 0.05 + x.r * 0.06); };
+  const dirAt = (x, p) => (x.t === 'line' ? x.b.clone().sub(x.a).normalize() : x.t === 'curve' ? segAt(x, p).d.normalize() : x.n.clone().cross(p.clone().sub(x.c)).normalize());
+  const onEdge = (x, p) => { if (x.t === 'curve') return segAt(x, p).dd < 1e-3; if (x.t === 'line') { const d = x.b.clone().sub(x.a); const t = p.clone().sub(x.a).dot(d) / d.lengthSq(); return t > -1e-4 && t < 1 + 1e-4 && p.clone().sub(x.a).addScaledVector(d, -t).length() < 1e-3; } const w = p.clone().sub(x.c); return Math.abs(w.dot(x.n)) < 1e-3 && Math.abs(w.length() - x.r) < 1e-3 && x.pts.some((q) => q.distanceTo(p) < 0.05 + x.r * 0.06); };
   // Where two edges touch: an end of a line on the other, or where two rims in one plane touch.
   const touch = (x, y) => { for (const p of [...ends(x), ...ends(y)]) if (onEdge(x, p) && onEdge(y, p)) return p;
     if (x.t === 'circle' && y.t === 'circle' && Math.abs(Math.abs(x.n.dot(y.n)) - 1) < 1e-6 && Math.abs(y.c.clone().sub(x.c).dot(x.n)) < 1e-3) { const d = y.c.distanceTo(x.c); if (Math.abs(d - (x.r + y.r)) < 1e-3 || Math.abs(d - Math.abs(x.r - y.r)) < 1e-3) { const p = x.c.clone().add(y.c.clone().sub(x.c).normalize().multiplyScalar(d > 1e-9 && Math.abs(d - (x.r + y.r)) < 1e-3 ? x.r : (x.r > y.r ? x.r : -x.r))); if (onEdge(x, p) && onEdge(y, p)) return p; } }
     return null; };
-  const same = (x, e) => (e.t === 'line' ? x.t === 'line' && sameEdge({ t: 'line', a: x.a.toArray(), b: x.b.toArray() }, e) : x.t === 'circle' && sameEdge({ t: 'circle', c: x.c.toArray(), r: x.r }, e));
+  const same = (x, e) => (e.t === 'curve' ? x.t === 'curve' && sameEdge({ t: 'curve', pts: x.P.map((v) => v.toArray()) }, e) : e.t === 'line' ? x.t === 'line' && sameEdge({ t: 'line', a: x.a.toArray(), b: x.b.toArray() }, e) : x.t === 'circle' && sameEdge({ t: 'circle', c: x.c.toArray(), r: x.r }, e));
   const start = all.find((x) => same(x, e0)); if (!start) return []; const got = new Set([start]); const st = [start];
-  while (st.length) { const x = st.pop(); for (const y of all) { if (got.has(y)) continue; const p = touch(x, y); if (!p) continue; if (Math.abs(dirAt(x, p).dot(dirAt(y, p))) < 1 - 1e-4) continue; got.add(y); st.push(y); } }
-  got.delete(start); return [...got].map((x) => (x.t === 'line' ? { t: 'line', a: x.a.toArray(), b: x.b.toArray() } : { t: 'circle', c: x.c.toArray(), n: x.n.toArray(), r: x.r }));
+  while (st.length) { const x = st.pop(); for (const y of all) { if (got.has(y)) continue; const p = touch(x, y); if (!p) continue; if (Math.abs(dirAt(x, p).dot(dirAt(y, p))) < (x.t === 'curve' || y.t === 'curve' ? Math.cos(6 * Math.PI / 180) : 1 - 1e-4)) continue; got.add(y); st.push(y); } }
+  got.delete(start); return [...got].map((x) => (x.t === 'line' ? { t: 'line', a: x.a.toArray(), b: x.b.toArray() } : x.t === 'curve' ? { t: 'curve', pts: x.P.map((v) => v.toArray().map((q) => +q.toFixed(6))) } : { t: 'circle', c: x.c.toArray(), n: x.n.toArray(), r: x.r }));
 }
 function edgeSegs(e, topo) {
   if (e.t === 'line') return [[V3(e.a), V3(e.b)]];
+  if (e.t === 'curve') { const P = e.pts.map(V3); return P.slice(1).map((q, i) => [P[i], q]); }
   // A rim drawn where it is on the body: one running part way round is not shown as a whole ring.
   if (topo?.display) { const c = V3(e.c), n = V3(e.n).normalize(); const on = (x, y, z) => { const w = new THREE.Vector3(x, y, z).sub(c); return Math.abs(w.dot(n)) < 1e-2 && Math.abs(w.length() - e.r) < 1e-2; }; const d = topo.display; const out = [];
     for (let i = 0; i < d.length; i += 6) if (on(d[i], d[i + 1], d[i + 2]) && on(d[i + 3], d[i + 4], d[i + 5])) out.push([new THREE.Vector3(d[i], d[i + 1], d[i + 2]), new THREE.Vector3(d[i + 3], d[i + 4], d[i + 5])]);
@@ -6343,6 +6489,20 @@ function massProps(g, M) {
   }
   return { vol, area, com: vol ? com.divideScalar(vol) : com };
 }
+// Moments of inertia about the centre of mass for unit density (P0-44): each tetrahedron from the origin to a triangle
+// adds its second moments; the principal ones are the eigenvalues of the tensor (Jacobi rotations).
+function inertiaOf(g, com) {
+  const pos = g.getAttribute('position'); const S2 = [0, 0, 0, 0, 0, 0]; const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(); let vol = 0;
+  for (let i = 0; i < pos.count; i += 3) { a.fromBufferAttribute(pos, i).sub(com); b.fromBufferAttribute(pos, i + 1).sub(com); c.fromBufferAttribute(pos, i + 2).sub(com); const v = a.dot(new THREE.Vector3().crossVectors(b, c)) / 6; vol += v;
+    const sq = (k) => a.getComponent(k) ** 2 + b.getComponent(k) ** 2 + c.getComponent(k) ** 2 + a.getComponent(k) * b.getComponent(k) + a.getComponent(k) * c.getComponent(k) + b.getComponent(k) * c.getComponent(k);
+    const pr = (k, l) => 2 * (a.getComponent(k) * a.getComponent(l) + b.getComponent(k) * b.getComponent(l) + c.getComponent(k) * c.getComponent(l)) + a.getComponent(k) * b.getComponent(l) + a.getComponent(l) * b.getComponent(k) + a.getComponent(k) * c.getComponent(l) + a.getComponent(l) * c.getComponent(k) + b.getComponent(k) * c.getComponent(l) + b.getComponent(l) * c.getComponent(k);
+    S2[0] += v / 10 * sq(0); S2[1] += v / 10 * sq(1); S2[2] += v / 10 * sq(2); S2[3] += v / 20 * pr(0, 1); S2[4] += v / 20 * pr(0, 2); S2[5] += v / 20 * pr(1, 2); }
+  const [xx, yy, zz, xy, xz, yz] = S2; const I = [[yy + zz, -xy, -xz], [-xy, xx + zz, -yz], [-xz, -yz, xx + yy]];
+  const A = I.map((r) => r.slice()); for (let sweep = 0; sweep < 50; sweep++) { let off = 0; for (let p = 0; p < 3; p++) for (let q = p + 1; q < 3; q++) off += A[p][q] ** 2; if (off < 1e-24 * (A[0][0] ** 2 + A[1][1] ** 2 + A[2][2] ** 2 + 1e-300)) break;
+    for (let p = 0; p < 3; p++) for (let q = p + 1; q < 3; q++) { if (Math.abs(A[p][q]) < 1e-300) continue; const th = (A[q][q] - A[p][p]) / (2 * A[p][q]); const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1)); const cs = 1 / Math.sqrt(t * t + 1), sn = t * cs;
+      for (let k = 0; k < 3; k++) { const akp = A[k][p], akq = A[k][q]; A[k][p] = cs * akp - sn * akq; A[k][q] = sn * akp + cs * akq; } for (let k = 0; k < 3; k++) { const apk = A[p][k], aqk = A[q][k]; A[p][k] = cs * apk - sn * aqk; A[q][k] = sn * apk + cs * aqk; } } }
+  return { I, principal: [A[0][0], A[1][1], A[2][2]].sort((x, y) => x - y), vol };
+}
 // Quantities of any size keep their significant digits: 0.000976 mm³ is not «0», 125000000000 mm³ gets its thousands grouped.
 const fmtQty = (v) => { const a = Math.abs(v); if (!(a > 0)) return '0'; if (a >= 1e4) return Math.round(v).toLocaleString('ru-RU'); if (a >= 1) return fmt(v, 2); return String(+v.toPrecision(3)); };
 const fmtMass = (g) => (g >= 1000 ? fmtQty(g / 1000) + ' кг' : g >= 1 ? fmtQty(g) + ' г' : g >= 1e-3 ? fmtQty(g * 1e3) + ' мг' : fmtQty(g * 1e6) + ' мкг');
@@ -6390,6 +6550,11 @@ function renderMassPM() {
   box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Материал'), h('label', { class: 'field' }, h('span', {}, 'Материал'), sel)),
     h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Свойства'), h('div', { class: 'kv' }, h('span', {}, 'Масса'), h('b', {}, fmtMass(m))), h('div', { class: 'kv' }, h('span', {}, 'Объём'), h('b', {}, fmtQty(mp.vol) + ' мм³')),
       h('div', { class: 'kv' }, h('span', {}, 'Площадь поверхности'), h('b', {}, fmtQty(mp.area) + ' мм²')), h('div', { class: 'kv' }, h('span', {}, 'Центр масс'), h('b', {}, xyz(mp.com)))));
+  // Size and moments of inertia (about the centre of mass, in g·mm²): what a motor or a balance is chosen by.
+  { S.body.computeBoundingBox(); const sz = S.body.boundingBox.getSize(new THREE.Vector3()); const rho = MATERIALS[mat][1] / 1000; const J = inertiaOf(S.body, mp.com);
+    box.append(h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Габарит и инерция'), h('div', { class: 'kv' }, h('span', {}, 'Габарит X × Y × Z'), h('b', {}, `${fmt(sz.x, 2)} × ${fmt(sz.y, 2)} × ${fmt(sz.z, 2)} мм`)),
+      h('div', { class: 'kv' }, h('span', {}, 'Ixx, Iyy, Izz'), h('b', {}, [J.I[0][0], J.I[1][1], J.I[2][2]].map((v) => fmtQty(v * rho)).join('; ') + ' г·мм²')),
+      h('div', { class: 'kv' }, h('span', {}, 'Главные моменты'), h('b', {}, J.principal.map((v) => fmtQty(v * rho)).join('; ') + ' г·мм²')), h('div', { class: 'note' }, 'Относительно центра масс, по осям X, Y, Z модели'))); }
   side.append(box);
 }
 // Bill of materials: one row per part, with quantity and mass.
@@ -7680,7 +7845,9 @@ function previewMate() {
   // A distance or angle takes the keyboard as soon as it appears: typing 20 and Enter gives 20, not 146.6620.
   if ((pm.type === 'distance' || pm.type === 'angle') && pm.valFocus !== pm.type + pm.picks.length) { pm.valFocus = pm.type + pm.picks.length; setTimeout(() => { const i = $('mateVal'); if (i && S.pm === pm) { i.focus(); i.select(); } }, 0); }
   if (pm.result.status === 'ok') { asm.mates.pop(); pm.mate = m; } else { pm.mate = null; pm.suggest = null; if (pm.result.status === 'conflict') { const ex = explainConflict(asm, m, pm.result.group); if (ex?.text) { pm.result.why = ex.text; pm.suggest = ex.suggest; } else pm.result.why = ex; } }
-  asmRefresh(true);
+  // Only the parts' places changed: they are moved, not rebuilt (rebuilding every mesh made each preview of a STEP
+  // assembly take seconds, E35).
+  S.asmAnalysis = asmAnalyze(asm); asmPoses(); renderSide(); setHint();
 }
 // The next free number for the type: after a deletion a count-based number repeated an existing name.
 const nextMateName = (asm, t) => { const base = MATE_NAMES[t]; let n = 0; for (const x of asm.mates) { const mm = x.name?.startsWith(base) && /^\d+$/.test(x.name.slice(base.length)) ? +x.name.slice(base.length) : 0; n = Math.max(n, mm); } return base + (n + 1); };
@@ -8399,7 +8566,7 @@ function renderTree() {
   if (S.mode === 'import') { if (!S.pm && !S.measure) renderImportPanel(); return; }
   if (S.pm || S.editing || S.measure) return;
   side.textContent = '';
-  side.append(h('div', { class: 'sec-h' }, h('span', {}, S.doc.name), h('span', { class: 'meta' }, S.body ? 'тело' : 'нет тела')));
+  side.append(h('div', { class: 'sec-h' }, h('span', {}, S.doc.name), h('span', { class: 'meta', title: S.doc.material ? 'Материал детали; меняется в «Массе»' : '' }, S.body ? (S.doc.material && MATERIALS[S.doc.material] ? `тело, ${MATERIALS[S.doc.material][0]}` : 'тело') : 'нет тела')));
   // «Что неправильно» (P0-35): everything wrong in the part in one list, each with its kind and a way to it.
   { const probs = whatsWrong(); if (probs.length) { const nErr = probs.filter((q) => q.kind === 'err').length;
       side.append(h('button', { class: 'whatswrong', style: 'margin:2px 10px 6px;padding:4px 8px;border:1px solid var(--bad,#c33);border-radius:6px;background:none;color:var(--bad,#c33);font:inherit;cursor:pointer;text-align:left', onclick: (ev) => { const r = ev.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, probs.map((q) => [`${q.name}: ${q.text}`, () => q.go()])); } },
@@ -8641,7 +8808,7 @@ function renderPM0() {
         isF || !(f.d2 > 0) ? null : h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!f.flip, onchange: (ev) => { f.flip = ev.target.checked; if (!f.flip) delete f.flip; schedulePreview(); } }), 'Поменять стороны')),
       h('div', { class: 'grp' }, h('div', { class: 'lbl' }, `Рёбра: ${f.edges.length}`), h('div', { class: 'note' }, 'Щёлкайте рёбра модели, повторный щелчок убирает ребро.'),
         // Each edge is listed by what it is, so one can be taken out without hunting for it in the view.
-        ...f.edges.map((e, i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), e.t === 'circle' ? `Окружность ⌀${fmt(2 * e.r, 2)}` : `Прямое ${fmt(Math.hypot(...e.b.map((v, k) => v - e.a[k])), 2)} мм`,
+        ...f.edges.map((e, i) => h('div', { class: 'rel' }, h('b', {}, String(i + 1)), e.t === 'circle' ? `Окружность ⌀${fmt(2 * e.r, 2)}` : e.t === 'curve' ? `Кривое ${fmt(e.pts.slice(1).reduce((a, q, k) => a + Math.hypot(q[0] - e.pts[k][0], q[1] - e.pts[k][1], q[2] - e.pts[k][2]), 0), 1)} мм` : `Прямое ${fmt(Math.hypot(...e.b.map((v, k) => v - e.a[k])), 2)} мм`,
           h('button', { class: 'x', title: 'Убрать ребро', onclick: () => { f.edges.splice(i, 1); renderSide(); drawEdgeSelection(); schedulePreview(); } }, '✕'))),
         f.edges.length ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: () => { f.edges.length = 0; renderSide(); drawEdgeSelection(); schedulePreview(); } }, 'Очистить')) : null,
         h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: S.toolOpt.tangentChain !== false, onchange: (ev) => { S.toolOpt.tangentChain = ev.target.checked; } }), 'По касательной: брать гладко продолжающие рёбра')));
@@ -9701,5 +9868,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, mateRefAt, asmPickAt: (ev) => asmPick(ev), tangentChain, splitAt, transformSel, profileCorner, edgeFaceNormals, restoreFromTrash, openDocList, okPattern, cmdSkPattern, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, inertiaOf, mateRefAt, asmPickAt: (ev) => asmPick(ev), tangentChain, splitAt, transformSel, profileCorner, edgeFaceNormals, restoreFromTrash, openDocList, okPattern, cmdSkPattern, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
