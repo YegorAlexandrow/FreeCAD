@@ -3257,6 +3257,7 @@ function sketchDown(ev) {
   const m = mouseToSketch(ev); const sk = editSk(); S.lastClick = { x: m.sx, y: m.sy };
   if (S.skOp?.kind === 'offset') { offsetPick(m); return; }
   if (S.skOp?.kind === 'mirror') { mirrorPick(m); return; }
+  if (S.skOp?.kind === 'pattern' && S.skOp.pickC) { const p = pick(m, { pointsOnly: true }); if (!p) return; let id = p.key.slice(2); if (id.startsWith('r:') || p.key.startsWith('r:')) id = materialize(editSk(), p.key).slice(2); S.skOp.opt.c = id; S.skOp.pickC = false; renderSide(); previewPattern(); setHint(); return; }
   if (S.tool === 'select') {
     const p = pick(m);
     if (p) {
@@ -3749,10 +3750,12 @@ function patXform(sk, pt, i) {
   return (q) => ({ x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn, y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs });
 }
 function buildPattern(sk, pt) {
-  const src = pt.src.map((id) => sk.ents[id]).filter(Boolean);
+  const src = pt.src.map((id) => sk.ents[id]).filter(Boolean); const srcPts = (pt.srcPts || []).filter((id) => sk.pts[id]);
   for (let i = 1; i < pt.n; i++) {
     const T = patXform(sk, pt, i); const map = new Map();
     const mp = (id) => { if (map.has(id)) return map.get(id); if (pt.kind === 'circ' && id === (pt.c || 'O')) { map.set(id, id); return id; } const q = T(gp(sk, id)); const nidv = `${pt.id}_${i}_${id}`; sk.pts[nidv] = { id: nidv, x: q.x, y: q.y, pat: pt.id }; const k = `${pt.id}_${i}_k${id}`; sk.cons[k] = { id: k, t: 'patpt', refs: [id, nidv], pat: pt.id, i }; map.set(id, nidv); return nidv; };
+    // Lone points (hole centres) are copied too, as what they are (S0-35).
+    for (const id of srcPts) { const q = sk.pts[mp(id)]; if (sk.pts[id].hole) { q.hole = true; q.free = true; } }
     // Copies keep the same ids from one rebuild to the next (copy i of source curve e), so a dimension or relation put
     // on a copy survives a change of count or spacing; ones on copies that no longer exist are dropped.
     for (const e of src) {
@@ -3774,8 +3777,8 @@ function clearPattern(sk, pt) {
   for (const [id, q] of Object.entries(sk.pts)) if (q.pat === pt.id) delete sk.pts[id];
 }
 function makePattern(sk, ids, opt) {
-  sk.pats = sk.pats || {}; const id = 'pat' + nid(sk); const pt = { id, kind: opt.kind, n: Math.max(2, Math.round(opt.n)), dx: opt.dx, dy: opt.dy, ang: opt.ang, c: opt.c || 'O', src: ids.filter((x) => sk.ents[x] && !sk.ents[x].ext) };
-  if (!pt.src.length) return 'Выделите линии, дуги или окружности'; sk.pats[id] = pt; buildPattern(sk, pt); solveSketch(sk); return pt;
+  sk.pats = sk.pats || {}; const id = 'pat' + nid(sk); const pt = { id, kind: opt.kind, n: Math.max(2, Math.round(opt.n)), dx: opt.dx, dy: opt.dy, ang: opt.ang, c: opt.c || 'O', src: ids.filter((x) => sk.ents[x] && !sk.ents[x].ext), ...(opt.pts?.length ? { srcPts: opt.pts.filter((p) => sk.pts[p] && p !== (opt.c || 'O')) } : {}) };
+  if (!pt.src.length && !pt.srcPts?.length) return 'Выделите линии, дуги, окружности или точки'; sk.pats[id] = pt; buildPattern(sk, pt); solveSketch(sk); return pt;
 }
 function updatePattern(sk, pt, ch) { Object.assign(pt, ch); pt.n = Math.max(2, Math.round(pt.n)); clearPattern(sk, pt); buildPattern(sk, pt); const lost = dropDanglingCons(sk); if (lost) toast(`Убрано взаимосвязей и размеров на исчезнувших копиях: ${lost}`, 'info'); solveSketch(sk); commitSketch(); }
 // Relations and dimensions that point at geometry no longer in the sketch (copies of a pattern that got shorter).
@@ -3783,13 +3786,17 @@ function dropDanglingCons(sk) { let n = 0; for (const [id, c] of Object.entries(
 function patternOf(sk, ids) { for (const id of ids) { const e = sk.ents[id]; if (!e) continue; if (e.pat && sk.pats?.[e.pat]) return sk.pats[e.pat]; const p2 = Object.values(sk.pats || {}).find((q) => q.src.includes(id)); if (p2) return p2; } return null; }
 function cmdSkPattern() {
   const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)] && !sk.ents[k.slice(2)].ext).map((k) => k.slice(2));
-  if (!ids.length) { toast('Выделите линии, дуги или окружности, затем нажмите «Массив»', 'info'); return; }
-  const cp = [...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2))[0];
-  S.skOp = { kind: 'pattern', ids, opt: { kind: 'lin', n: 3, dx: 10, dy: 0, ang: 360, c: cp || 'O' } }; renderSide(); previewPattern(); setHint();
+  // Picked lone points (hole centres) are copied along; any other picked point is the centre of a circular pattern,
+  // which can also be clicked once the pattern is open (S0-37).
+  const ptsSel = [...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2)); const lone = ptsSel.filter((p) => sk.pts[p]?.hole && !sk.pts[p].fixed);
+  if (!ids.length && !lone.length) { toast('Выделите линии, дуги, окружности или точки, затем нажмите «Массив»', 'info'); return; }
+  const cp = ptsSel.find((p) => !lone.includes(p));
+  S.skOp = { kind: 'pattern', ids, opt: { kind: 'lin', n: 3, dx: 10, dy: 0, ang: 360, c: cp || 'O', pts: lone } }; renderSide(); previewPattern(); setHint();
 }
 function previewPattern() {
   const op = S.skOp; if (op?.kind !== 'pattern') return; const sk = editSk(); const pt = { ...op.opt, n: Math.max(2, Math.round(op.opt.n)) }; const segs = [];
   for (let i = 1; i < pt.n; i++) { const T = patXform(sk, pt, i); for (const id of op.ids) { const e = sk.ents[id]; if (!e) continue; const P = e.t === 'line' ? [gp(sk, e.p1), gp(sk, e.p2)] : e.t === 'circle' ? (() => { const c = gp(sk, e.c); return Array.from({ length: 49 }, (_, i) => ({ x: c.x + e.r * Math.cos(i / 48 * 2 * Math.PI), y: c.y + e.r * Math.sin(i / 48 * 2 * Math.PI) })); })() : e.t === 'arc' ? (() => { const c = gp(sk, e.c), a = gp(sk, e.p1), b = gp(sk, e.p2); const a0 = Math.atan2(a.y - c.y, a.x - c.x); let sw = Math.atan2(b.y - c.y, b.x - c.x) - a0; while (sw <= 0) sw += 2 * Math.PI; return Array.from({ length: 33 }, (_, i) => ({ x: c.x + e.r * Math.cos(a0 + sw * i / 32), y: c.y + e.r * Math.sin(a0 + sw * i / 32) })); })() : curvePts(sk, e, 48); const Q = P.filter(Boolean).map(T); for (let k = 0; k + 1 < Q.length; k++) segs.push([Q[k].x, Q[k].y, Q[k + 1].x, Q[k + 1].y]); } }
+  const k = 4 * unitsPerPx(); for (let i = 1; i < pt.n; i++) { const T = patXform(sk, pt, i); for (const id of op.opt.pts || []) { const q = sk.pts[id] && T(sk.pts[id]); if (q) segs.push([q.x - k, q.y - k, q.x + k, q.y + k], [q.x - k, q.y + k, q.x + k, q.y - k]); } }
   S.draw = { stage: 0, preview: segs }; updateSketchVisuals();
 }
 function okPattern() { const op = S.skOp; S.skOp = null; S.draw = null; const r = makePattern(editSk(), op.ids, op.opt); if (typeof r === 'string') toast(r, 'warn'); S.sel.clear(); commitSketch(); setHint(); }
@@ -3804,7 +3811,7 @@ function patternPanel(o, onChange, onOk) {
     inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); apply(); onOk?.(); } if (e.key === 'Escape' && S.skOp) cancelSkOp(); });
     return h('label', { class: 'field' }, h('span', {}, label), inp, h('span', { style: 'flex:0 0 auto' }, unit)); };
   return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Массив'), seg([['lin', 'Линейный'], ['circ', 'Круговой']], o.kind, (v) => onChange({ kind: v })),
-    num('Количество', 'n', 'шт', true), ...(o.kind === 'lin' ? [num('Шаг по X', 'dx', 'мм'), num('Шаг по Y', 'dy', 'мм')] : [num('Угол', 'ang', '°'), h('div', { class: 'note' }, o.c && o.c !== 'O' ? 'Вокруг выделенной точки' : 'Вокруг исходной точки. Чтобы вокруг другой, выделите и её перед «Массив»')]),
+    num('Количество', 'n', 'шт', true), ...(o.kind === 'lin' ? [num('Шаг по X', 'dx', 'мм'), num('Шаг по Y', 'dy', 'мм')] : [num('Угол', 'ang', '°'), S.skOp?.kind === 'pattern' ? h('button', { class: 'rel pickbox' + (S.skOp.pickC ? ' on' : ''), onclick: () => { S.skOp.pickC = !S.skOp.pickC; renderSide(); setHint(); } }, h('b', {}, '⊙'), S.skOp.pickC ? 'Центр: щёлкните точку' : 'Центр: ' + (o.c && o.c !== 'O' ? 'точка ' + o.c : 'исходная точка')) : null, h('div', { class: 'note' }, o.c && o.c !== 'O' ? 'Вокруг выделенной точки' : 'Вокруг исходной точки. Чтобы вокруг другой, выделите и её перед «Массив»')]),
     onOk ? h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: onOk }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена')) : null);
 }
 function detachFromModel(sk, fp) {
@@ -4053,6 +4060,33 @@ function joinAtCorner(sk, A, B) {
   if (!solveSketch(sk)) { restoreGeo(sk, before); return { err: 'Отрезки не свести в угол: этому мешают их взаимосвязи' }; }
   return { id: ea };
 }
+// A corner where a line meets an arc (S0-15): an arc of the radius tangent to both, the line and the arc cut back to it,
+// as SolidWorks' sketch fillet does there. Of the places where such an arc fits, the one on the line and on the arc
+// next to the corner.
+function filletLineArc(sk, pid, r, L, A) {
+  const P = gp(sk, pid); const F = gp(sk, L.p1 === pid ? L.p2 : L.p1); const O = gp(sk, A.c); const R = A.r;
+  const len = Math.hypot(F.x - P.x, F.y - P.y); if (len < 1e-9) return 'Линия нулевой длины'; const u = { x: (F.x - P.x) / len, y: (F.y - P.y) / len }; const nrm = { x: -u.y, y: u.x };
+  let best = null;
+  for (const side of [1, -1]) for (const dR of [r, -r]) {
+    const R2 = R + dR; if (R2 <= 1e-9) continue; const q = { x: P.x + nrm.x * side * r, y: P.y + nrm.y * side * r };
+    // The centre lies on the line moved r to one side and on the circle R ± r around the arc's centre.
+    const fx = q.x - O.x, fy = q.y - O.y; const B = fx * u.x + fy * u.y, Cq = fx * fx + fy * fy - R2 * R2; const D = B * B - Cq; if (D < 0) continue;
+    for (const t of [-B - Math.sqrt(D), -B + Math.sqrt(D)]) {
+      if (t <= 1e-6 || t >= len - 1e-6) continue; const C = { x: q.x + u.x * t, y: q.y + u.y * t }; const T1 = { x: P.x + u.x * t, y: P.y + u.y * t };
+      const dc = Math.hypot(C.x - O.x, C.y - O.y); const T2 = { x: O.x + (C.x - O.x) / dc * R, y: O.y + (C.y - O.y) / dc * R };
+      if (!angleInArc(sk, A, Math.atan2(T2.y - O.y, T2.x - O.x)) || Math.hypot(T2.x - P.x, T2.y - P.y) < 1e-6) continue;
+      const d = t + Math.hypot(T2.x - P.x, T2.y - P.y); if (!best || d < best.d) best = { d, C, T1, T2 };
+    }
+  }
+  if (!best) return `Радиус ${fmt(r)} здесь не помещается`;
+  const { C, T1, T2 } = best; const id1 = nid(sk); sk.pts[id1] = { id: id1, x: T1.x, y: T1.y }; const id2 = nid(sk); sk.pts[id2] = { id: id2, x: T2.x, y: T2.y }; const cId = nid(sk); sk.pts[cId] = { id: cId, x: C.x, y: C.y };
+  if (L.p1 === pid) L.p1 = id1; else L.p2 = id1; if (A.p1 === pid) A.p1 = id2; else A.p2 = id2;
+  const ccw = (T1.x - C.x) * (T2.y - C.y) - (T1.y - C.y) * (T2.x - C.x) > 0; const aid = nid(sk); sk.ents[aid] = { id: aid, t: 'arc', c: cId, p1: ccw ? id1 : id2, p2: ccw ? id2 : id1, r };
+  const keep = isRefPt(pid) || Object.values(sk.cons).some((c) => c.refs.includes(pid)) || Object.values(sk.ents).some((e) => [e.p1, e.p2, e.c].includes(pid));
+  const pending = [{ t: 'tangent', refs: [L.id, aid] }, { t: 'tangent', refs: [A.id, aid] }, { t: 'rad', refs: [aid], v: r, pos: [C.x + (P.x - C.x) * 1.6, C.y + (P.y - C.y) * 1.6] }];
+  if (keep) pending.push({ t: 'online', refs: [pid, L.id] }, { t: 'oncircle', refs: [pid, A.id] }); else delete sk.pts[pid];
+  addRelations(sk, pending); return { arc: aid };
+}
 // A chamfer at a corner (S0-17): the same distance back along both lines, joined by a line. The sharp corner stays as a
 // point on both lines, and the two distances are dimensions from it, as SolidWorks' sketch chamfer «distance-distance».
 function chamferCorner(sk, pid, d, lines, P, u) {
@@ -4077,6 +4111,7 @@ function filletCorner(sk, pid, r) {
   let lines = Object.values(sk.ents).filter((e) => e.t === 'line' && !e.ext && (e.p1 === pid || e.p2 === pid));
   // A construction line through the corner (a diagonal, a centre line) is not one of the corner's sides (S0-16).
   if (lines.length > 2) lines = lines.filter((e) => !e.constr);
+  if (lines.length === 1 && !S.toolOpt.chamfer) { const arcs = Object.values(sk.ents).filter((e) => e.t === 'arc' && !e.ext && !e.constr && (e.p1 === pid || e.p2 === pid)); if (arcs.length === 1) return filletLineArc(sk, pid, r, lines[0], arcs[0]); }
   if (lines.length !== 2) return 'Скругление ставится в угол, где сходятся ровно две линии';
   const P = gp(sk, pid); const far = lines.map((e) => gp(sk, e.p1 === pid ? e.p2 : e.p1));
   const u = far.map((A) => { const l = Math.hypot(A.x - P.x, A.y - P.y); return { x: (A.x - P.x) / l, y: (A.y - P.y) / l, l }; });
@@ -4229,7 +4264,7 @@ function applyOffset(sk, ids, d, flip) {
   solveSketch(sk); return null;
 }
 // Mirror about a line: copies with symmetric points; points on the line are shared.
-function mirrorEntities(sk, ids, axisId) {
+function mirrorEntities(sk, ids, axisId, ptIds = []) {
   const ax = ge(sk, axisId); const A = gp(sk, ax.p1), B = gp(sk, ax.p2); const dx = B.x - A.x, dy = B.y - A.y; const l2 = dx * dx + dy * dy;
   const refl = (p) => { const t = ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2; const fx = A.x + t * dx, fy = A.y + t * dy; return { x: 2 * fx - p.x, y: 2 * fy - p.y }; };
   const onAxis = (p) => Math.abs((p.x - A.x) * dy - (p.y - A.y) * dx) / Math.sqrt(l2) < 1e-7;
@@ -4250,6 +4285,8 @@ function mirrorEntities(sk, ids, axisId) {
     else sk.ents[nidE] = { id: nidE, t: 'arc', c: mp(e.c), p1: mp(e.p2), p2: mp(e.p1), r: e.r, constr: e.constr };
     if (!sk.ents[nidE].constr) delete sk.ents[nidE].constr;
   }
+  // Lone points (hole centres) are mirrored as what they are (S0-35).
+  for (const id of ptIds) { if (!sk.pts[id] || map.has(id)) continue; const q = mp(id); if (q !== id && sk.pts[id].hole) { sk.pts[q].hole = true; sk.pts[q].free = true; } n++; }
   // The image is consistent by construction: its relations go in at once. Checking each one against the whole
   // sketch (hundreds of them for a pattern) froze the page for minutes.
   // A point already on the axis (an end of it, or tied to one) may already be held there: that check is cheap and kept.
@@ -4287,17 +4324,20 @@ function cmdMirror() {
   const rest = ents.filter((id) => id !== axis && sk.ents[id]);
   // What is mirrored and about which line is shown and can be changed before anything is made (S0-36): the guess is
   // only a starting point, as SolidWorks' «Mirror Entities» panel with its two boxes.
-  S.skOp = { kind: 'mirror', ids: rest, axis: axis || null, slot: axis ? 'items' : 'axis' }; S.sel = new Set(rest.map((id) => 'e:' + id)); refreshSketch(); renderSide(); setHint();
+  const pts = [...S.sel].filter((k) => k.startsWith('p:')).map((k) => k.slice(2)).filter((p) => sk.pts[p]?.hole && !sk.pts[p].fixed);
+  S.skOp = { kind: 'mirror', ids: rest, pts, axis: axis || null, slot: axis ? 'items' : 'axis' }; S.sel = new Set([...rest.map((id) => 'e:' + id), ...pts.map((p) => 'p:' + p)]); refreshSketch(); renderSide(); setHint();
 }
 function mirrorPick(m) {
-  const op = S.skOp; const sk = editSk(); const p = pick(m, { noRefs: true }); const id = p?.key.startsWith('e:') ? p.key.slice(2) : null; if (!id) return; const e = ge(sk, id);
+  const op = S.skOp; const sk = editSk(); const p = pick(m, { noRefs: true });
+  if (p?.key.startsWith('p:') && op.slot === 'items') { const q = p.key.slice(2); if (sk.pts[q]?.hole && !sk.pts[q].fixed) { op.pts = op.pts.includes(q) ? op.pts.filter((x) => x !== q) : [...op.pts, q]; S.sel = new Set([...op.ids.map((x) => 'e:' + x), ...op.pts.map((x) => 'p:' + x)]); refreshSketch(); renderSide(); return; } }
+  const id = p?.key.startsWith('e:') ? p.key.slice(2) : null; if (!id) return; const e = ge(sk, id);
   if (op.slot === 'axis') { if (e?.t !== 'line') { toast('Ось зеркала: щёлкните линию или ось', 'info'); return; } op.axis = id; op.ids = op.ids.filter((x) => x !== id); op.slot = 'items'; }
   else if (id === op.axis || id === 'H' || id === 'V') return; else op.ids = op.ids.includes(id) ? op.ids.filter((x) => x !== id) : [...op.ids, id];
-  S.sel = new Set(op.ids.map((x) => 'e:' + x)); refreshSketch(); renderSide(); setHint();
+  S.sel = new Set([...op.ids.map((x) => 'e:' + x), ...op.pts.map((x) => 'p:' + x)]); refreshSketch(); renderSide(); setHint();
 }
 function okMirror() {
-  const op = S.skOp; const sk = editSk(); if (!op.axis || !op.ids.length) { toast(op.axis ? 'Выберите, что отразить' : 'Выберите ось зеркала', 'info'); return; }
-  S.skOp = null; const n = mirrorEntities(sk, op.ids, op.axis); S.sel.clear(); commitSketch(); renderSide(); setHint(); toast(`Отражено: ${n}`, 'info');
+  const op = S.skOp; const sk = editSk(); if (!op.axis || !(op.ids.length + op.pts.length)) { toast(op.axis ? 'Выберите, что отразить' : 'Выберите ось зеркала', 'info'); return; }
+  S.skOp = null; const n = mirrorEntities(sk, op.ids, op.axis, op.pts); S.sel.clear(); commitSketch(); renderSide(); setHint(); toast(`Отражено: ${n}`, 'info');
 }
 function cmdOffset() {
   const sk = editSk(); const ids = [...S.sel].filter((k) => k.startsWith('e:') && sk.ents[k.slice(2)]).map((k) => k.slice(2));
@@ -4346,7 +4386,7 @@ function toolOptionsPanel() {
   if (S.skOp?.kind === 'mirror') { const op = S.skOp; const sk = editSk(); const name = (id) => (id === 'H' ? 'Ось X' : id === 'V' ? 'Ось Y' : (ge(sk, id)?.constr ? 'Вспомогательная линия ' : 'Линия ') + id);
     return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Зеркало'),
       h('button', { class: 'rel pickbox' + (op.slot === 'axis' ? ' on' : ''), onclick: () => { op.slot = 'axis'; renderSide(); setHint(); } }, h('b', {}, '⇹'), op.axis ? 'Относительно: ' + name(op.axis) : 'Относительно: щёлкните линию'),
-      h('button', { class: 'rel pickbox' + (op.slot === 'items' ? ' on' : ''), onclick: () => { op.slot = 'items'; renderSide(); setHint(); } }, h('b', {}, '▱'), `Отразить: ${op.ids.length} ${plural(op.ids.length, 'объект', 'объекта', 'объектов')}`),
+      h('button', { class: 'rel pickbox' + (op.slot === 'items' ? ' on' : ''), onclick: () => { op.slot = 'items'; renderSide(); setHint(); } }, h('b', {}, '▱'), `Отразить: ${op.ids.length + op.pts.length} ${plural(op.ids.length + op.pts.length, 'объект', 'объекта', 'объектов')}`),
       h('div', { class: 'chips' }, h('button', { class: 'chip', onclick: okMirror }, 'OK'), h('button', { class: 'chip', onclick: cancelSkOp }, 'Отмена'))); }
   if (S.skOp?.kind === 'pattern') return patternPanel(S.skOp.opt, (ch) => { if (S.skOp?.kind !== 'pattern') return; Object.assign(S.skOp.opt, ch); renderSide(); previewPattern(); }, okPattern);
   if (S.skOp?.kind === 'offset') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Смещение'), field('Расстояние', 'opOffset', o.offsetD, (v) => { o.offsetD = v; previewOffset(); }),
@@ -9136,5 +9176,5 @@ try { const bc = new BroadcastChannel('rezets-cad'); const me = Math.random().to
   bc.onmessage = (e) => { if (e.data?.from === me) return; if (e.data?.t === 'hello') bc.postMessage({ t: 'here', from: me }); if (!warned) { warned = true; toast('Резец открыт ещё в одной вкладке. Правки в двух вкладках перезапишут друг друга: работайте в одной, другую закройте', 'warn'); } };
   bc.postMessage({ t: 'hello', from: me }); } catch { /* no BroadcastChannel */ }
 window.__rezetsSP = () => schedulePreview();
-window.__rezets = { S, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
+window.__rezets = { S, okPattern, cmdSkPattern, okMirror, dimGeometryOf: dimGeometry, spanOfF: (f) => spanOf.get(f), genFrame, tieFace, repairFeatureIds, mergeProject, look: (d, u) => setView(new THREE.Vector3(...d), new THREE.Vector3(...u)), hashStr, docToStore, addImport, storedGeo, unpackGeo, packGeo, rinfo: () => ({ ...renderer.info.memory, programs: renderer.info.programs?.length, lineMats: lineMats.length }), makePolygon, rebuildPolygon, toast, renderSide, renameDoc, cmdInsert, depthHandle, ASM_ORIGIN, cmdMoveComp, applyMoveComp, materialize, drwPrint, docMenuItems, addMatePick, stdPlaneRef, updatePattern, deleteSelection, asmDeleteComp, deleteDoc, pickEdge, renameFeature, renderTree, featureEdges, splitPinches, profileLoops, selectedRegionIds, sharedEdges, ADDITION, SUBTRACTION, cmdMirror, pick, mouseToSketch, collapseZeroLines, upgradeFillets, eliminate, jacobian, buildSystem, solveSystem, residual, badEdges, watertight, scaleImport, importSize, cmdSketch, autoFlipDir, makePattern, updatePattern, cmdSkPattern, parseStl, stlFaces, importStlFile, mechRefs, mateOptions, applyOffset, setEllipseAxis, convertFace, toggleCompHidden, asmGroup, switchFeatureSketch, setRadii, sketchRegionsOf: (f) => sketchRegions(f), filletCurves, measure, initSigns, sketchOnPlane, openPM, followSketchRefs, vertNormals, reattachRefs, detachFromModel, snapToPoint, cmdStepBody, axialMid, manifoldOn: () => !!MF, mfHeap: () => MF && MF.HEAPU8?.length, mfTris: () => mfTris, manifoldErr: () => MF_ERR, zipFiles, stlBinary, originCount: () => originGroup.children.length, interferencePairs, mayOverlap, csgIntersectAsync, solidPart, itemBvh, splitBodies, stlText, refPlane, partPickAt, faceCreator, solidSteps, deleteFeature, moveFeature, editFeature, camUp: () => camera.up.toArray(), showFeatureFaces, setRollback, commitSketch, dragFollow, nullSpace, asmSystem, jacobian, camInfo: () => [...camera.position.toArray(), ...controls.target.toArray(), camera.zoom], closeCracks, castRay: (o, d) => new THREE.Raycaster(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize()).intersectObject(bodyMeshObj), makeDim, explainFree, groups, INTERSECTION, cmdInterference, explainConflict, editMate, reverseMate, editInContext, ctxGroup, relationOptions, asmEdgePick, asmPick, cmdEdgeFeature, edgeTool, applyEdgeFeature, edgeTopology, measureResult, bodyTopo, modelRefs, materialize, cmdMeasure, featureEdges, boolean, buildTool, computeBody, rebuild, tryAddConstraint, solveSketch, analyzeSketch, buildRegions, profileLoops, applyRelation, newSketchData, gp, ge, sampleDoc, loadDoc, startSketch, exitSketch, cmdFeature, okPM, PLANES, setTool, toWorld, toScreen, featById, SRV, serverSave, openProjects, CLOUD, cloudSave, cloudInit, cloudLoadProject, docToStore, partContext, bodyColors, layoutDrawing, drawingSvg, projectView, drawingSources, drwRefresh, newDrawing, cmdExplode, autoExplode, displayT, toggleSection, applySection, curvePts, finishSpline, applyVars, varValues, evalWith, evalExpr, cmdVars, sweepGeometry, loftGeometry, cmdSweep, cmdLoft, allComps, cmdCompPattern, okCompPattern, massProps, asmMass, bomRows, cmdBom, asmInterference, cmdInterference, applyShell, innerOffsetBody, holeTool, cmdHole, refPlane, cmdPattern, patternMatrices, cmdPlane, trimAt, filletCorner, applyOffset, planOffset, mirrorEntities, makeSlot, makePolygon, cutsOn, addDoc, switchDoc, activeEntry, docEntry, importStepFile, geoVolume, importGeometry, docInfo, asmInsert, cmdMate, previewMate, okMate, asmAnalyze, asmSolve, tryAddMate, poseOf, worldEnt, mateResiduals, newAsm, asmRefresh, projectToJSON, projectFromJSON, openProject, undo, redo };
 </script>
