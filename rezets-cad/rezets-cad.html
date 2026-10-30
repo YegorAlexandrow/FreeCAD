@@ -7693,7 +7693,7 @@ function renderAsmTree() {
     const na = compOf(asm, m.a.comp)?.name, nb = compOf(asm, m.b.comp)?.name;
     const bad = an?.redundant.has(m.id) || m.broken;
     const r = h('div', { class: 'row' + (m.suppressed ? ' off' : '') + (bad ? ' err' : '') + (S.mateSel === m.id ? ' sel' : '') + (S.asmSel && (m.a.comp === S.asmSel || m.b.comp === S.asmSel) ? ' of-sel' : ''), tabindex: '0', role: 'treeitem', title: m.broken ? `${m.name}: ${m.broken}. Отредактируйте сопряжение и выберите элементы заново` : an?.redundant.has(m.id) ? `${m.name}: не выполняется, расхождение ${fmt(an.miss?.get(m.id) || 0, 3)}. Другие сопряжения не дают его выполнить: погасите или измените одно из них` : `${m.name}: ${na}, ${nb}` }, h('b', { style: 'width:16px;text-align:center' }, m.broken ? '!' : MATE_GLYPH[m.type]), h('span', { class: 'nm' }, `${m.name} (${na}, ${nb})`), m.v != null ? h('span', { class: 'meta' }, fmt(m.v) + (m.type === 'angle' ? '°' : ' мм')) : null);
-    r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ['Переименовать', () => { S.mateSel = m.id; S.asmSel = null; asmRefresh(); renameFeature(m, () => asmRefresh()); }], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); asmRefresh(true); pushUndo(); }]]); };
+    r.oncontextmenu = (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, [['Редактировать', () => editMate(m)], ['Переименовать', () => { S.mateSel = m.id; S.asmSel = null; asmRefresh(); renameFeature(m, () => asmRefresh()); }], ...(canReverse(m.a, m.b, m.type) ? [['Реверс', () => reverseMate(m)]] : []), [m.suppressed ? 'Высветить' : 'Погасить', () => { m.suppressed = !m.suppressed; asmSolve(asm); asmRefresh(true); pushUndo(); }], ['Удалить', () => { asm.mates = asm.mates.filter((x) => x !== m); if (S.mateSel === m.id) S.mateSel = null; asmSolve(asm); asmRefresh(true); pushUndo(); toast(`Удалено: ${m.name}`, 'info', [{ label: 'Отменить', act: () => undo() }]); }]]); };
     r.ondblclick = (e) => (e.target.classList.contains('meta') ? editMateValue(m, r) : editMate(m));
     r.onclick = () => { S.mateSel = S.mateSel === m.id ? null : m.id; if (S.mateSel) S.asmSel = null; asmRefresh(); drawMatePicks(); };
     r.onmouseenter = () => { S.mateHover = m.id; drawMatePicks(); }; r.onmouseleave = () => { S.mateHover = null; drawMatePicks(); };
@@ -9476,10 +9476,12 @@ window.addEventListener('keydown', (e) => {
   if (S.mode === 'asm') {
     if (k === 'f') return fitAnimated();
     if (k === 'i') return cmdInsert();
-    if (k === 'm') return S.pm?.kind === 'mate' ? closePM() : cmdMate();
+    // M again inside the mate panel used to close it and drop the picks (E18): the panel stays, Esc closes it.
+    if (k === 'm') { if (S.pm?.kind === 'mate') { setHint('Сопряжение уже открыто: Enter применяет, Esc закрывает'); return; } if (!S.pm) cmdMate(); return; }
+    const del = (e.key === 'Delete' || e.key === 'Backspace') && !S.pm;
     // Delete removes what was picked last: a mate selected in the tree, not the component picked before it.
-    if (e.key === 'Delete' && S.mateSel) { const asm = S.doc; const m = asm.mates.find((x) => x.id === S.mateSel); if (m) { asm.mates = asm.mates.filter((x) => x !== m); S.mateSel = null; asmSolve(asm); asmRefresh(true); pushUndo(); toast(`Удалено: ${m.name}`, 'info'); } return; }
-    if (e.key === 'Delete' && S.asmSel) { const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) asmDeleteComp(c); }
+    if (del && S.mateSel) { e.preventDefault(); const asm = S.doc; const m = asm.mates.find((x) => x.id === S.mateSel); if (m) { asm.mates = asm.mates.filter((x) => x !== m); S.mateSel = null; asmSolve(asm); asmRefresh(true); pushUndo(); toast(`Удалено: ${m.name}`, 'info', [{ label: 'Отменить', act: () => undo() }]); } return; }
+    if (del && S.asmSel) { e.preventDefault(); const c = S.doc.comps.find((x) => x.id === S.asmSel); if (c) asmDeleteComp(c); }
     return;
   }
   if (S.mode === 'import') { if (k === 'f') return fitAnimated(); if (k === 'm') return S.measure ? closeMeasure() : cmdMeasure(); return; }
