@@ -3226,6 +3226,12 @@ canvas.addEventListener('pointerleave', () => { $('hoverTip').hidden = true; });
 // A double tap on a touch screen fits the model, like a double middle click.
 let tapAt = null; canvas.addEventListener('pointerup', (ev) => { if (ev.pointerType !== 'touch') return; const t = performance.now(); if (tapAt && t - tapAt.t < 320 && Math.hypot(ev.clientX - tapAt.x, ev.clientY - tapAt.y) < 24 && !S.editing) { fitAnimated(); tapAt = null; } else tapAt = { t, x: ev.clientX, y: ev.clientY }; });
 let midClickAt = 0; canvas.addEventListener('pointerdown', (ev) => { if (ev.button !== 1) return; const t = performance.now(); if (t - midClickAt < 400) { fitAnimated(); midClickAt = 0; } else midClickAt = t; });
+// A middle click on the model (no drag) makes the point under it the centre the view turns about (P0-46). The view does
+// not move: the camera shifts with its target.
+{ let md = null; canvas.addEventListener('pointerdown', (ev) => { if (ev.button === 1) md = { x: ev.clientX, y: ev.clientY }; });
+  canvas.addEventListener('pointerup', (ev) => { if (ev.button !== 1 || !md) return; const moved = Math.hypot(ev.clientX - md.x, ev.clientY - md.y) > 3; md = null; if (moved) return;
+    const objs = []; scene.traverse((o) => { if (o.isMesh && o.visible && (o === bodyMeshObj || o.userData.comp || o.parent?.userData?.comp)) objs.push(o); }); if (!objs.length) return;
+    const hit = rayFromEvent(ev).intersectObjects(objs, false)[0]; if (!hit) return; const d = hit.point.clone().sub(controls.target); controls.target.add(d); camera.position.add(d); camera.updateMatrixWorld(); controls.update(); requestRender(); }); }
 canvas.addEventListener('pointerleave', () => { if (groups.hover.children.length) { groups.hover.clear(); requestRender(); } });
 function partClick(ev) {
   // The second click of a double click is not a request for the face behind (a double click opens the feature).
