@@ -3482,8 +3482,9 @@ function drawMove(m) {
   if (t === 'ellipse' && D.stage === 2) { const c = gp(sk, D.c), a = gp(sk, D.a); const ax = a.x - c.x, ay = a.y - c.y; const A = Math.hypot(ax, ay) || 1; const r = Math.max(1e-3, Math.abs((m.u - c.x) * -ay / A + (m.v - c.y) * ax / A)); D.r = r;
     const tmp = { pts: { c: c, a: a } }; const P = curvePts(tmp, { t: 'ellipse', c: 'c', p1: 'a', r }); D.preview = []; for (let i = 0; i + 1 < P.length; i++) D.preview.push([P[i].x, P[i].y, P[i + 1].x, P[i + 1].y]); D.glyph = null; D.guides = []; }
   if (t === 'polygon' && D.stage === 1) { const c = gp(sk, D.c); const n = S.toolOpt.polySides; const r = Math.hypot(sn.u - c.x, sn.v - c.y); const a0 = Math.atan2(sn.v - c.y, sn.u - c.x); D.preview = []; for (let i = 0; i < n; i++) { const t0 = a0 + TAU * i / n, t1 = a0 + TAU * (i + 1) / n; D.preview.push([c.x + r * Math.cos(t0), c.y + r * Math.sin(t0), c.x + r * Math.cos(t1), c.y + r * Math.sin(t1)]); } }
-  if (t === 'rect' && D.stage === 1) { const a = D.a; D.preview = [[a.u, a.v, sn.u, a.v], [sn.u, a.v, sn.u, sn.v], [sn.u, sn.v, a.u, sn.v], [a.u, sn.v, a.u, a.v]]; }
-  if (t === 'circle' && D.stage === 1) { const c = gp(sk, D.c); D.preview = circleSegs(c.x, c.y, Math.hypot(sn.u - c.x, sn.v - c.y), 0, 2 * Math.PI); }
+  if (t === 'rect' && D.stage === 1) { const a = S.toolOpt.rectMid ? { u: 2 * D.a.u - sn.u, v: 2 * D.a.v - sn.v } : D.a; D.preview = [[a.u, a.v, sn.u, a.v], [sn.u, a.v, sn.u, sn.v], [sn.u, sn.v, a.u, sn.v], [a.u, sn.v, a.u, a.v]]; }
+  if (t === 'circle' && S.toolOpt.circ3 && D.c3?.length) { const ps = [...D.c3.map((id) => gp(sk, id)), { x: sn.u, y: sn.v }]; const cc = ps.length === 3 && circle3(ps); D.preview = cc ? circleSegs(cc.x, cc.y, cc.r, 0, 2 * Math.PI) : [[ps[0].x, ps[0].y, sn.u, sn.v]]; }
+  if (t === 'circle' && D.stage === 1 && !S.toolOpt.circ3) { const c = gp(sk, D.c); D.preview = circleSegs(c.x, c.y, Math.hypot(sn.u - c.x, sn.v - c.y), 0, 2 * Math.PI); }
   if (t === 'arc' && D.stage === 1) { const c = gp(sk, D.c); D.preview = [[c.x, c.y, sn.u, sn.v]]; }
   if (t === 'arc' && D.stage === 'tan') {
     const L = sk.ents[D.tan], a = gp(sk, L.p1), P = gp(sk, D.start); const tl = Math.hypot(P.x - a.x, P.y - a.y) || 1; const nx = -(P.y - a.y) / tl, ny = (P.x - a.x) / tl;
@@ -3523,7 +3524,7 @@ function drawClick(m) {
     if (D.stage === 0) { D.start = snapToPoint(sk, sn, pending); D.first = D.start; D.newPts = [D.start]; D.chain = [D.start]; D.pending = pending; addRelations(sk, pending); D.stage = 1; refreshSketch(true); return; }
     // A second click within a few pixels (a double click, a shaky hand) makes no sliver of a line.
     const a = gp(sk, D.start); const sa = sScreen(a.x, a.y), sb = sScreen(sn.u, sn.v); if (Math.hypot(sn.u - a.x, sn.v - a.y) < 1e-6 || (sn.kind !== 'pt' && Math.hypot(sa.x - sb.x, sa.y - sb.y) < 4)) return;
-    const end = snapToPoint(sk, sn, pending); const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: D.start, p2: end };
+    const end = snapToPoint(sk, sn, pending); const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: D.start, p2: end, ...(S.toolOpt.lineConstr ? { constr: true } : {}) };
     if (D.hv && !sn.kind) pending.push({ t: D.hv, refs: [id] });
     else if (D.infer && !sn.kind && sk.ents[D.infer.ref]) pending.push({ t: D.infer.t, refs: D.infer.t === 'tangent' ? [id, D.infer.ref] : [D.infer.ref, id] });
     // Ended on a point that lies level with the start (or straight above it), the line is horizontal (vertical) as
@@ -3539,6 +3540,13 @@ function drawClick(m) {
   if (t === 'rect') {
     if (D.stage === 0) { D.a = { u: sn.u, v: sn.v, sn }; D.stage = 1; setHint(); return; }
     if (Math.abs(sn.u - D.a.u) < 1e-6 || Math.abs(sn.v - D.a.v) < 1e-6) return;
+    if (S.toolOpt.rectMid) { // from the centre: the corner clicked and the one opposite, the centre held at the middle of a diagonal
+      const c = snapToPoint(sk, D.a.sn, pending); const p3 = snapToPoint(sk, sn, pending); const C = gp(sk, c), Q = gp(sk, p3); const p1 = nid(sk); sk.pts[p1] = { id: p1, x: 2 * C.x - Q.x, y: 2 * C.y - Q.y };
+      const p2 = nid(sk); sk.pts[p2] = { id: p2, x: Q.x, y: 2 * C.y - Q.y }; const p4 = nid(sk); sk.pts[p4] = { id: p4, x: 2 * C.x - Q.x, y: Q.y };
+      const L = [[p1, p2], [p2, p3], [p3, p4], [p4, p1]].map(([a, b]) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b }; return id; });
+      const dg = [[p1, p3], [p2, p4]].map(([a, b]) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b, constr: true }; return id; });
+      pending.push({ t: 'horizontal', refs: [L[0]] }, { t: 'horizontal', refs: [L[2]] }, { t: 'vertical', refs: [L[1]] }, { t: 'vertical', refs: [L[3]] }, { t: 'midpoint', refs: [c, dg[0]] }, { t: 'midpoint', refs: [c, dg[1]] });
+      addRelations(sk, pending); S.draw = null; commitSketch(); return; }
     const p1 = snapToPoint(sk, D.a.sn, pending); const p3 = snapToPoint(sk, sn, pending);
     const p2 = nid(sk); sk.pts[p2] = { id: p2, x: gp(sk, p3).x, y: gp(sk, p1).y }; const p4 = nid(sk); sk.pts[p4] = { id: p4, x: gp(sk, p1).x, y: gp(sk, p3).y };
     const L = [[p1, p2], [p2, p3], [p3, p4], [p4, p1]].map(([a, b]) => { const id = nid(sk); sk.ents[id] = { id, t: 'line', p1: a, p2: b }; return id; });
@@ -3573,6 +3581,14 @@ function drawClick(m) {
     // A vertex put on an existing point stays on it, like the end of a line.
     if (sn.kind === 'pt' || sn.kind === 'ref') { const q = snapToPoint(sk, sn, pending); addRelations(sk, [...pending, { t: 'coincident', refs: [P[0], q] }]); }
     S.draw = null; commitSketch(); return;
+  }
+  if (t === 'circle' && S.toolOpt.circ3) {
+    // Three points on it: each click a point of the circle (one on existing geometry holds on to it).
+    D.c3 = D.c3 || []; const ps = D.c3.map((id) => gp(sk, id)); if (ps.some((q) => Math.hypot(q.x - sn.u, q.y - sn.v) < 1e-6)) return;
+    if (ps.length < 2) { const id = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.c3.push(id); D.newPts = [...D.c3]; refreshSketch(true); return; }
+    const cc = circle3([...ps, { x: sn.u, y: sn.v }]); if (!cc) { toast('Три точки на одной прямой: окружность через них не проходит', 'warn'); return; }
+    const p3 = snapToPoint(sk, sn, pending); const cid = nid(sk); sk.pts[cid] = { id: cid, x: cc.x, y: cc.y }; const id = nid(sk); sk.ents[id] = { id, t: 'circle', c: cid, r: cc.r };
+    for (const q of [...D.c3, p3]) pending.push({ t: 'oncircle', refs: [q, id] }); addRelations(sk, pending); S.draw = null; commitSketch(); return;
   }
   if (t === 'circle') {
     if (D.stage === 0) { D.c = snapToPoint(sk, sn, pending); addRelations(sk, pending); D.newPts = [D.c]; D.stage = 1; refreshSketch(true); return; }
@@ -4459,11 +4475,17 @@ function toolOptionsPanel() {
     if (o.chamfer) return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Фаска'), seg([['f', 'Скругление'], ['c', 'Фаска']], 'c', (v) => { o.chamfer = v === 'c'; renderSide(); setHint(); }), field('Расстояние', 'opFillet', o.filletR, (v) => { o.filletR = v; }), h('div', { class: 'note' }, 'Щёлкайте углы: в каждом одинаковое расстояние по обеим линиям'));
     return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Скругление'), seg([['f', 'Скругление'], ['c', 'Фаска']], 'f', (v) => { o.chamfer = v === 'c'; renderSide(); setHint(); }), field('Радиус', 'opFillet', o.filletR, (v) => { o.filletR = v; const m = made(); if (m.length) setRadii(sk, m, v); }), h('div', { class: 'note' }, made().length ? `Радиус меняется и у уже поставленных: ${made().length}. Щёлкайте углы или места, где сходятся две окружности` : 'Щёлкайте углы, где сходятся две линии, или места, где сходятся две окружности'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.keepCorner, onchange: (e) => { o.keepCorner = e.target.checked; } }), 'Сохранять угловую точку')); }
   if (S.tool === 'slot') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Паз'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.slotDims, onchange: (e) => { o.slotDims = e.target.checked; } }), 'Проставить размеры'));
-  if (S.tool === 'rect') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Прямоугольник'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.rectDiag, onchange: (e) => { o.rectDiag = e.target.checked; } }), 'Вспомогательные диагонали'));
+  // S0-39: SolidWorks' centre rectangle, three-point circle and centreline, as modes of the tools they belong to.
+  if (S.tool === 'circle') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Окружность'), seg([['c', 'Центр и радиус'], ['3', 'Три точки']], o.circ3 ? '3' : 'c', (v) => { o.circ3 = v === '3'; S.draw = null; renderSide(); setHint(); }));
+  if (S.tool === 'line') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Линия'), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.lineConstr, onchange: (e) => { o.lineConstr = e.target.checked; } }), 'Осевая (вспомогательная)'));
+  if (S.tool === 'rect') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Прямоугольник'), seg([['c', 'По углам'], ['m', 'От центра']], o.rectMid ? 'm' : 'c', (v) => { o.rectMid = v === 'm'; S.draw = null; renderSide(); setHint(); }), h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: !!o.rectDiag, onchange: (e) => { o.rectDiag = e.target.checked; } }), 'Вспомогательные диагонали'));
   if (S.tool === 'polygon') return h('div', { class: 'grp' }, h('div', { class: 'lbl' }, 'Многоугольник'), field('Сторон', 'opSides', o.polySides, (v) => { o.polySides = v; }, '', true), seg([['in', 'Вписанный'], ['out', 'Описанный']], o.polyMode || 'in', (v) => { o.polyMode = v; renderSide(); }));
   return null;
 }
 // Straight slot: two centres, then the width. Built from two arcs and two lines with tangency.
+// The circle through three points (null when they are on one line).
+function circle3([a, b, c]) { const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y)); if (Math.abs(d) < 1e-9) return null; const A = a.x * a.x + a.y * a.y, B = b.x * b.x + b.y * b.y, C = c.x * c.x + c.y * c.y;
+  const x = (A * (b.y - c.y) + B * (c.y - a.y) + C * (a.y - b.y)) / d, y = (A * (c.x - b.x) + B * (a.x - c.x) + C * (b.x - a.x)) / d; return { x, y, r: Math.hypot(a.x - x, a.y - y) }; }
 function makeSlot(sk, c1, c2, r) {
   const P1 = gp(sk, c1), P2 = gp(sk, c2); const l = Math.hypot(P2.x - P1.x, P2.y - P1.y); const ux = (P2.x - P1.x) / l, uy = (P2.y - P1.y) / l; const nx = -uy, ny = ux;
   const mk = (x, y) => { const id = nid(sk); sk.pts[id] = { id, x, y }; return id; };
