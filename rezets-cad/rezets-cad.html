@@ -1710,12 +1710,23 @@ function restoreHome(sk) { const prev = lastOut.get(sk); if (!sk.home || (prev &
 function followSketchRefs(f, body, cyls, features = S.doc.features) {
   S.dangling.delete(f.id); const all = Object.values(f.sk.pts).filter((p) => p.fixed && p.free && !p.mref?.sk); if (!all.length) return;
   const srcLost = []; let srcMoved = false;
-  for (const p of all) { if (!p.mref?.from) continue; const r = resolveSource(f, p, features, body); if (!r) { srcLost.push(p.id); continue; }
-    if (Math.abs(r.x - p.x) > 1e-9 || Math.abs(r.y - p.y) > 1e-9) { p.x = r.x; p.y = r.y; srcMoved = true; } p.mref.w = r.w.toArray().map((v) => +v.toFixed(6)); }
+  const world = (p) => toWorld(f.plane, p.x, p.y); let near = null; const nearVertex = (w) => { if (!near) near = uniqVerts(body); return near.some((v) => v.distanceTo(w) < SRC_TOL); };
+  const wkey = (w) => w.toArray().map((v) => v.toFixed(3)).join(',');
+  const snapTo = (p, r) => { if (Math.abs(r.x - p.x) > 1e-12 || Math.abs(r.y - p.y) > 1e-12) { p.x = r.x; p.y = r.y; srcMoved = true; } p.mref.w = r.w.toArray().map((v) => +v.toFixed(6)); };
+  // A source can go while its corner stays: the point of the earlier sketch redrawn, merged into another (Деталь 12,
+  // Эскиз1). A point still sitting on a corner of the model is then tied again, to what makes that corner now.
+  const retie = (p) => { if (p.mref.circle || !p.mref.ns?.length || !nearVertex(world(p))) return null; const src = findSource(f, p, features, body); if (!src) return null; const r = resolveSource(f, { ...p, mref: { ...p.mref, from: src } }, features, body); if (!r) return null; p.mref.from = src; delete p.mref.a0; delete p.mref.nosrc; return r; };
+  for (const p of all) { if (!p.mref?.from) continue; const r = resolveSource(f, p, features, body) || retie(p); if (!r) { srcLost.push(p.id); continue; } snapTo(p, r); }
+  // Every point on a corner gets its source on its own, whatever the other points of the sketch: tied only when all of
+  // them were in place, one point off kept the whole sketch without, and a change of 10.8 mm lost them all (Эскиз14).
+  // A point no source was found for is tried again once it sits somewhere else.
+  for (const p of all) { if (!p.mref || p.mref.from || p.mref.circle || !p.mref.ns?.length || p.lost) continue; const w = world(p); if (p.mref.nosrc === wkey(w) || !nearVertex(w)) continue; if (!p.mref.a0) p.mref.a0 = w.toArray().map((v) => +v.toFixed(6));
+    // Straight onto the exact point of its source (the mesh keeps corners to float precision, 46.259998 for 46.26).
+    const r = retie(p); if (r) snapTo(p, r); else p.mref.nosrc = wkey(w); }
   const flagSrc = () => { for (const p of all) if (p.mref?.from) { if (srcLost.includes(p.id)) p.lost = true; else delete p.lost; } if (srcLost.length) S.dangling.set(f.id, [...new Set([...(S.dangling.get(f.id) || []), ...srcLost.filter((id) => usedPt(f.sk, id))])]); };
   const pts = all.filter((p) => !p.mref?.from); if (!pts.length) { if (srcMoved) solveSketch(f.sk); flagSrc(); return; }
   const o = V3(f.plane.o), X = V3(f.plane.x), Y = V3(f.plane.y), N = V3(f.plane.n);
-  const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3; const world = (p) => o.clone().addScaledVector(X, p.x).addScaledVector(Y, p.y);
+  const on = (v) => Math.abs(v.clone().sub(o).dot(N)) < 1e-3;
   // Where each point on a corner is now, for what reads it (a point put back home leaves no stale place behind).
   const seen = () => { for (const p of pts) if (p.mref && !p.mref.circle && !p.lost && !p.mref.from) p.mref.w = world(p).toArray().map((v) => +v.toFixed(6)); };
   // Nothing moved: each point is still on a vertex of the body, or on the axis of a hole made by the same operation
@@ -1726,13 +1737,6 @@ function followSketchRefs(f, body, cyls, features = S.doc.features) {
     const pos = body.getAttribute('position'); const q = 1e5; const key = (x, y, z) => Math.round(x * q) + ',' + Math.round(y * q) + ',' + Math.round(z * q);
     let vset = null; const onVertex = (w) => { if (!vset) { vset = new Set(); for (let i = 0; i < pos.count; i++) vset.add(key(pos.getX(i), pos.getY(i), pos.getZ(i))); } return vset.has(key(w.x, w.y, w.z)); };
     const onHole = (p, w) => (cyls || []).some((c) => (!p.mref.src || c.src === p.mref.src) && (p.mref.r == null || Math.abs(c.r - p.mref.r) < 1e-6) && w.clone().sub(c.p).cross(V3(c.dir).normalize()).length() < 1e-6);
-    // A point on its corner that has no source yet gets one now, and the place it is tied to (its anchor) is
-    // remembered: each point on its own (one point off its corner by 0.0002 kept a whole sketch of ARM2 without).
-    let near = null; const nearVertex = (w) => { if (!near) near = uniqVerts(body); return near.some((v) => v.distanceTo(w) < SRC_TOL); };
-    for (const p of pts) { if (p.mref.circle || !p.mref.ns?.length || p.mref.nosrc || p.mref.from || p.lost || !nearVertex(world(p))) continue; if (!p.mref.a0) p.mref.a0 = world(p).toArray().map((v) => +v.toFixed(6));
-      const src = findSource(f, p, features, body); if (src) { p.mref.from = src; delete p.mref.a0;
-        // Straight onto the exact point of its source (the mesh keeps corners to float precision, 46.259998 for 46.26).
-        const r = resolveSource(f, p, features, body); if (r && (Math.abs(r.x - p.x) > 1e-12 || Math.abs(r.y - p.y) > 1e-12)) { p.x = r.x; p.y = r.y; p.mref.w = r.w.toArray().map((v) => +v.toFixed(6)); srcMoved = true; } } else p.mref.nosrc = 1; }
     if (pts.every((p) => { const w = world(p); return p.mref.from || (p.mref.circle || !p.mref.ns?.length ? onHole(p, w) : onVertex(w)); })) {
       if (srcMoved) solveSketch(f.sk); seen(); flagSrc(); return;
     }
